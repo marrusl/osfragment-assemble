@@ -1169,6 +1169,9 @@ pub struct LoadedFragment {
     pub resolved_digest: Option<String>,
     /// Index into the original manifest.fragments vec, preserved through sorting.
     pub manifest_index: usize,
+    /// Cached .repo file contents for dedup comparison, keyed by filename.
+    /// Populated during loading from either local filesystem or layer extraction.
+    pub repo_file_contents: std::collections::HashMap<String, String>,
 }
 
 #[cfg(test)]
@@ -1259,6 +1262,9 @@ pub struct LoadedFragment {
     pub resolved_digest: Option<String>,
     /// Index into the original manifest.fragments vec, preserved through sorting.
     pub manifest_index: usize,
+    /// Cached .repo file contents for dedup comparison, keyed by filename.
+    /// Populated during loading from either local filesystem or layer extraction.
+    pub repo_file_contents: std::collections::HashMap<String, String>,
 }
 
 pub fn split_tree_paths(paths: &[PathBuf]) -> (Vec<PathBuf>, Vec<PathBuf>) {
@@ -1324,6 +1330,20 @@ pub fn load_local_fragment(source: &FragmentSource) -> Result<LoadedFragment> {
 
     validate_phase_consistency(&fragment, &all_paths)?;
 
+    // Read .repo file contents for dedup comparison
+    let mut repo_file_contents = std::collections::HashMap::new();
+    let repo_dir = dir.join("tree/etc/yum.repos.d");
+    if repo_dir.exists() {
+        for entry in std::fs::read_dir(&repo_dir)? {
+            let entry = entry?;
+            if entry.path().is_file() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                let content = std::fs::read_to_string(entry.path())?;
+                repo_file_contents.insert(name, content);
+            }
+        }
+    }
+
     Ok(LoadedFragment {
         fragment,
         tree_paths: all_paths,
@@ -1331,6 +1351,7 @@ pub fn load_local_fragment(source: &FragmentSource) -> Result<LoadedFragment> {
         source: source.clone(),
         resolved_digest: None,
         manifest_index: 0, // set by caller
+        repo_file_contents,
     })
 }
 
@@ -1725,6 +1746,9 @@ pub fn load_registry_fragment(image_ref: &str) -> Result<LoadedFragment> {
 
     validate_phase_consistency(&fragment, &relative_paths)?;
 
+    // Extract .repo file contents from the layer for dedup comparison
+    let repo_file_contents = extract_repo_file_contents_from_bytes(&layer_bytes)?;
+
     Ok(LoadedFragment {
         fragment,
         tree_paths: relative_paths,
@@ -1734,7 +1758,32 @@ pub fn load_registry_fragment(image_ref: &str) -> Result<LoadedFragment> {
         },
         resolved_digest: Some(digest),
         manifest_index: 0, // set by caller
+        repo_file_contents,
     })
+}
+
+fn extract_repo_file_contents_from_bytes(
+    compressed: &[u8],
+) -> Result<std::collections::HashMap<String, String>> {
+    let decoder = GzDecoder::new(compressed);
+    let mut archive = tar::Archive::new(decoder);
+    let mut contents = std::collections::HashMap::new();
+
+    for entry_result in archive.entries()? {
+        let mut entry = entry_result?;
+        let path = entry.path()?;
+        let path_str = path.to_string_lossy();
+
+        if path_str.contains("yum.repos.d/") && path_str.ends_with(".repo") {
+            if let Some(filename) = path.file_name() {
+                let mut content = String::new();
+                use std::io::Read;
+                entry.read_to_string(&mut content)?;
+                contents.insert(filename.to_string_lossy().to_string(), content);
+            }
+        }
+    }
+    Ok(contents)
 }
 
 /// Metadata-only registry load for inspect and list.
@@ -1761,6 +1810,7 @@ pub fn load_registry_fragment_metadata_only(image_ref: &str) -> Result<LoadedFra
             },
             resolved_digest: Some(digest),
             manifest_index: 0, // set by caller
+            repo_file_contents: std::collections::HashMap::new(),
         });
     }
 
@@ -1778,8 +1828,15 @@ fn extract_tree_paths_from_bytes(compressed: &[u8]) -> Result<Vec<PathBuf>> {
         let path = entry.path()?;
         let path_str = path.to_string_lossy();
 
+        // Fail-closed: same rules as TOML extraction
         if path_str.contains("..") {
             bail!("path traversal detected in fragment layer: {}", path_str);
+        }
+        if path_str.starts_with('/') && !path_str.starts_with("/fragment/") {
+            bail!(
+                "absolute path outside /fragment/ rejected in fragment layer: {}",
+                path_str
+            );
         }
         if entry.header().entry_type().is_symlink()
             || entry.header().entry_type().is_hard_link()
@@ -1895,6 +1952,7 @@ mod tests {
             },
             resolved_digest: Some(format!("sha256:{}", digest)),
             manifest_index: 0,
+            repo_file_contents: std::collections::HashMap::new(),
         };
         let manifest_frag = ManifestFragment {
             image: format!("quay.io/test/{}:10", name),
@@ -1925,6 +1983,7 @@ mod tests {
             },
             resolved_digest: Some(format!("sha256:{}", digest)),
             manifest_index: 0,
+            repo_file_contents: std::collections::HashMap::new(),
         };
         let manifest_frag = ManifestFragment {
             image: format!("quay.io/test/{}:2.1", name),
@@ -2506,9 +2565,11 @@ pub fn run_inspect(target: &str) -> Result<()> {
 
         (frag, paths, script_paths_exist)
     } else {
-        // Treat as registry image reference — use metadata-only path
-        // to skip layer pull when annotations are present
-        let loaded = crate::loader::load_registry_fragment_metadata_only(target)?;
+        // Inspect requires tree/ contents and scripts — always do a
+        // full load (metadata-only path skips these). The annotation
+        // fast path is used inside load_registry_fragment for the
+        // Fragment struct, but the layer is still pulled for tree_paths.
+        let loaded = crate::loader::load_registry_fragment(target)?;
         let display_paths: Vec<String> = loaded
             .tree_paths
             .iter()
@@ -2732,7 +2793,7 @@ fn main() -> Result<()> {
                 .with_context(|| format!("reading manifest {}", manifest.display()))?;
             let manifest_data = parse_manifest(&content)?;
 
-            let fragments = load_all_fragments(&manifest_data, local)?;
+            let (fragments, _temp_images) = load_all_fragments(&manifest_data, local)?;
             run_list(&manifest_data, &fragments)?;
         }
         None => {
@@ -2741,7 +2802,7 @@ fn main() -> Result<()> {
                 .with_context(|| format!("reading manifest {}", cli.manifest.display()))?;
             let manifest = parse_manifest(&content)?;
 
-            let mut fragments = load_all_fragments(&manifest, cli.local)?;
+            let (mut fragments, temp_images) = load_all_fragments(&manifest, cli.local)?;
             let dedup = validate_composition(&manifest, &fragments)?;
 
             // Always resolve base image digest — the base is a registry
@@ -2773,6 +2834,13 @@ fn main() -> Result<()> {
                     anyhow::bail!("podman build failed");
                 }
             }
+
+            // Clean up prebuilt temp images
+            for tag in &temp_images {
+                let _ = std::process::Command::new("podman")
+                    .args(["rmi", tag])
+                    .output();
+            }
         }
     }
 
@@ -2782,7 +2850,7 @@ fn main() -> Result<()> {
 fn load_all_fragments(
     manifest: &bootc_assemble::manifest::Manifest,
     local: bool,
-) -> Result<Vec<bootc_assemble::loader::LoadedFragment>> {
+) -> Result<(Vec<bootc_assemble::loader::LoadedFragment>, Vec<String>)> {
     let mut fragments = Vec::new();
     let mut temp_images: Vec<String> = Vec::new();
 
@@ -2799,13 +2867,19 @@ fn load_all_fragments(
 
         let mut loaded = match &source {
             FragmentSource::Directory { path } => {
-                // Prebuild to temp local image, then load as registry
+                // Prebuild to temp local image, resolve its digest,
+                // then load metadata from the local directory
                 let frag_toml = std::fs::read_to_string(path.join("fragment.toml"))?;
                 let frag_meta = bootc_assemble::fragment::parse_fragment_toml(&frag_toml)?;
                 let tag = prebuild_local_fragment(path, &frag_meta.name)?;
                 temp_images.push(tag.clone());
+                // Resolve digest of the prebuilt local image
+                let local_digest = resolve_digest(&tag)
+                    .unwrap_or_else(|_| format!("sha256:local-{}", frag_meta.name));
+                let pinned_ref = format!("{}@{}", tag, local_digest);
                 let mut l = load_local_fragment(&source)?;
-                l.source = FragmentSource::Registry { image_ref: tag };
+                l.source = FragmentSource::Registry { image_ref: pinned_ref };
+                l.resolved_digest = Some(local_digest);
                 l
             }
             FragmentSource::Registry { image_ref } => {
@@ -2821,7 +2895,7 @@ fn load_all_fragments(
         a.fragment.phase.weight().cmp(&b.fragment.phase.weight())
             .then(a.manifest_index.cmp(&b.manifest_index))
     });
-    Ok(fragments)
+    Ok((fragments, temp_images))
 }
 ```
 
@@ -3010,6 +3084,7 @@ mod tests {
             },
             resolved_digest: None,
             manifest_index: 0,
+            repo_file_contents: std::collections::HashMap::new(),
         }
     }
 
@@ -3126,31 +3201,15 @@ pub fn check_repo_deduplication(fragments: &[LoadedFragment]) -> Result<Deduplic
 
     for f in fragments {
         for repo_id in &f.fragment.provides.repos {
-            // Hash all .repo file content for this fragment to produce
-            // a content fingerprint. Fragments with identical repo files
-            // for the same repo ID produce the same hash.
+            // Hash actual .repo file contents (populated during loading
+            // for both local and registry fragments).
             use std::hash::{Hash, Hasher};
             let mut hasher = std::collections::hash_map::DefaultHasher::new();
-            let mut repo_files: Vec<_> = f
-                .tree_paths
-                .iter()
-                .filter(|p| p.to_string_lossy().contains("yum.repos.d"))
-                .map(|p| p.to_string_lossy().to_string())
-                .collect();
-            repo_files.sort();
-
-            // For local fragments, read actual file content for hashing.
-            // For registry fragments, the tree_paths are extracted from
-            // the layer — use the path list itself as a content proxy
-            // since the layer content was already validated at load time.
-            for path in &repo_files {
-                path.hash(&mut hasher);
-                // Try to read the actual file if this is a local fragment
-                if let FragmentSource::Directory { path: dir } = &f.source {
-                    if let Ok(content) = std::fs::read_to_string(dir.join(path)) {
-                        content.hash(&mut hasher);
-                    }
-                }
+            let mut sorted_files: Vec<_> = f.repo_file_contents.iter().collect();
+            sorted_files.sort_by_key(|(name, _)| name.clone());
+            for (name, content) in &sorted_files {
+                name.hash(&mut hasher);
+                content.hash(&mut hasher);
             }
             let content_hash = hasher.finish();
 
