@@ -256,6 +256,26 @@ fn extract_repo_file_contents_from_bytes(
         let path = entry.path()?;
         let path_str = path.to_string_lossy().to_string();
 
+        // Fail-closed: reject traversal
+        if path_str.contains("..") {
+            bail!("path traversal detected in fragment layer: {}", path_str);
+        }
+        // Fail-closed: reject absolute paths outside /fragment/
+        if path_str.starts_with('/') && !path_str.starts_with("/fragment/") {
+            bail!(
+                "absolute path outside /fragment/ rejected in fragment layer: {}",
+                path_str
+            );
+        }
+        // Fail-closed: reject symlinks and hardlinks
+        let entry_type = entry.header().entry_type();
+        if entry_type.is_symlink() || entry_type.is_hard_link() {
+            bail!(
+                "symlink or hardlink rejected in fragment layer: {}",
+                path_str
+            );
+        }
+
         if path_str.contains("yum.repos.d/") && path_str.ends_with(".repo") {
             let filename = Path::new(&path_str)
                 .file_name()
@@ -357,7 +377,13 @@ pub fn load_registry_fragment(image_ref: &str) -> Result<LoadedFragment> {
     // has_configure_script, so the pull happens regardless. But the
     // Fragment is taken from annotations when available, skipping the
     // in-layer TOML parse.
-    let annotation_fragment = try_annotation_fast_path(image_ref).unwrap_or(None);
+    let annotation_fragment = match try_annotation_fast_path(image_ref) {
+        Ok(frag) => frag,
+        Err(e) => {
+            eprintln!("note: annotation fast path failed for {}, falling back to layer extraction: {}", image_ref, e);
+            None
+        }
+    };
 
     let tmp = tempfile::tempdir().context("creating temp dir")?;
     let oci_path = tmp.path().join("oci-layout");
