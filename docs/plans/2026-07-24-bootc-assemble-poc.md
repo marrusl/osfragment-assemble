@@ -2793,7 +2793,34 @@ fn main() -> Result<()> {
                 .with_context(|| format!("reading manifest {}", manifest.display()))?;
             let manifest_data = parse_manifest(&content)?;
 
-            let (fragments, _temp_images) = load_all_fragments(&manifest_data, local)?;
+            // List is metadata-only — read fragment.toml directly for
+            // dir: sources (no prebuild), use metadata-only for registry.
+            let mut fragments = Vec::new();
+            for (idx, mf) in manifest_data.fragments.iter().enumerate() {
+                let source = if local {
+                    FragmentSource::Directory {
+                        path: PathBuf::from(
+                            mf.image.strip_prefix("dir:").unwrap_or(&mf.image),
+                        ),
+                    }
+                } else {
+                    mf.resolve_source()
+                };
+                let mut loaded = match &source {
+                    FragmentSource::Directory { .. } => {
+                        load_local_fragment(&source)?
+                    }
+                    FragmentSource::Registry { image_ref } => {
+                        load_registry_fragment_metadata_only(image_ref)?
+                    }
+                };
+                loaded.manifest_index = idx;
+                fragments.push(loaded);
+            }
+            fragments.sort_by(|a, b| {
+                a.fragment.phase.weight().cmp(&b.fragment.phase.weight())
+                    .then(a.manifest_index.cmp(&b.manifest_index))
+            });
             run_list(&manifest_data, &fragments)?;
         }
         None => {
@@ -2806,13 +2833,10 @@ fn main() -> Result<()> {
             let dedup = validate_composition(&manifest, &fragments)?;
 
             // Always resolve base image digest — the base is a registry
-            // image even when fragments are local directories
-            let base_digest = resolve_digest(&manifest.base)
-                .map(Some)
-                .unwrap_or_else(|e| {
-                    eprintln!("warning: could not resolve base image digest: {}", e);
-                    None
-                });
+            // image even when fragments are local directories.
+            // Hard-fail if unreachable: an unpinned base violates the
+            // digest contract.
+            let base_digest = Some(resolve_digest(&manifest.base)?);
 
             let containerfile =
                 generate_containerfile(&manifest, &fragments, base_digest.as_deref(), &dedup)?;
@@ -2873,9 +2897,10 @@ fn load_all_fragments(
                 let frag_meta = bootc_assemble::fragment::parse_fragment_toml(&frag_toml)?;
                 let tag = prebuild_local_fragment(path, &frag_meta.name)?;
                 temp_images.push(tag.clone());
-                // Resolve digest of the prebuilt local image
+                // Resolve digest of the prebuilt local image — hard-fail
+                // if this doesn't produce a real digest
                 let local_digest = resolve_digest(&tag)
-                    .unwrap_or_else(|_| format!("sha256:local-{}", frag_meta.name));
+                    .with_context(|| format!("resolving digest for prebuilt fragment '{}'", frag_meta.name))?;
                 let pinned_ref = format!("{}@{}", tag, local_digest);
                 let mut l = load_local_fragment(&source)?;
                 l.source = FragmentSource::Registry { image_ref: pinned_ref };
