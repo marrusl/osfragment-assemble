@@ -1,0 +1,8 @@
+[grafana]
+name=Grafana OSS
+baseurl=https://rpm.grafana.com
+enabled=1
+gpgcheck=1
+gpgkey=https://rpm.grafana.com/gpg.key
+sslverify=1
+sslcacert=/etc/pki/tls/certs/ca-bundle.crt

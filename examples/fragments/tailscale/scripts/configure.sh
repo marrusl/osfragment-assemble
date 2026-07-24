@@ -1,0 +1,5 @@
+#!/bin/bash
+set -euo pipefail
+# Tailscale runs as a system service — preset handles enablement.
+# This script handles any post-install configuration that presets cannot.
+echo "Tailscale fragment: configuration complete"

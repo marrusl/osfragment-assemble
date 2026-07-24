@@ -1,0 +1,12 @@
+[fragment]
+name = "tailscale"
+version = "1.82.0"
+description = "Tailscale VPN client — repo, packages, and service enablement"
+vendor = "Tailscale Inc."
+phase = "config"
+
+[fragment.provides]
+repos = ["tailscale-stable"]
+
+[fragment.packages]
+available = ["tailscale"]

@@ -250,4 +250,26 @@ phase = "install"
     fn phase_weight_ordering() {
         assert!(FragmentPhase::Repos.weight() < FragmentPhase::Config.weight());
     }
+
+    #[test]
+    fn parse_all_example_fragments() {
+        let examples_dir = Path::new("examples/fragments");
+        if !examples_dir.exists() {
+            return; // skip if not in repo root
+        }
+        for entry in std::fs::read_dir(examples_dir).unwrap() {
+            let entry = entry.unwrap();
+            let toml_path = entry.path().join("fragment.toml");
+            if toml_path.exists() {
+                let content = std::fs::read_to_string(&toml_path).unwrap();
+                let result = parse_fragment_toml(&content);
+                assert!(
+                    result.is_ok(),
+                    "Failed to parse {}: {}",
+                    toml_path.display(),
+                    result.unwrap_err()
+                );
+            }
+        }
+    }
 }

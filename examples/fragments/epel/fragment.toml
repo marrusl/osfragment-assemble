@@ -1,0 +1,20 @@
+[fragment]
+name = "epel"
+version = "10"
+description = "Extra Packages for Enterprise Linux (EPEL) repository"
+vendor = "Fedora Project"
+phase = "repos"
+
+[fragment.provides]
+repos = ["epel"]
+
+[fragment.packages]
+available = [
+    "htop",
+    "tmux",
+    "jq",
+    "fzf",
+    "ripgrep",
+    "bat",
+    "fd-find",
+]

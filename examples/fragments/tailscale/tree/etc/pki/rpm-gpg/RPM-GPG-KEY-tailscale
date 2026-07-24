@@ -1,0 +1,5 @@
+-----BEGIN PGP PUBLIC KEY BLOCK-----
+Note: Tailscale uses gpgkey URL directly in repo file
+Key URL: https://pkgs.tailscale.com/stable/rhel/repo.gpg
+This file exists for directory structure consistency but is not used.
+-----END PGP PUBLIC KEY BLOCK-----

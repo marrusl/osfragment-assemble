@@ -1,0 +1,2 @@
+FROM scratch
+COPY fragment.toml tree/ scripts/ /fragment/

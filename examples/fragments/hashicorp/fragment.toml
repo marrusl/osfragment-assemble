@@ -1,0 +1,12 @@
+[fragment]
+name = "hashicorp"
+version = "1.0"
+description = "HashiCorp Vault — repo, package, and basic configuration"
+vendor = "HashiCorp"
+phase = "config"
+
+[fragment.provides]
+repos = ["hashicorp"]
+
+[fragment.packages]
+available = ["vault", "consul", "nomad", "terraform"]

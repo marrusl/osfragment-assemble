@@ -1,0 +1,12 @@
+apiVersion: bootc.io/v1alpha1
+kind: Composition
+
+base: registry.redhat.io/rhel10/rhel-bootc:10.0
+
+fragments:
+  - image: quay.io/mrussell/fragments/grafana:11.0
+    packages: [grafana]
+    mirror: https://rpm-mirror.internal.corp/grafana/
+  - image: quay.io/mrussell/fragments/tailscale:1.82.0
+    packages: [tailscale]
+    mirror: https://rpm-mirror.internal.corp/tailscale/

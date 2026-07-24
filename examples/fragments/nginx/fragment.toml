@@ -1,0 +1,12 @@
+[fragment]
+name = "nginx"
+version = "1.26"
+description = "Nginx web server — official repo, package, and service enablement"
+vendor = "F5 / Nginx Inc."
+phase = "config"
+
+[fragment.provides]
+repos = ["nginx-stable"]
+
+[fragment.packages]
+available = ["nginx"]

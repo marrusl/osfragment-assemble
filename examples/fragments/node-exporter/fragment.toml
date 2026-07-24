@@ -1,0 +1,11 @@
+[fragment]
+name = "node-exporter"
+version = "1.8.0"
+description = "Prometheus Node Exporter — self-contained with EPEL repo"
+phase = "config"
+
+[fragment.provides]
+repos = ["epel"]
+
+[fragment.packages]
+available = ["golang-github-prometheus-node-exporter"]

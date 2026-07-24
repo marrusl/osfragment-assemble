@@ -1,0 +1,9 @@
+apiVersion: bootc.io/v1alpha1
+kind: Composition
+
+base: registry.redhat.io/rhel10/rhel-bootc:10.0
+
+fragments:
+  - image: quay.io/mrussell/fragments/epel:10
+    packages: [htop, tmux]
+  - image: quay.io/mrussell/fragments/cis-hardening:2.1
