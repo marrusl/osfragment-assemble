@@ -1,5 +1,7 @@
 pub mod fragment;
 pub mod generator;
+pub mod inspect;
+pub mod list;
 pub mod loader;
 pub mod manifest;
 pub mod validate;

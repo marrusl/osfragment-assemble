@@ -1,3 +1,4 @@
+use anyhow::Result;
 use std::collections::HashMap;
 
 /// Result of repo deduplication analysis.
@@ -9,4 +10,15 @@ use std::collections::HashMap;
 pub struct DeduplicationResult {
     /// repo_id -> canonical provider fragment name
     pub deduplicated_repos: HashMap<String, String>,
+}
+
+/// Stub — full deduplication analysis is Task 8.
+/// Returns an empty result (no repos deduplicated).
+pub fn validate_composition(
+    _manifest: &crate::manifest::Manifest,
+    _fragments: &[crate::loader::LoadedFragment],
+) -> Result<DeduplicationResult> {
+    Ok(DeduplicationResult {
+        deduplicated_repos: HashMap::new(),
+    })
 }
