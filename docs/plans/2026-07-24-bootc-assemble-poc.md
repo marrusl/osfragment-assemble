@@ -1448,9 +1448,10 @@ phase = "repos"
             ("../etc/passwd", b"evil"),
             ("fragment/fragment.toml", b"[fragment]\nname=\"x\"\nversion=\"1\"\ndescription=\"x\"\nphase=\"repos\""),
         ]);
-        // Should still find the valid entry, not crash on the traversal attempt
+        // Fail-closed: traversal entries cause immediate failure
         let result = extract_fragment_toml_from_bytes(&tarball);
-        assert!(result.is_ok());
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("traversal"));
     }
 
     #[test]
@@ -1504,15 +1505,21 @@ pub fn extract_fragment_toml_from_bytes(compressed: &[u8]) -> Result<String> {
         let path = entry.path().context("reading entry path")?;
         let path_str = path.to_string_lossy();
 
-        // Reject traversal
+        // Fail-closed: reject traversal
         if path_str.contains("..") {
-            continue;
+            bail!(
+                "path traversal detected in fragment layer: {}",
+                path_str
+            );
         }
 
-        // Reject symlinks and hardlinks
+        // Fail-closed: reject symlinks and hardlinks
         let entry_type = entry.header().entry_type();
         if entry_type.is_symlink() || entry_type.is_hard_link() {
-            continue;
+            bail!(
+                "symlink or hardlink rejected in fragment layer: {}",
+                path_str
+            );
         }
 
         if path_str == FRAGMENT_TOML_PATH {
@@ -1646,12 +1653,12 @@ fn extract_tree_paths_from_bytes(compressed: &[u8]) -> Result<Vec<PathBuf>> {
         let path_str = path.to_string_lossy();
 
         if path_str.contains("..") {
-            continue;
+            bail!("path traversal detected in fragment layer: {}", path_str);
         }
         if entry.header().entry_type().is_symlink()
             || entry.header().entry_type().is_hard_link()
         {
-            continue;
+            bail!("symlink or hardlink rejected in fragment layer: {}", path_str);
         }
         if entry.header().entry_type().is_file() {
             paths.push(path.to_path_buf());
@@ -1966,7 +1973,31 @@ pub fn generate_containerfile(
         }
     }
 
-    writeln!(out, "# Override summary: no file path collisions detected")?;
+    // Compute override summary — detect file path collisions
+    let mut path_owners: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
+    for loaded in fragments {
+        for p in &loaded.tree_paths {
+            if p.to_string_lossy().starts_with("tree/") {
+                let dest = p.strip_prefix("tree").unwrap_or(p).to_string_lossy().to_string();
+                path_owners
+                    .entry(dest)
+                    .or_default()
+                    .push(loaded.fragment.name.clone());
+            }
+        }
+    }
+    let collisions: Vec<_> = path_owners
+        .iter()
+        .filter(|(_, owners)| owners.len() > 1)
+        .collect();
+    if collisions.is_empty() {
+        writeln!(out, "# Override summary: no file path collisions detected")?;
+    } else {
+        writeln!(out, "# Override summary: {} file path collision(s) detected", collisions.len())?;
+        for (path, owners) in &collisions {
+            writeln!(out, "#   {} — written by: {} (last wins)", path, owners.join(", "))?;
+        }
+    }
     writeln!(out)?;
 
     // Fragment FROM stages
@@ -2033,13 +2064,23 @@ pub fn generate_containerfile(
                     loaded.fragment.name
                 )?;
             }
-            // Mirror rewrite
+            // Mirror rewrite — scoped to this fragment's repo files only
             if let Some(mirror_url) = &mf.mirror {
-                writeln!(
-                    out,
-                    "RUN sed -i 's|^baseurl=.*|baseurl={}|; s|^metalink=|#metalink=|; s|^mirrorlist=|#mirrorlist=|' /etc/yum.repos.d/*.repo",
-                    mirror_url
-                )?;
+                let repo_files: Vec<_> = repo_paths
+                    .iter()
+                    .filter(|p| p.to_string_lossy().contains("yum.repos.d"))
+                    .filter_map(|p| {
+                        p.file_name()
+                            .map(|f| format!("/etc/yum.repos.d/{}", f.to_string_lossy()))
+                    })
+                    .collect();
+                for repo_file in &repo_files {
+                    writeln!(
+                        out,
+                        "RUN sed -i 's|^baseurl=.*|baseurl={}|; s|^metalink=|#metalink=|; s|^mirrorlist=|#mirrorlist=|' {}",
+                        mirror_url, repo_file
+                    )?;
+                }
             }
         }
         writeln!(out)?;
@@ -2301,7 +2342,23 @@ pub fn run_inspect(target: &str) -> Result<()> {
 
         (frag, paths, script_paths_exist)
     } else {
-        anyhow::bail!("Registry inspect not yet implemented — use a local directory path");
+        // Treat as registry image reference
+        let source = crate::manifest::FragmentSource::Registry {
+            image_ref: target.to_string(),
+        };
+        let loaded = crate::loader::load_registry_fragment(target)?;
+        let display_paths: Vec<String> = loaded
+            .tree_paths
+            .iter()
+            .filter(|p| p.to_string_lossy().starts_with("tree/"))
+            .map(|p| {
+                p.strip_prefix("tree/")
+                    .unwrap_or(p)
+                    .to_string_lossy()
+                    .to_string()
+            })
+            .collect();
+        (loaded.fragment, display_paths, loaded.has_configure_script)
     };
 
     let phase_str = match fragment.phase {
@@ -2429,9 +2486,10 @@ use std::path::PathBuf;
 
 use bootc_assemble::inspect::run_inspect;
 use bootc_assemble::list::run_list;
-use bootc_assemble::loader::load_local_fragment;
+use bootc_assemble::loader::{load_local_fragment, load_registry_fragment, prebuild_local_fragment, resolve_digest};
 use bootc_assemble::manifest::{parse_manifest, FragmentSource};
 use bootc_assemble::generator::generate_containerfile;
+use bootc_assemble::validate::validate_composition;
 
 #[derive(Parser)]
 #[command(name = "bootc-assemble", version, about = "Composable image definitions for bootc and RHCOS")]
@@ -2487,33 +2545,7 @@ fn main() -> Result<()> {
                 .with_context(|| format!("reading manifest {}", manifest.display()))?;
             let manifest_data = parse_manifest(&content)?;
 
-            let mut fragments = Vec::new();
-            for mf in &manifest_data.fragments {
-                let source = if local {
-                    FragmentSource::Directory {
-                        path: PathBuf::from(
-                            mf.image.strip_prefix("dir:").unwrap_or(&mf.image),
-                        ),
-                    }
-                } else {
-                    mf.resolve_source()
-                };
-
-                match source {
-                    FragmentSource::Directory { .. } => {
-                        fragments.push(load_local_fragment(&source)?);
-                    }
-                    FragmentSource::Registry { .. } => {
-                        anyhow::bail!(
-                            "Registry fragments require skopeo — use --local for local dirs"
-                        );
-                    }
-                }
-            }
-
-            // Sort by phase weight, preserve manifest order within same phase
-            fragments.sort_by_key(|f| f.fragment.phase.weight());
-
+            let fragments = load_all_fragments(&manifest_data, local)?;
             run_list(&manifest_data, &fragments)?;
         }
         None => {
@@ -2522,34 +2554,18 @@ fn main() -> Result<()> {
                 .with_context(|| format!("reading manifest {}", cli.manifest.display()))?;
             let manifest = parse_manifest(&content)?;
 
-            let mut fragments = Vec::new();
-            for mf in &manifest.fragments {
-                let source = if cli.local {
-                    FragmentSource::Directory {
-                        path: PathBuf::from(
-                            mf.image.strip_prefix("dir:").unwrap_or(&mf.image),
-                        ),
-                    }
-                } else {
-                    mf.resolve_source()
-                };
+            let mut fragments = load_all_fragments(&manifest, cli.local)?;
+            validate_composition(&manifest, &fragments)?;
 
-                match source {
-                    FragmentSource::Directory { .. } => {
-                        fragments.push(load_local_fragment(&source)?);
-                    }
-                    FragmentSource::Registry { .. } => {
-                        anyhow::bail!(
-                            "Registry fragments require skopeo — use --local for local dirs"
-                        );
-                    }
-                }
-            }
-
-            fragments.sort_by_key(|f| f.fragment.phase.weight());
+            // Resolve base image digest
+            let base_digest = if !cli.local {
+                Some(resolve_digest(&manifest.base)?)
+            } else {
+                None
+            };
 
             let containerfile =
-                generate_containerfile(&manifest, &fragments, None)?;
+                generate_containerfile(&manifest, &fragments, base_digest.as_deref())?;
 
             std::fs::write(&cli.output, &containerfile)
                 .with_context(|| format!("writing {}", cli.output.display()))?;
@@ -2573,6 +2589,46 @@ fn main() -> Result<()> {
 
     Ok(())
 }
+
+fn load_all_fragments(
+    manifest: &bootc_assemble::manifest::Manifest,
+    local: bool,
+) -> Result<Vec<bootc_assemble::loader::LoadedFragment>> {
+    let mut fragments = Vec::new();
+    let mut temp_images: Vec<String> = Vec::new();
+
+    for mf in &manifest.fragments {
+        let source = if local {
+            FragmentSource::Directory {
+                path: PathBuf::from(
+                    mf.image.strip_prefix("dir:").unwrap_or(&mf.image),
+                ),
+            }
+        } else {
+            mf.resolve_source()
+        };
+
+        match &source {
+            FragmentSource::Directory { path } => {
+                // Prebuild to temp local image, then load as registry
+                let frag_toml = std::fs::read_to_string(path.join("fragment.toml"))?;
+                let frag_meta = bootc_assemble::fragment::parse_fragment_toml(&frag_toml)?;
+                let tag = prebuild_local_fragment(path, &frag_meta.name)?;
+                temp_images.push(tag.clone());
+                let mut loaded = load_local_fragment(&source)?;
+                loaded.source = FragmentSource::Registry { image_ref: tag };
+                fragments.push(loaded);
+            }
+            FragmentSource::Registry { image_ref } => {
+                fragments.push(load_registry_fragment(image_ref)?);
+            }
+        }
+    }
+
+    // Sort by phase weight, preserve manifest order within same phase
+    fragments.sort_by_key(|f| f.fragment.phase.weight());
+    Ok(fragments)
+}
 ```
 
 - [ ] **Step 6: Add modules to lib.rs**
@@ -2584,6 +2640,7 @@ pub mod inspect;
 pub mod list;
 pub mod loader;
 pub mod manifest;
+pub mod validate;
 ```
 
 - [ ] **Step 7: Run tests to verify they pass**
@@ -2596,16 +2653,52 @@ Expected: all unit tests and CLI integration tests PASS
 ```bash
 cd ~/Work/bootc-assemble
 
-# Inspect
+# --- Local mode smoke tests ---
+
+# Inspect local directory
 cargo run -- inspect examples/fragments/epel
 cargo run -- inspect examples/fragments/tailscale
 
-# List
+# List with local fragments
 cargo run -- list --manifest examples/manifests/minimal.yaml --local
 
-# Assemble
+# Assemble with local fragments
 cargo run -- --manifest examples/manifests/minimal.yaml --local --output /tmp/test-containerfile
 cat /tmp/test-containerfile
+
+# --- Registry mode smoke tests (requires local registry) ---
+
+# Start a local registry
+podman run -d --name bootc-assemble-registry -p 5000:5000 registry:2
+
+# Build and push 2 example fragments
+for frag in epel cis-hardening; do
+  podman build -t localhost:5000/fragments/$frag:latest \
+    -f examples/fragments/$frag/Containerfile.fragment \
+    examples/fragments/$frag/
+  podman push localhost:5000/fragments/$frag:latest --tls-verify=false
+done
+
+# Inspect from registry
+cargo run -- inspect localhost:5000/fragments/epel:latest
+
+# Create a registry-backed manifest and assemble
+cat > /tmp/registry-test.yaml << 'YAML'
+apiVersion: bootc.io/v1alpha1
+kind: Composition
+base: registry.redhat.io/rhel10/rhel-bootc:10.0
+fragments:
+  - image: localhost:5000/fragments/epel:latest
+    packages: [htop]
+  - image: localhost:5000/fragments/cis-hardening:latest
+YAML
+
+cargo run -- --manifest /tmp/registry-test.yaml --output /tmp/registry-test-containerfile
+cat /tmp/registry-test-containerfile
+# Verify: FROM lines use @sha256: digests, not :latest tags
+
+# Cleanup
+podman stop bootc-assemble-registry && podman rm bootc-assemble-registry
 ```
 
 Verify the output matches the expected Containerfile format from the spec.
@@ -2783,7 +2876,7 @@ pub fn check_conflicts(fragments: &[LoadedFragment]) -> Result<()> {
     Ok(())
 }
 
-pub fn check_repo_deduplication(fragments: &[LoadedFragment]) -> Result<()> {
+pub fn check_repo_deduplication(fragments: &[LoadedFragment]) -> Result<DeduplicationResult> {
     let mut repo_providers: HashMap<&str, Vec<&str>> = HashMap::new();
     for f in fragments {
         for repo_id in &f.fragment.provides.repos {
@@ -2794,17 +2887,24 @@ pub fn check_repo_deduplication(fragments: &[LoadedFragment]) -> Result<()> {
         }
     }
 
+    let mut deduplicated_repos: HashSet<String> = HashSet::new();
     for (repo_id, providers) in &repo_providers {
         if providers.len() > 1 {
             eprintln!(
-                "note: repo '{}' provided by multiple fragments: {} — will deduplicate",
+                "note: repo '{}' provided by multiple fragments: {} — deduplicating (first provider wins)",
                 repo_id,
                 providers.join(", ")
             );
+            deduplicated_repos.insert(repo_id.to_string());
         }
     }
 
-    Ok(())
+    Ok(DeduplicationResult { deduplicated_repos })
+}
+
+#[derive(Debug)]
+pub struct DeduplicationResult {
+    pub deduplicated_repos: HashSet<String>,
 }
 ```
 
