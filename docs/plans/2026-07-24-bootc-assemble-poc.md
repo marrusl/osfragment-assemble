@@ -1392,6 +1392,36 @@ pub fn resolve_digest(image_ref: &str) -> Result<String> {
         .to_string();
     Ok(digest)
 }
+
+/// Resolve digest for an image in local podman storage (not a registry).
+/// Uses `podman image inspect` which reads local container storage directly.
+pub fn resolve_local_digest(image_ref: &str) -> Result<String> {
+    let output = std::process::Command::new("podman")
+        .args(["image", "inspect", "--format", "{{.Digest}}", image_ref])
+        .output()
+        .context("failed to run podman image inspect")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!(
+            "podman image inspect failed for {}: {}",
+            image_ref, stderr
+        );
+    }
+
+    let digest = String::from_utf8(output.stdout)?
+        .trim()
+        .to_string();
+
+    if digest.is_empty() || digest == "<nil>" {
+        bail!(
+            "no digest available for local image {} — image may not have been built correctly",
+            image_ref
+        );
+    }
+
+    Ok(digest)
+}
 ```
 
 - [ ] **Step 4: Add module to lib.rs**
@@ -2897,9 +2927,9 @@ fn load_all_fragments(
                 let frag_meta = bootc_assemble::fragment::parse_fragment_toml(&frag_toml)?;
                 let tag = prebuild_local_fragment(path, &frag_meta.name)?;
                 temp_images.push(tag.clone());
-                // Resolve digest of the prebuilt local image — hard-fail
-                // if this doesn't produce a real digest
-                let local_digest = resolve_digest(&tag)
+                // Resolve digest from local podman storage (not skopeo —
+                // the temp image is not in a registry)
+                let local_digest = resolve_local_digest(&tag)
                     .with_context(|| format!("resolving digest for prebuilt fragment '{}'", frag_meta.name))?;
                 let pinned_ref = format!("{}@{}", tag, local_digest);
                 let mut l = load_local_fragment(&source)?;
