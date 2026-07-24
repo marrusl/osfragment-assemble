@@ -1,0 +1,20 @@
+[package]
+name = "bootc-assemble"
+version = "0.1.0"
+edition = "2021"
+description = "Composable image definitions for bootc and RHCOS"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+flate2 = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+tar = "0.4"
+tempfile = "3"
+toml = "0.8"
+
+[dev-dependencies]
+assert_cmd = "2"
+predicates = "3"
