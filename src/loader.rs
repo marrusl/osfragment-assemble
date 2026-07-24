@@ -111,22 +111,6 @@ pub fn load_local_fragment(source: &FragmentSource) -> Result<LoadedFragment> {
 }
 
 pub fn resolve_digest(image_ref: &str) -> Result<String> {
-    let output = std::process::Command::new("skopeo")
-        .args(["inspect", "--raw", &format!("docker://{}", image_ref)])
-        .output()
-        .context("failed to run skopeo inspect")?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!("skopeo inspect failed for {}: {}", image_ref, stderr);
-    }
-
-    let stdout = String::from_utf8(output.stdout)?;
-    let _manifest: serde_json::Value = serde_json::from_str(&stdout)?;
-
-    // The digest is available from the Docker-Content-Digest header,
-    // but skopeo inspect --raw gives us the manifest body.
-    // We compute the digest from the manifest bytes.
     let digest_output = std::process::Command::new("skopeo")
         .args([
             "inspect",
@@ -138,7 +122,8 @@ pub fn resolve_digest(image_ref: &str) -> Result<String> {
         .context("failed to run skopeo inspect for digest")?;
 
     if !digest_output.status.success() {
-        bail!("skopeo digest lookup failed for {}", image_ref);
+        let stderr = String::from_utf8_lossy(&digest_output.stderr);
+        bail!("skopeo digest lookup failed for {}: {}", image_ref, stderr);
     }
 
     let digest = String::from_utf8(digest_output.stdout)?
@@ -485,6 +470,9 @@ pub fn load_registry_fragment(image_ref: &str) -> Result<LoadedFragment> {
 /// Metadata-only registry load for inspect and list.
 /// Uses annotations to skip the layer pull entirely when possible.
 /// Falls back to full load_registry_fragment when annotations are absent.
+/// Note: This fast path is intentionally limited to inspect/list commands.
+/// During assembly, conflicts and vendor fields are checked via the full
+/// load_registry_fragment path, which always parses the in-layer TOML.
 pub fn load_registry_fragment_metadata_only(image_ref: &str) -> Result<LoadedFragment> {
     let digest = resolve_digest(image_ref)?;
     let image_with_digest = format!(

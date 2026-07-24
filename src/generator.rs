@@ -115,7 +115,8 @@ pub fn generate_containerfile(
     writeln!(out, "# --- Base ---")?;
     let base_ref = if let Some(d) = base_digest {
         let base_no_tag = manifest.base.split(':').next().unwrap_or(&manifest.base);
-        format!("{}@{}", base_no_tag, d)
+        let tag = manifest.base.rsplit(':').next().unwrap_or("");
+        format!("{}@{}  # :{}", base_no_tag, d, tag)
     } else {
         manifest.base.clone()
     };
@@ -203,10 +204,12 @@ pub fn generate_containerfile(
     }
 
     // Phase: packages (20)
+    let mut seen = std::collections::HashSet::new();
     let all_packages: Vec<String> = manifest
         .fragments
         .iter()
         .flat_map(|f| f.packages.iter().cloned())
+        .filter(|p| seen.insert(p.clone()))
         .collect();
     if !all_packages.is_empty() {
         writeln!(out, "# --- Phase: packages (20) ---")?;

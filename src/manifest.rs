@@ -8,6 +8,10 @@ pub enum FragmentSource {
     Directory { path: PathBuf },
 }
 
+// ManifestYaml fields are read during serde deserialization but not
+// accessed directly after parse_manifest transforms them into Manifest.
+// The dead_code warning is expected and does not indicate unused code.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize)]
 struct ManifestYaml {
     #[serde(rename = "apiVersion")]
