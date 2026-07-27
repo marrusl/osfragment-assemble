@@ -67,6 +67,27 @@ pub fn resolve_digest(image_ref: &str) -> Result<String> {
 const MAX_FRAGMENT_TOML_SIZE: u64 = 64 * 1024; // 64KB
 const FRAGMENT_TOML_PATH: &str = "fragment/fragment.toml";
 
+/// Shared validation for tar entries across all extraction functions.
+/// Rejects path traversal, absolute paths outside /fragment/, and symlinks/hardlinks.
+fn validate_tar_entry(path_str: &str, entry_type: tar::EntryType) -> Result<()> {
+    if path_str.contains("..") {
+        bail!("path traversal detected in fragment layer: {}", path_str);
+    }
+    if path_str.starts_with('/') && !path_str.starts_with("/fragment/") {
+        bail!(
+            "absolute path outside /fragment/ rejected in fragment layer: {}",
+            path_str
+        );
+    }
+    if entry_type.is_symlink() || entry_type.is_hard_link() {
+        bail!(
+            "symlink or hardlink rejected in fragment layer: {}",
+            path_str
+        );
+    }
+    Ok(())
+}
+
 pub fn extract_fragment_toml_from_bytes(compressed: &[u8]) -> Result<String> {
     let decoder = GzDecoder::new(compressed);
     let mut archive = tar::Archive::new(decoder);
@@ -78,27 +99,7 @@ pub fn extract_fragment_toml_from_bytes(compressed: &[u8]) -> Result<String> {
         let path = entry.path().context("reading entry path")?;
         let path_str = path.to_string_lossy();
 
-        // Fail-closed: reject traversal
-        if path_str.contains("..") {
-            bail!("path traversal detected in fragment layer: {}", path_str);
-        }
-
-        // Fail-closed: reject absolute paths outside /fragment/
-        if path_str.starts_with('/') && !path_str.starts_with("/fragment/") {
-            bail!(
-                "absolute path outside /fragment/ rejected in fragment layer: {}",
-                path_str
-            );
-        }
-
-        // Fail-closed: reject symlinks and hardlinks
-        let entry_type = entry.header().entry_type();
-        if entry_type.is_symlink() || entry_type.is_hard_link() {
-            bail!(
-                "symlink or hardlink rejected in fragment layer: {}",
-                path_str
-            );
-        }
+        validate_tar_entry(&path_str, entry.header().entry_type())?;
 
         if path_str == FRAGMENT_TOML_PATH {
             if found.is_some() {
@@ -136,22 +137,7 @@ fn extract_tree_paths_from_bytes(compressed: &[u8]) -> Result<Vec<PathBuf>> {
         let path = entry.path()?;
         let path_str = path.to_string_lossy();
 
-        // Fail-closed: same rules as TOML extraction
-        if path_str.contains("..") {
-            bail!("path traversal detected in fragment layer: {}", path_str);
-        }
-        if path_str.starts_with('/') && !path_str.starts_with("/fragment/") {
-            bail!(
-                "absolute path outside /fragment/ rejected in fragment layer: {}",
-                path_str
-            );
-        }
-        if entry.header().entry_type().is_symlink() || entry.header().entry_type().is_hard_link() {
-            bail!(
-                "symlink or hardlink rejected in fragment layer: {}",
-                path_str
-            );
-        }
+        validate_tar_entry(&path_str, entry.header().entry_type())?;
         if entry.header().entry_type().is_file() {
             paths.push(path.to_path_buf());
         }
@@ -171,25 +157,7 @@ fn extract_repo_file_contents_from_bytes(
         let path = entry.path()?;
         let path_str = path.to_string_lossy().to_string();
 
-        // Fail-closed: reject traversal
-        if path_str.contains("..") {
-            bail!("path traversal detected in fragment layer: {}", path_str);
-        }
-        // Fail-closed: reject absolute paths outside /fragment/
-        if path_str.starts_with('/') && !path_str.starts_with("/fragment/") {
-            bail!(
-                "absolute path outside /fragment/ rejected in fragment layer: {}",
-                path_str
-            );
-        }
-        // Fail-closed: reject symlinks and hardlinks
-        let entry_type = entry.header().entry_type();
-        if entry_type.is_symlink() || entry_type.is_hard_link() {
-            bail!(
-                "symlink or hardlink rejected in fragment layer: {}",
-                path_str
-            );
-        }
+        validate_tar_entry(&path_str, entry.header().entry_type())?;
 
         if path_str.contains("yum.repos.d/") && path_str.ends_with(".repo") {
             let filename = Path::new(&path_str)
@@ -555,5 +523,71 @@ phase = "repos"
         ]);
         let result = extract_fragment_toml_from_bytes(&tarball);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn validate_tar_entry_security_guards() {
+        use tar::EntryType;
+        let cases = [
+            ("fragment/fragment.toml", EntryType::Regular, true, ""),
+            ("fragment/tree/etc/foo.conf", EntryType::Regular, true, ""),
+            // Absolute path inside /fragment/ is allowed
+            ("/fragment/tree/etc/foo.conf", EntryType::Regular, true, ""),
+            // Path traversal
+            ("../etc/passwd", EntryType::Regular, false, "traversal"),
+            (
+                "fragment/../../../etc/shadow",
+                EntryType::Regular,
+                false,
+                "traversal",
+            ),
+            // Absolute paths outside /fragment/
+            ("/etc/passwd", EntryType::Regular, false, "absolute path"),
+            ("/usr/bin/evil", EntryType::Regular, false, "absolute path"),
+            // Symlinks and hardlinks
+            (
+                "fragment/tree/link",
+                EntryType::Symlink,
+                false,
+                "symlink or hardlink",
+            ),
+            (
+                "fragment/tree/link",
+                EntryType::Link,
+                false,
+                "symlink or hardlink",
+            ),
+        ];
+        for (path, entry_type, should_pass, expected_err) in &cases {
+            let result = validate_tar_entry(path, *entry_type);
+            if *should_pass {
+                assert!(
+                    result.is_ok(),
+                    "expected pass for path '{}': {:?}",
+                    path,
+                    result
+                );
+            } else {
+                let err = result.unwrap_err();
+                assert!(
+                    err.to_string().contains(expected_err),
+                    "path '{}': expected error containing '{}', got '{}'",
+                    path,
+                    expected_err,
+                    err
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn extract_repo_contents_from_valid_layer() {
+        let repo_content = b"[epel]\nname=EPEL\nbaseurl=https://example.com/epel/\n";
+        let tarball =
+            create_test_tarball(&[("fragment/tree/etc/yum.repos.d/epel.repo", repo_content)]);
+        let result = extract_repo_file_contents_from_bytes(&tarball).unwrap();
+        assert_eq!(result.len(), 1);
+        assert!(result.contains_key("epel.repo"));
+        assert!(result["epel.repo"].contains("[epel]"));
     }
 }

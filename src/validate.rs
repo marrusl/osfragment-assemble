@@ -192,4 +192,26 @@ mod tests {
         ];
         assert!(check_duplicate_names(&frags).is_err());
     }
+
+    #[test]
+    fn conflicting_repo_content_fails() {
+        let mut frag_a = test_fragment("provider-a", vec!["shared-repo"], vec![]);
+        frag_a.repo_file_contents.insert(
+            "shared.repo".to_string(),
+            "[shared]\nbaseurl=https://a.example.com/\n".to_string(),
+        );
+        let mut frag_b = test_fragment("provider-b", vec!["shared-repo"], vec![]);
+        frag_b.repo_file_contents.insert(
+            "shared.repo".to_string(),
+            "[shared]\nbaseurl=https://b.example.com/\n".to_string(),
+        );
+        let result = check_repo_deduplication(&[frag_a, frag_b]);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("conflicting definitions"),
+            "expected 'conflicting definitions', got: {}",
+            err
+        );
+    }
 }

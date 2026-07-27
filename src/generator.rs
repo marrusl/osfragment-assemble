@@ -942,4 +942,122 @@ mod tests {
         assert!(first_pos < second_pos);
         assert!(second_pos < third_pos);
     }
+
+    #[test]
+    fn config_fragment_generates_tree_copy() {
+        let (mut cis, mf_cis) = make_config_fragment("cis", "bbb222");
+        cis.manifest_index = 0;
+        cis.tree_paths.push(PathBuf::from(
+            "tree/usr/lib/systemd/system-preset/50-hardening.preset",
+        ));
+        let manifest = Manifest {
+            base: "registry.redhat.io/rhel10/rhel-bootc:10.0".into(),
+            fragments: vec![mf_cis],
+        };
+        let output = generate_containerfile(
+            &manifest,
+            &[cis],
+            Some("sha256:base123"),
+            &empty_dedup(),
+            false,
+        )
+        .unwrap();
+        assert!(
+            output.contains("COPY --from=frag-cis /fragment/tree/ /"),
+            "expected config COPY line in output:\n{}",
+            output
+        );
+    }
+
+    #[test]
+    fn mixed_repos_and_config_full_content_ordering() {
+        let (epel, mf_epel) = make_repos_fragment("epel", "aaa111");
+        let (mut cis, mf_cis) = make_config_fragment("cis", "bbb222");
+        cis.manifest_index = 1;
+        let manifest = Manifest {
+            base: "registry.redhat.io/rhel10/rhel-bootc:10.0".into(),
+            fragments: vec![mf_epel, mf_cis],
+        };
+        let output = generate_containerfile(
+            &manifest,
+            &[epel, cis],
+            Some("sha256:base123"),
+            &empty_dedup(),
+            false,
+        )
+        .unwrap();
+        // Verify full content ordering: repo COPY -> dnf install -> config COPY -> script COPY
+        let repo_copy = output
+            .find("COPY --from=frag-epel /fragment/tree/etc/yum.repos.d/")
+            .expect("missing repo COPY");
+        let dnf_install = output.find("dnf install -y").expect("missing dnf install");
+        let config_copy = output
+            .find("COPY --from=frag-cis /fragment/tree/ /")
+            .expect("missing config COPY");
+        let script_copy = output
+            .find("COPY --from=frag-cis /fragment/scripts/")
+            .expect("missing script COPY");
+        assert!(repo_copy < dnf_install);
+        assert!(dnf_install < config_copy);
+        assert!(config_copy < script_copy);
+    }
+
+    #[test]
+    fn overlapping_tree_paths_produce_collision_comment() {
+        let shared_path = PathBuf::from("tree/etc/sysctl.d/99-net.conf");
+        let (mut frag_a, mf_a) = make_config_fragment("net-tuning", "aaa");
+        frag_a.tree_paths = vec![shared_path.clone()];
+        frag_a.script_paths = vec![];
+        let (mut frag_b, mf_b) = make_config_fragment("perf-tuning", "bbb");
+        frag_b.tree_paths = vec![shared_path];
+        frag_b.script_paths = vec![];
+        frag_b.manifest_index = 1;
+        let manifest = Manifest {
+            base: "registry.redhat.io/rhel10/rhel-bootc:10.0".into(),
+            fragments: vec![mf_a, mf_b],
+        };
+        let output = generate_containerfile(
+            &manifest,
+            &[frag_a, frag_b],
+            Some("sha256:base123"),
+            &empty_dedup(),
+            false,
+        )
+        .unwrap();
+        assert!(
+            output.contains("collision"),
+            "expected collision comment in header:\n{}",
+            output
+        );
+        assert!(output.contains("net-tuning"));
+        assert!(output.contains("perf-tuning"));
+    }
+
+    #[test]
+    fn ocp_scripts_without_section_comments() {
+        let (mut cis, mf_cis) = make_unpinned_config_fragment("cis");
+        cis.manifest_index = 0;
+        let manifest = Manifest {
+            base: "registry.redhat.io/rhel10/rhel-bootc:10.0".into(),
+            fragments: vec![mf_cis],
+        };
+        let output = generate_containerfile(&manifest, &[cis], None, &empty_dedup(), true).unwrap();
+        // Scripts should appear in OCP output
+        assert!(
+            output.contains("/fragment/scripts/"),
+            "expected script COPY in OCP output:\n{}",
+            output
+        );
+        assert!(
+            output.contains("configure.sh"),
+            "expected script execution in OCP output:\n{}",
+            output
+        );
+        // No section comment headers in OCP mode
+        assert!(
+            !output.contains("# ---"),
+            "OCP output should not contain section comments:\n{}",
+            output
+        );
+    }
 }
