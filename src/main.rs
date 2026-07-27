@@ -58,9 +58,16 @@ fn main() -> Result<()> {
             let manifest_data = parse_manifest(&content)?;
 
             let mut fragments = Vec::new();
+            let total = manifest_data.fragments.len();
             for (idx, mf) in manifest_data.fragments.iter().enumerate() {
                 let source = mf.resolve_source()?;
                 let bootc_assemble::manifest::FragmentSource::Registry { ref image_ref } = source;
+                eprintln!(
+                    "Loading fragment metadata {}/{}: {}...",
+                    idx + 1,
+                    total,
+                    image_ref
+                );
                 let mut loaded = load_registry_fragment_metadata_only(image_ref)?;
                 loaded.manifest_index = idx;
                 fragments.push(loaded);
@@ -80,12 +87,13 @@ fn main() -> Result<()> {
                 .with_context(|| format!("reading manifest {}", cli.manifest.display()))?;
             let manifest = parse_manifest(&content)?;
 
-            let fragments = load_all_fragments(&manifest)?;
-            let dedup = validate_composition(&manifest, &fragments)?;
-
-            // Hard-fail if unreachable: an unpinned base violates the
-            // digest contract.
+            eprintln!("Resolving base image digest...");
             let base_digest = Some(resolve_digest(&manifest.base)?);
+
+            let fragments = load_all_fragments(&manifest)?;
+
+            eprintln!("Validating composition...");
+            let dedup = validate_composition(&manifest, &fragments)?;
 
             let containerfile =
                 generate_containerfile(&manifest, &fragments, base_digest.as_deref(), &dedup)?;
@@ -93,7 +101,11 @@ fn main() -> Result<()> {
             std::fs::write(&cli.output, &containerfile)
                 .with_context(|| format!("writing {}", cli.output.display()))?;
 
-            eprintln!("Containerfile written to {}", cli.output.display());
+            eprintln!(
+                "Containerfile written to {} ({} fragments)",
+                cli.output.display(),
+                fragments.len()
+            );
         }
     }
 
@@ -104,11 +116,17 @@ fn load_all_fragments(
     manifest: &bootc_assemble::manifest::Manifest,
 ) -> Result<Vec<bootc_assemble::loader::LoadedFragment>> {
     let mut fragments = Vec::new();
+    let total = manifest.fragments.len();
 
     for (idx, mf) in manifest.fragments.iter().enumerate() {
         let source = mf.resolve_source()?;
         let bootc_assemble::manifest::FragmentSource::Registry { ref image_ref } = source;
+        eprintln!("Loading fragment {}/{}: {}...", idx + 1, total, image_ref);
         let mut loaded = load_registry_fragment(image_ref)?;
+        eprintln!(
+            "  {} ({})",
+            loaded.fragment.name, loaded.fragment.description
+        );
         loaded.manifest_index = idx;
         fragments.push(loaded);
     }

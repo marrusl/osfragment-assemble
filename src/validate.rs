@@ -93,7 +93,7 @@ pub fn check_repo_deduplication(fragments: &[LoadedFragment]) -> Result<Deduplic
             let canonical = providers[0].0;
             let skipped: Vec<&str> = providers[1..].iter().map(|(n, _)| *n).collect();
             eprintln!(
-                "note: repo '{}' deduplicated — using '{}', skipping '{}'",
+                "note: repo '{}' provided by multiple fragments — using repo files from '{}', skipping duplicate repo files from '{}'",
                 repo_id,
                 canonical,
                 skipped.join("', '")
