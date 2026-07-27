@@ -4,6 +4,7 @@ baseurl=https://download.postgresql.org/pub/repos/yum/common/redhat/rhel-$releas
 enabled=1
 gpgcheck=1
 gpgkey=file:///etc/pki/rpm-gpg/PGDG-RPM-GPG-KEY-RHEL
+       file:///etc/pki/rpm-gpg/PGDG-RPM-GPG-KEY-AARCH64-RHEL
 
 [pgdg17]
 name=PostgreSQL 17 for RHEL / Rocky / AlmaLinux $releasever - $basearch
@@ -11,3 +12,4 @@ baseurl=https://download.postgresql.org/pub/repos/yum/17/redhat/rhel-$releasever
 enabled=1
 gpgcheck=1
 gpgkey=file:///etc/pki/rpm-gpg/PGDG-RPM-GPG-KEY-RHEL
+       file:///etc/pki/rpm-gpg/PGDG-RPM-GPG-KEY-AARCH64-RHEL
