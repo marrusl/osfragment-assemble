@@ -26,10 +26,6 @@ Fragment scripts run after all packages are installed. If a script calls `dnf in
 
 Scripts are for post-install configuration: systemd preset application, file template expansion, user/group creation. Package installation is the manifest's job.
 
-## Why all scripts in `scripts/` run in alphabetical order
-
-The tool executes every `.sh` and `.bash` file in `scripts/`, sorted alphabetically. Fragment authors control execution order via naming (`01-setup.sh`, `02-config.sh`). There's no artificial single-entrypoint constraint — if a script is in `scripts/`, the author put it there intentionally.
-
 ## Why digest pinning is opt-in
 
 Digest pinning guarantees reproducibility but makes the generated Containerfile harder to read and breaks registry mirrors that don't preserve digests. The default (`--pin-digests` omitted) uses tags, which are more human-friendly and work with disconnected/airgap scenarios where images are re-pushed to internal registries.
