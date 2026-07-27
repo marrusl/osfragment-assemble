@@ -13,8 +13,9 @@ A fragment is a single-layer OCI image with this directory structure under `/fra
 │   ├── etc/yum.repos.d/*.repo
 │   ├── etc/pki/rpm-gpg/RPM-GPG-KEY-*
 │   └── ...            # Arbitrary filesystem paths
-└── scripts/           # Optional: post-install configuration
-    └── configure.sh   # Only this script is executed
+└── scripts/           # Optional: post-install configuration (.sh, .bash)
+    ├── 01-setup.sh    # Executed in alphabetical order
+    └── 02-config.sh
 ```
 
 ## `fragment.toml` Schema
@@ -43,7 +44,7 @@ available = ["tailscale"]
 - `description`: Single-line text. Displayed by `inspect` and `list`.
 - `vendor`: Optional. Identifies the fragment publisher.
 - `phase`: Must be `"repos"` or `"config"`. Controls execution order.
-  - `repos` (weight 10): Runs before packages are installed. Tree content is restricted to repo definitions and GPG keys (paths under `etc/yum.repos.d/` or `etc/pki/rpm-gpg/`). Must not contain `scripts/configure.sh`.
+  - `repos` (weight 10): Runs before packages are installed. Tree content is restricted to repo definitions and GPG keys (paths under `etc/yum.repos.d/` or `etc/pki/rpm-gpg/`). Must not contain scripts.
   - `config` (weight 30): Runs after packages are installed. No tree restrictions. May contain scripts.
 - `conflicts.fragments`: Optional array of fragment names this fragment is incompatible with. Assembly fails if any listed fragment is present in the manifest.
 - `packages.available`: Optional array of package names this fragment can install. Not enforced — used by `inspect` and for future dependency analysis.
@@ -67,26 +68,26 @@ The generated Containerfile applies fragments in this order:
 1. Repo files (yum.repos.d, rpm-gpg) from all fragments
 2. Packages (single batched `dnf install` with all requested packages)
 3. Config files (full `tree/` content from config-phase fragments)
-4. Scripts (configure.sh execution)
+4. Scripts (all `.sh` and `.bash` files in `scripts/`, alphabetical order)
 5. Preset application and validation
 
 Config files land after package installation to ensure fragment-supplied configurations are never overwritten by RPM defaults.
 
-## `scripts/configure.sh` Contract
+## Scripts Contract
 
-A fragment may contain a shell script at `/fragment/scripts/configure.sh`. If present, the tool executes it after all packages are installed:
+All `.sh` and `.bash` files in `/fragment/scripts/` are executed after packages are installed, in alphabetical order. The generated Containerfile copies the entire `scripts/` directory and chains execution:
 
 ```dockerfile
-COPY --from=<fragment> /fragment/scripts/configure.sh /tmp/frag-<name>-configure.sh
-RUN /tmp/frag-<name>-configure.sh && rm -f /tmp/frag-<name>-configure.sh
+COPY --from=<fragment> /fragment/scripts/ /tmp/frag-<name>-scripts/
+RUN /tmp/frag-<name>-scripts/01-setup.sh && /tmp/frag-<name>-scripts/02-config.sh && rm -rf /tmp/frag-<name>-scripts
 ```
 
 ### Rules
 
-1. `configure.sh` is the only script entrypoint. Other scripts in `scripts/` are ignored unless sourced by `configure.sh`.
-2. The script runs as root in the target image's filesystem.
-3. The script must not call `dnf`, `yum`, or other package managers. Packages are installed by the manifest, not by scripts.
-4. The script should be idempotent where possible (though it only runs once during build).
+1. All `.sh` and `.bash` files in `scripts/` are executed. Control ordering via naming (`01-`, `02-`, etc.).
+2. Scripts run as root in the target image's filesystem.
+3. Scripts must not call `dnf`, `yum`, or other package managers. Packages are installed by the manifest, not by scripts.
+4. Scripts should be idempotent where possible (though they only run once during build).
 5. Exit code 0 = success. Nonzero exits fail the build.
 
 Typical uses:

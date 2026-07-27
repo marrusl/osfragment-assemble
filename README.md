@@ -59,8 +59,8 @@ my-fragment/
 ├── tree/                     # Files to copy into the base image
 │   ├── etc/yum.repos.d/my.repo
 │   └── etc/pki/rpm-gpg/RPM-GPG-KEY-my
-└── scripts/                  # Scripts to run after package installation
-    └── configure.sh
+└── scripts/                  # Scripts to run after package installation (.sh, .bash)
+    └── configure.sh          # Executed in alphabetical order
 ```
 
 The `tree/` directory mirrors the target filesystem layout. Files are copied verbatim.

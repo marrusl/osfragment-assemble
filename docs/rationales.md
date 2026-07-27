@@ -26,11 +26,9 @@ Fragment scripts run after all packages are installed. If a script calls `dnf in
 
 Scripts are for post-install configuration: systemd preset application, file template expansion, user/group creation. Package installation is the manifest's job.
 
-## Why `configure.sh` is the only script entrypoint
+## Why all scripts in `scripts/` run in alphabetical order
 
-Fragments may contain arbitrary scripts in `scripts/`, but the tool only executes `configure.sh`. This convention prevents accidental execution of helper scripts, test fixtures, or documentation examples that happen to be executable.
-
-If a fragment needs to run multiple scripts, `configure.sh` sources them. The single entrypoint makes execution order explicit and prevents surprises.
+The tool executes every `.sh` and `.bash` file in `scripts/`, sorted alphabetically. Fragment authors control execution order via naming (`01-setup.sh`, `02-config.sh`). There's no artificial single-entrypoint constraint — if a script is in `scripts/`, the author put it there intentionally.
 
 ## Why digest pinning is opt-in
 
