@@ -28,6 +28,10 @@ struct Cli {
     /// Output path for the generated Containerfile
     #[arg(long, default_value = "Containerfile")]
     output: PathBuf,
+
+    /// Pin all image references to resolved digests for reproducibility
+    #[arg(long)]
+    pin_digests: bool,
 }
 
 #[derive(Subcommand)]
@@ -87,10 +91,14 @@ fn main() -> Result<()> {
                 .with_context(|| format!("reading manifest {}", cli.manifest.display()))?;
             let manifest = parse_manifest(&content)?;
 
-            eprintln!("Resolving base image digest...");
-            let base_digest = Some(resolve_digest(&manifest.base)?);
+            let base_digest = if cli.pin_digests {
+                eprintln!("Resolving base image digest...");
+                Some(resolve_digest(&manifest.base)?)
+            } else {
+                None
+            };
 
-            let fragments = load_all_fragments(&manifest)?;
+            let fragments = load_all_fragments(&manifest, cli.pin_digests)?;
 
             eprintln!("Validating composition...");
             let dedup = validate_composition(&manifest, &fragments)?;
@@ -114,6 +122,7 @@ fn main() -> Result<()> {
 
 fn load_all_fragments(
     manifest: &bootc_assemble::manifest::Manifest,
+    pin_digests: bool,
 ) -> Result<Vec<bootc_assemble::loader::LoadedFragment>> {
     let mut fragments = Vec::new();
     let total = manifest.fragments.len();
@@ -123,6 +132,13 @@ fn load_all_fragments(
         let bootc_assemble::manifest::FragmentSource::Registry { ref image_ref } = source;
         eprintln!("Loading fragment {}/{}: {}...", idx + 1, total, image_ref);
         let mut loaded = load_registry_fragment(image_ref)?;
+        if !pin_digests {
+            // Use the manifest's declared image ref, not the digest-pinned ref
+            loaded.source = bootc_assemble::manifest::FragmentSource::Registry {
+                image_ref: image_ref.clone(),
+            };
+            loaded.resolved_digest = None;
+        }
         eprintln!(
             "  {} ({})",
             loaded.fragment.name, loaded.fragment.description

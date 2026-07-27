@@ -56,15 +56,18 @@ pub fn generate_containerfile(
         .collect();
     writeln!(out, "# Fragments: {}", frag_summary.join(", "))?;
 
-    // Resolved digests
-    writeln!(out, "# Resolved digests:")?;
-    if let Some(d) = base_digest {
-        writeln!(out, "#   base: {}@{}", manifest.base, d)?;
-    }
-    for loaded in fragments {
-        let mf = &manifest.fragments[loaded.manifest_index];
-        if let Some(d) = &loaded.resolved_digest {
-            writeln!(out, "#   {}: {}@{}", loaded.fragment.name, mf.image, d)?;
+    // Resolved digests (only when --pin-digests is used)
+    let has_digests = base_digest.is_some() || fragments.iter().any(|f| f.resolved_digest.is_some());
+    if has_digests {
+        writeln!(out, "# Resolved digests:")?;
+        if let Some(d) = base_digest {
+            writeln!(out, "#   base: {}@{}", manifest.base, d)?;
+        }
+        for loaded in fragments {
+            let mf = &manifest.fragments[loaded.manifest_index];
+            if let Some(d) = &loaded.resolved_digest {
+                writeln!(out, "#   {}: {}@{}", loaded.fragment.name, mf.image, d)?;
+            }
         }
     }
 
