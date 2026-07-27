@@ -312,7 +312,7 @@ pub fn generate_containerfile(
 
     // Phase: preset-apply (35)
     if !ocp {
-        writeln!(out, "# --- Phase: preset-apply (35) ---")?;
+        writeln!(out, "# Apply systemd presets from fragments")?;
     }
     writeln!(
         out,
