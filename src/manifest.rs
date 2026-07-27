@@ -86,11 +86,11 @@ apiVersion: bootc.io/v1alpha1
 kind: Composition
 base: registry.redhat.io/rhel10/rhel-bootc:10.0
 fragments:
-  - image: quay.io/mrussell/fragments/epel:10
+  - image: quay.io/marrusl2/fragments/epel:10
     packages:
       - htop
       - tmux
-  - image: quay.io/mrussell/fragments/cis-hardening:2.1
+  - image: quay.io/marrusl2/fragments/cis-hardening:2.1
 "#;
 
     const MIRROR_YAML: &str = r#"
@@ -98,7 +98,7 @@ apiVersion: bootc.io/v1alpha1
 kind: Composition
 base: registry.redhat.io/rhel10/rhel-bootc:10.0
 fragments:
-  - image: quay.io/mrussell/fragments/grafana:11.0
+  - image: quay.io/marrusl2/fragments/grafana:11.0
     packages:
       - grafana
     mirror: https://rpm-mirror.internal.corp/grafana/

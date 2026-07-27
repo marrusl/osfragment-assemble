@@ -406,11 +406,11 @@ apiVersion: bootc.io/v1alpha1
 kind: Composition
 base: registry.redhat.io/rhel10/rhel-bootc:10.0
 fragments:
-  - image: quay.io/mrussell/fragments/epel:10
+  - image: quay.io/marrusl2/fragments/epel:10
     packages:
       - htop
       - tmux
-  - image: quay.io/mrussell/fragments/cis-hardening:2.1
+  - image: quay.io/marrusl2/fragments/cis-hardening:2.1
 "#;
 
     const MIRROR_YAML: &str = r#"
@@ -418,7 +418,7 @@ apiVersion: bootc.io/v1alpha1
 kind: Composition
 base: registry.redhat.io/rhel10/rhel-bootc:10.0
 fragments:
-  - image: quay.io/mrussell/fragments/grafana:11.0
+  - image: quay.io/marrusl2/fragments/grafana:11.0
     packages:
       - grafana
     mirror: https://rpm-mirror.internal.corp/grafana/
@@ -1039,9 +1039,9 @@ kind: Composition
 base: registry.redhat.io/rhel10/rhel-bootc:10.0
 
 fragments:
-  - image: quay.io/mrussell/fragments/epel:10
+  - image: quay.io/marrusl2/fragments/epel:10
     packages: [htop, tmux]
-  - image: quay.io/mrussell/fragments/cis-hardening:2.1
+  - image: quay.io/marrusl2/fragments/cis-hardening:2.1
 ```
 
 `examples/manifests/full.yaml`:
@@ -1052,20 +1052,20 @@ kind: Composition
 base: registry.redhat.io/rhel10/rhel-bootc:10.0
 
 fragments:
-  - image: quay.io/mrussell/fragments/epel:10
+  - image: quay.io/marrusl2/fragments/epel:10
     packages: [htop, tmux, jq]
-  - image: quay.io/mrussell/fragments/tailscale:1.82.0
+  - image: quay.io/marrusl2/fragments/tailscale:1.82.0
     packages: [tailscale]
-  - image: quay.io/mrussell/fragments/grafana:11.0
+  - image: quay.io/marrusl2/fragments/grafana:11.0
     packages: [grafana]
-  - image: quay.io/mrussell/fragments/postgresql:17
+  - image: quay.io/marrusl2/fragments/postgresql:17
     packages: [postgresql17-server]
-  - image: quay.io/mrussell/fragments/hashicorp:1.0
+  - image: quay.io/marrusl2/fragments/hashicorp:1.0
     packages: [vault]
-  - image: quay.io/mrussell/fragments/cis-hardening:2.1
-  - image: quay.io/mrussell/fragments/node-exporter:1.8.0
+  - image: quay.io/marrusl2/fragments/cis-hardening:2.1
+  - image: quay.io/marrusl2/fragments/node-exporter:1.8.0
     packages: [golang-github-prometheus-node-exporter]
-  - image: quay.io/mrussell/fragments/nginx:1.26
+  - image: quay.io/marrusl2/fragments/nginx:1.26
     packages: [nginx]
 ```
 
@@ -1077,10 +1077,10 @@ kind: Composition
 base: registry.redhat.io/rhel10/rhel-bootc:10.0
 
 fragments:
-  - image: quay.io/mrussell/fragments/grafana:11.0
+  - image: quay.io/marrusl2/fragments/grafana:11.0
     packages: [grafana]
     mirror: https://rpm-mirror.internal.corp/grafana/
-  - image: quay.io/mrussell/fragments/tailscale:1.82.0
+  - image: quay.io/marrusl2/fragments/tailscale:1.82.0
     packages: [tailscale]
     mirror: https://rpm-mirror.internal.corp/tailscale/
 ```

@@ -125,17 +125,17 @@ kind: Composition
 base: registry.redhat.io/rhel10/rhel-bootc:10.0
 
 fragments:
-  - image: quay.io/mrussell/fragments/epel:10
+  - image: quay.io/marrusl2/fragments/epel:10
     packages: [htop, tmux]
 
-  - image: quay.io/mrussell/fragments/tailscale:1.82.0
+  - image: quay.io/marrusl2/fragments/tailscale:1.82.0
     packages: [tailscale]
 
-  - image: quay.io/mrussell/fragments/grafana:11.0
+  - image: quay.io/marrusl2/fragments/grafana:11.0
     packages: [grafana]
     mirror: https://rpm-mirror.internal.corp/grafana/
 
-  - image: quay.io/mrussell/fragments/cis-hardening:2.1
+  - image: quay.io/marrusl2/fragments/cis-hardening:2.1
 ```
 
 ### Manifest Fields
@@ -181,7 +181,7 @@ No subcommand needed — the tool name is the verb.
 Point at a registry image or local directory. Display `fragment.toml` metadata, list `tree/` contents, list scripts.
 
 ```
-$ bootc-assemble inspect quay.io/mrussell/fragments/tailscale:1.82.0
+$ bootc-assemble inspect quay.io/marrusl2/fragments/tailscale:1.82.0
 
 Fragment: tailscale v1.82.0
 Vendor:   Tailscale Inc.
@@ -254,15 +254,15 @@ Example output for a manifest with EPEL, Tailscale, and CIS Hardening:
 # Fragments: epel (repos), tailscale (config), cis-hardening (config)
 # Resolved digests:
 #   base: registry.redhat.io/rhel10/rhel-bootc:10.0@sha256:a1b2c3...
-#   epel: quay.io/mrussell/fragments/epel:10@sha256:d4e5f6...
-#   tailscale: quay.io/mrussell/fragments/tailscale:1.82.0@sha256:789abc...
-#   cis-hardening: quay.io/mrussell/fragments/cis-hardening:2.1@sha256:def012...
+#   epel: quay.io/marrusl2/fragments/epel:10@sha256:d4e5f6...
+#   tailscale: quay.io/marrusl2/fragments/tailscale:1.82.0@sha256:789abc...
+#   cis-hardening: quay.io/marrusl2/fragments/cis-hardening:2.1@sha256:def012...
 # Override summary: no file path collisions detected
 
 # --- Fragment stages ---
-FROM quay.io/mrussell/fragments/epel@sha256:d4e5f6... AS frag-epel              # :10
-FROM quay.io/mrussell/fragments/tailscale@sha256:789abc... AS frag-tailscale     # :1.82.0
-FROM quay.io/mrussell/fragments/cis-hardening@sha256:def012... AS frag-cis-hardening  # :2.1
+FROM quay.io/marrusl2/fragments/epel@sha256:d4e5f6... AS frag-epel              # :10
+FROM quay.io/marrusl2/fragments/tailscale@sha256:789abc... AS frag-tailscale     # :1.82.0
+FROM quay.io/marrusl2/fragments/cis-hardening@sha256:def012... AS frag-cis-hardening  # :2.1
 
 # --- Base ---
 FROM registry.redhat.io/rhel10/rhel-bootc@sha256:a1b2c3...                       # :10.0
