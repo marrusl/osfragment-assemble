@@ -132,8 +132,10 @@ pub fn generate_containerfile(
     writeln!(out, "# --- Base ---")?;
     let base_ref = if let Some(d) = base_digest {
         let (base_name, tag) = split_image_ref(&manifest.base);
-        let tag_comment = tag.map(|t| format!("  # :{}", t)).unwrap_or_default();
-        format!("{}@{}{}", base_name, d, tag_comment)
+        if let Some(t) = tag {
+            writeln!(out, "# base: {}:{}", base_name, t)?;
+        }
+        format!("{}@{}", base_name, d)
     } else {
         manifest.base.clone()
     };
@@ -625,7 +627,7 @@ mod tests {
                 .unwrap();
         // Must preserve the port in the pinned ref
         assert!(output.contains("FROM localhost:5000/rhel-bootc@sha256:base123"));
-        // Tag comment should show the original tag
-        assert!(output.contains("# :10.0"));
+        // Tag comment should show the original base ref
+        assert!(output.contains("# base: localhost:5000/rhel-bootc:10.0"));
     }
 }
