@@ -24,10 +24,10 @@ The binary will be at `target/release/osfragment`.
 
 ### Inspect a fragment
 
-Examine a local fragment's metadata and contents:
+Examine a published fragment's metadata and contents:
 
 ```bash
-./target/release/osfragment-assemble inspect examples/fragments/tailscale
+./target/release/osfragment-assemble inspect quay.io/marrusl2/fragments/tailscale:1.82.0
 ```
 
 ### Generate a Containerfile
