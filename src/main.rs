@@ -13,7 +13,11 @@ use bootc_assemble::manifest::{parse_manifest, FragmentSource};
 use bootc_assemble::validate::validate_composition;
 
 #[derive(Parser)]
-#[command(name = "bootc-assemble", version, about = "Composable image definitions for bootc and RHCOS")]
+#[command(
+    name = "bootc-assemble",
+    version,
+    about = "Composable image definitions for bootc and RHCOS"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
@@ -72,9 +76,7 @@ fn main() -> Result<()> {
             for (idx, mf) in manifest_data.fragments.iter().enumerate() {
                 let source = if local {
                     FragmentSource::Directory {
-                        path: PathBuf::from(
-                            mf.image.strip_prefix("dir:").unwrap_or(&mf.image),
-                        ),
+                        path: PathBuf::from(mf.image.strip_prefix("dir:").unwrap_or(&mf.image)),
                     }
                 } else {
                     mf.resolve_source()
@@ -103,7 +105,7 @@ fn main() -> Result<()> {
                 .with_context(|| format!("reading manifest {}", cli.manifest.display()))?;
             let manifest = parse_manifest(&content)?;
 
-            let (fragments, temp_images) = load_all_fragments(&manifest, cli.local)?;
+            let (fragments, temp_images) = load_all_fragments(&manifest, cli.local, cli.build)?;
             let dedup = validate_composition(&manifest, &fragments)?;
 
             // Always resolve base image digest — the base is a registry
@@ -145,6 +147,7 @@ fn main() -> Result<()> {
 fn load_all_fragments(
     manifest: &bootc_assemble::manifest::Manifest,
     local: bool,
+    build: bool,
 ) -> Result<(Vec<bootc_assemble::loader::LoadedFragment>, Vec<String>)> {
     let mut fragments = Vec::new();
     let mut temp_images: Vec<String> = Vec::new();
@@ -159,15 +162,13 @@ fn load_all_fragments(
         };
 
         let mut loaded = match &source {
-            FragmentSource::Directory { path } => {
-                // Prebuild to temp local image, resolve its digest,
-                // then load metadata from the local directory
+            FragmentSource::Directory { path } if build => {
+                // --build: prebuild to temp local image so COPY --from
+                // references resolve during the podman build.
                 let frag_toml = std::fs::read_to_string(path.join("fragment.toml"))?;
                 let frag_meta = bootc_assemble::fragment::parse_fragment_toml(&frag_toml)?;
                 let tag = prebuild_local_fragment(path, &frag_meta.name)?;
                 temp_images.push(tag.clone());
-                // Resolve digest from local podman storage (not skopeo —
-                // the temp image is not in a registry)
                 let local_digest = resolve_local_digest(&tag).with_context(|| {
                     format!(
                         "resolving digest for prebuilt fragment '{}'",
@@ -181,6 +182,12 @@ fn load_all_fragments(
                 };
                 l.resolved_digest = Some(local_digest);
                 l
+            }
+            FragmentSource::Directory { .. } => {
+                // No --build: load metadata from the local directory.
+                // The generated Containerfile will contain placeholder
+                // refs that the user replaces before building.
+                load_local_fragment(&source)?
             }
             FragmentSource::Registry { image_ref } => load_registry_fragment(image_ref)?,
         };

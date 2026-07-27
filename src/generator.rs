@@ -6,6 +6,29 @@ use crate::loader::LoadedFragment;
 use crate::manifest::{FragmentSource, Manifest};
 use crate::validate::DeduplicationResult;
 
+/// Split a container image reference into (name, optional_tag).
+///
+/// The tag separator is the last `:` that appears after the last `/`.
+/// This correctly handles registry ports (e.g., `localhost:5000/image:tag`).
+/// Returns `(full_ref, None)` when no tag is present or the ref already
+/// contains a digest (`@`).
+fn split_image_ref(image_ref: &str) -> (&str, Option<&str>) {
+    // Digests are not tags — leave them alone
+    if image_ref.contains('@') {
+        return (image_ref, None);
+    }
+
+    let colon_search_start = image_ref.rfind('/').map(|p| p + 1).unwrap_or(0);
+
+    match image_ref[colon_search_start..].find(':') {
+        Some(offset) => {
+            let colon_pos = colon_search_start + offset;
+            (&image_ref[..colon_pos], Some(&image_ref[colon_pos + 1..]))
+        }
+        None => (image_ref, None),
+    }
+}
+
 pub fn generate_containerfile(
     manifest: &Manifest,
     fragments: &[LoadedFragment],
@@ -68,10 +91,7 @@ pub fn generate_containerfile(
         .filter(|(_, owners)| owners.len() > 1)
         .collect();
     if collisions.is_empty() {
-        writeln!(
-            out,
-            "# Override summary: no file path collisions detected"
-        )?;
+        writeln!(out, "# Override summary: no file path collisions detected")?;
     } else {
         writeln!(
             out,
@@ -93,30 +113,42 @@ pub fn generate_containerfile(
     writeln!(out, "# --- Fragment stages ---")?;
     for loaded in fragments {
         let mf = &manifest.fragments[loaded.manifest_index];
-        let image_ref = match &loaded.source {
-            FragmentSource::Registry { image_ref } => image_ref.clone(),
-            FragmentSource::Directory { .. } => mf.image.clone(),
-        };
-        let tag_comment = if image_ref.contains('@') {
-            let tag = mf.image.rsplit(':').next().unwrap_or("");
-            format!("  # :{}", tag)
-        } else {
-            String::new()
-        };
-        writeln!(
-            out,
-            "FROM {} AS frag-{}{}",
-            image_ref, loaded.fragment.name, tag_comment
-        )?;
+        match &loaded.source {
+            FragmentSource::Registry { image_ref } => {
+                let tag_comment = if image_ref.contains('@') {
+                    let (_, tag) = split_image_ref(&mf.image);
+                    tag.map(|t| format!("  # :{}", t)).unwrap_or_default()
+                } else {
+                    String::new()
+                };
+                writeln!(
+                    out,
+                    "FROM {} AS frag-{}{}",
+                    image_ref, loaded.fragment.name, tag_comment
+                )?;
+            }
+            FragmentSource::Directory { path } => {
+                // Local fragment without --build: the FROM target is a
+                // placeholder.  The user must publish the fragment or
+                // re-run with --build before this Containerfile can be
+                // built directly.
+                writeln!(out, "# local: {}", path.display())?;
+                writeln!(
+                    out,
+                    "FROM localhost/bootc-assemble/frag-{}:local AS frag-{}  # TODO: replace with published image ref",
+                    loaded.fragment.name, loaded.fragment.name
+                )?;
+            }
+        }
     }
     writeln!(out)?;
 
     // Base
     writeln!(out, "# --- Base ---")?;
     let base_ref = if let Some(d) = base_digest {
-        let base_no_tag = manifest.base.split(':').next().unwrap_or(&manifest.base);
-        let tag = manifest.base.rsplit(':').next().unwrap_or("");
-        format!("{}@{}  # :{}", base_no_tag, d, tag)
+        let (base_name, tag) = split_image_ref(&manifest.base);
+        let tag_comment = tag.map(|t| format!("  # :{}", t)).unwrap_or_default();
+        format!("{}@{}{}", base_name, d, tag_comment)
     } else {
         manifest.base.clone()
     };
@@ -131,8 +163,11 @@ pub fn generate_containerfile(
         writeln!(out, "# --- Phase: repos (10) ---")?;
         for loaded in fragments {
             let mf = &manifest.fragments[loaded.manifest_index];
-            let repo_paths: Vec<_> =
-                loaded.tree_paths.iter().filter(|p| is_repo_path(p)).collect();
+            let repo_paths: Vec<_> = loaded
+                .tree_paths
+                .iter()
+                .filter(|p| is_repo_path(p))
+                .collect();
             if repo_paths.is_empty() {
                 continue;
             }
@@ -329,7 +364,7 @@ mod tests {
         Fragment, FragmentConflicts, FragmentPackages, FragmentPhase, FragmentProvides,
     };
     use crate::loader::LoadedFragment;
-    use crate::manifest::{Manifest, ManifestFragment, FragmentSource};
+    use crate::manifest::{FragmentSource, Manifest, ManifestFragment};
 
     fn make_repos_fragment(name: &str, digest: &str) -> (LoadedFragment, ManifestFragment) {
         let loaded = LoadedFragment {
@@ -343,9 +378,7 @@ mod tests {
                     repos: vec![name.to_string()],
                 },
                 packages: FragmentPackages { available: vec![] },
-                conflicts: FragmentConflicts {
-                    fragments: vec![],
-                },
+                conflicts: FragmentConflicts { fragments: vec![] },
             },
             tree_paths: vec![
                 PathBuf::from("tree/etc/yum.repos.d/test.repo"),
@@ -377,13 +410,9 @@ mod tests {
                 phase: FragmentPhase::Config,
                 provides: FragmentProvides { repos: vec![] },
                 packages: FragmentPackages { available: vec![] },
-                conflicts: FragmentConflicts {
-                    fragments: vec![],
-                },
+                conflicts: FragmentConflicts { fragments: vec![] },
             },
-            tree_paths: vec![PathBuf::from(
-                "tree/usr/lib/sysctl.d/99-hardening.conf",
-            )],
+            tree_paths: vec![PathBuf::from("tree/usr/lib/sysctl.d/99-hardening.conf")],
             has_configure_script: true,
             source: FragmentSource::Registry {
                 image_ref: format!("quay.io/test/{}@sha256:{}", name, digest),
@@ -413,13 +442,9 @@ mod tests {
             base: "registry.redhat.io/rhel10/rhel-bootc:10.0".into(),
             fragments: vec![mf_epel],
         };
-        let output = generate_containerfile(
-            &manifest,
-            &[epel],
-            Some("sha256:base123"),
-            &empty_dedup(),
-        )
-        .unwrap();
+        let output =
+            generate_containerfile(&manifest, &[epel], Some("sha256:base123"), &empty_dedup())
+                .unwrap();
         assert!(output.contains("@sha256:aaa111"));
         assert!(output.contains("@sha256:base123"));
         assert!(!output.contains("FROM quay.io/test/epel:10 AS"));
@@ -459,13 +484,9 @@ mod tests {
             base: "registry.redhat.io/rhel10/rhel-bootc:10.0".into(),
             fragments: vec![mf_epel],
         };
-        let output = generate_containerfile(
-            &manifest,
-            &[epel],
-            Some("sha256:base123"),
-            &empty_dedup(),
-        )
-        .unwrap();
+        let output =
+            generate_containerfile(&manifest, &[epel], Some("sha256:base123"), &empty_dedup())
+                .unwrap();
         assert!(output.contains("dnf install -y"));
         assert!(output.contains("htop"));
     }
@@ -478,13 +499,9 @@ mod tests {
             base: "registry.redhat.io/rhel10/rhel-bootc:10.0".into(),
             fragments: vec![mf_cis],
         };
-        let output = generate_containerfile(
-            &manifest,
-            &[cis],
-            Some("sha256:base123"),
-            &empty_dedup(),
-        )
-        .unwrap();
+        let output =
+            generate_containerfile(&manifest, &[cis], Some("sha256:base123"), &empty_dedup())
+                .unwrap();
         assert!(output.contains("systemctl preset-all --preset-mode=enable-only"));
     }
 
@@ -496,13 +513,9 @@ mod tests {
             base: "registry.redhat.io/rhel10/rhel-bootc:10.0".into(),
             fragments: vec![mf_cis],
         };
-        let output = generate_containerfile(
-            &manifest,
-            &[cis],
-            Some("sha256:base123"),
-            &empty_dedup(),
-        )
-        .unwrap();
+        let output =
+            generate_containerfile(&manifest, &[cis], Some("sha256:base123"), &empty_dedup())
+                .unwrap();
         assert!(output.contains("bootc container lint"));
     }
 
@@ -514,13 +527,9 @@ mod tests {
             base: "registry.redhat.io/rhel10/rhel-bootc:10.0".into(),
             fragments: vec![mf_cis],
         };
-        let output = generate_containerfile(
-            &manifest,
-            &[cis],
-            Some("sha256:base123"),
-            &empty_dedup(),
-        )
-        .unwrap();
+        let output =
+            generate_containerfile(&manifest, &[cis], Some("sha256:base123"), &empty_dedup())
+                .unwrap();
         assert!(!output.contains("dnf install"));
     }
 
@@ -532,13 +541,9 @@ mod tests {
             base: "registry.redhat.io/rhel10/rhel-bootc:10.0".into(),
             fragments: vec![mf_epel],
         };
-        let output = generate_containerfile(
-            &manifest,
-            &[epel],
-            Some("sha256:base123"),
-            &empty_dedup(),
-        )
-        .unwrap();
+        let output =
+            generate_containerfile(&manifest, &[epel], Some("sha256:base123"), &empty_dedup())
+                .unwrap();
         assert!(output.contains("sed"));
         assert!(output.contains("https://mirror.corp/epel/"));
     }
@@ -559,15 +564,130 @@ mod tests {
         dedup
             .deduplicated_repos
             .insert("node-exporter".to_string(), "node-exporter".to_string());
-        let output = generate_containerfile(
-            &manifest,
-            &[epel, node_exp],
-            Some("sha256:base123"),
-            &dedup,
-        )
-        .unwrap();
+        let output =
+            generate_containerfile(&manifest, &[epel, node_exp], Some("sha256:base123"), &dedup)
+                .unwrap();
         // epel is canonical for its own repo — its COPY should appear
         let epel_copy_count = output.matches("COPY --from=frag-epel").count();
         assert!(epel_copy_count > 0);
+    }
+
+    #[test]
+    fn split_image_ref_standard_registry() {
+        let (name, tag) = super::split_image_ref("registry.redhat.io/rhel9/rhel-bootc:9.4");
+        assert_eq!(name, "registry.redhat.io/rhel9/rhel-bootc");
+        assert_eq!(tag, Some("9.4"));
+    }
+
+    #[test]
+    fn split_image_ref_with_port() {
+        let (name, tag) = super::split_image_ref("localhost:5000/myimage:latest");
+        assert_eq!(name, "localhost:5000/myimage");
+        assert_eq!(tag, Some("latest"));
+    }
+
+    #[test]
+    fn split_image_ref_quay_with_tag() {
+        let (name, tag) = super::split_image_ref("quay.io/centos-bootc/centos-bootc:stream9");
+        assert_eq!(name, "quay.io/centos-bootc/centos-bootc");
+        assert_eq!(tag, Some("stream9"));
+    }
+
+    #[test]
+    fn split_image_ref_no_tag() {
+        let (name, tag) = super::split_image_ref("registry.redhat.io/rhel9/rhel-bootc");
+        assert_eq!(name, "registry.redhat.io/rhel9/rhel-bootc");
+        assert_eq!(tag, None);
+    }
+
+    #[test]
+    fn split_image_ref_with_digest() {
+        let (name, tag) = super::split_image_ref("quay.io/image@sha256:abc123");
+        assert_eq!(name, "quay.io/image@sha256:abc123");
+        assert_eq!(tag, None);
+    }
+
+    #[test]
+    fn split_image_ref_port_no_tag() {
+        let (name, tag) = super::split_image_ref("localhost:5000/myimage");
+        assert_eq!(name, "localhost:5000/myimage");
+        assert_eq!(tag, None);
+    }
+
+    #[test]
+    fn split_image_ref_simple_with_tag() {
+        let (name, tag) = super::split_image_ref("nginx:latest");
+        assert_eq!(name, "nginx");
+        assert_eq!(tag, Some("latest"));
+    }
+
+    #[test]
+    fn split_image_ref_simple_no_tag() {
+        let (name, tag) = super::split_image_ref("nginx");
+        assert_eq!(name, "nginx");
+        assert_eq!(tag, None);
+    }
+
+    #[test]
+    fn base_image_with_port_generates_correct_from() {
+        let (epel, mf_epel) = make_repos_fragment("epel", "aaa111");
+        let manifest = Manifest {
+            base: "localhost:5000/rhel-bootc:10.0".into(),
+            fragments: vec![mf_epel],
+        };
+        let output =
+            generate_containerfile(&manifest, &[epel], Some("sha256:base123"), &empty_dedup())
+                .unwrap();
+        // Must preserve the port in the pinned ref
+        assert!(output.contains("FROM localhost:5000/rhel-bootc@sha256:base123"));
+        // Tag comment should show the original tag
+        assert!(output.contains("# :10.0"));
+    }
+
+    #[test]
+    fn local_directory_fragment_generates_placeholder() {
+        let loaded = LoadedFragment {
+            fragment: Fragment {
+                name: "epel".to_string(),
+                version: "10".into(),
+                description: "test".into(),
+                vendor: None,
+                phase: FragmentPhase::Repos,
+                provides: FragmentProvides {
+                    repos: vec!["epel".to_string()],
+                },
+                packages: FragmentPackages { available: vec![] },
+                conflicts: FragmentConflicts { fragments: vec![] },
+            },
+            tree_paths: vec![
+                PathBuf::from("tree/etc/yum.repos.d/epel.repo"),
+                PathBuf::from("tree/etc/pki/rpm-gpg/RPM-GPG-KEY-EPEL-10"),
+            ],
+            has_configure_script: false,
+            source: FragmentSource::Directory {
+                path: PathBuf::from("./examples/fragments/epel"),
+            },
+            resolved_digest: None,
+            manifest_index: 0,
+            repo_file_contents: std::collections::HashMap::new(),
+        };
+        let manifest_frag = ManifestFragment {
+            image: "dir:./examples/fragments/epel".into(),
+            packages: vec![],
+            mirror: None,
+        };
+        let manifest = Manifest {
+            base: "registry.redhat.io/rhel10/rhel-bootc:10.0".into(),
+            fragments: vec![manifest_frag],
+        };
+        let output =
+            generate_containerfile(&manifest, &[loaded], Some("sha256:base123"), &empty_dedup())
+                .unwrap();
+        // Local fragment should have a comment showing the source path
+        assert!(output.contains("# local: ./examples/fragments/epel"));
+        // FROM line should use a placeholder, not an ephemeral image ref
+        assert!(output.contains("FROM localhost/bootc-assemble/frag-epel:local AS frag-epel"));
+        // Should indicate user action needed
+        assert!(output.contains("TODO: replace with published image ref"));
     }
 }

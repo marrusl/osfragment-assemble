@@ -28,8 +28,16 @@ pub fn split_tree_paths(paths: &[PathBuf]) -> (Vec<PathBuf>, Vec<PathBuf>) {
         .filter(|p| p.to_string_lossy().starts_with("tree/"))
         .cloned()
         .collect();
-    let repo: Vec<_> = tree_paths.iter().filter(|p| is_repo_path(p)).cloned().collect();
-    let config: Vec<_> = tree_paths.iter().filter(|p| !is_repo_path(p)).cloned().collect();
+    let repo: Vec<_> = tree_paths
+        .iter()
+        .filter(|p| is_repo_path(p))
+        .cloned()
+        .collect();
+    let config: Vec<_> = tree_paths
+        .iter()
+        .filter(|p| !is_repo_path(p))
+        .cloned()
+        .collect();
     (repo, config)
 }
 
@@ -43,11 +51,7 @@ fn collect_relative_paths(base: &Path, prefix: &str) -> Result<Vec<PathBuf>> {
     Ok(paths)
 }
 
-fn collect_paths_recursive(
-    dir: &Path,
-    base: &Path,
-    paths: &mut Vec<PathBuf>,
-) -> Result<()> {
+fn collect_paths_recursive(dir: &Path, base: &Path, paths: &mut Vec<PathBuf>) -> Result<()> {
     for entry in std::fs::read_dir(dir).context("reading directory")? {
         let entry = entry?;
         let path = entry.path();
@@ -126,9 +130,7 @@ pub fn resolve_digest(image_ref: &str) -> Result<String> {
         bail!("skopeo digest lookup failed for {}: {}", image_ref, stderr);
     }
 
-    let digest = String::from_utf8(digest_output.stdout)?
-        .trim()
-        .to_string();
+    let digest = String::from_utf8(digest_output.stdout)?.trim().to_string();
     Ok(digest)
 }
 
@@ -148,10 +150,7 @@ pub fn extract_fragment_toml_from_bytes(compressed: &[u8]) -> Result<String> {
 
         // Fail-closed: reject traversal
         if path_str.contains("..") {
-            bail!(
-                "path traversal detected in fragment layer: {}",
-                path_str
-            );
+            bail!("path traversal detected in fragment layer: {}", path_str);
         }
 
         // Fail-closed: reject absolute paths outside /fragment/
@@ -217,10 +216,11 @@ fn extract_tree_paths_from_bytes(compressed: &[u8]) -> Result<Vec<PathBuf>> {
                 path_str
             );
         }
-        if entry.header().entry_type().is_symlink()
-            || entry.header().entry_type().is_hard_link()
-        {
-            bail!("symlink or hardlink rejected in fragment layer: {}", path_str);
+        if entry.header().entry_type().is_symlink() || entry.header().entry_type().is_hard_link() {
+            bail!(
+                "symlink or hardlink rejected in fragment layer: {}",
+                path_str
+            );
         }
         if entry.header().entry_type().is_file() {
             paths.push(path.to_path_buf());
@@ -357,19 +357,10 @@ pub fn load_registry_fragment(image_ref: &str) -> Result<LoadedFragment> {
         digest
     );
 
-    // Annotation fast path: try to read metadata without pulling layers.
-    // For assembly, we still need the layer to extract tree_paths and
-    // has_configure_script, so the pull happens regardless. But the
-    // Fragment is taken from annotations when available, skipping the
-    // in-layer TOML parse.
-    let annotation_fragment = match try_annotation_fast_path(image_ref) {
-        Ok(frag) => frag,
-        Err(e) => {
-            eprintln!("note: annotation fast path failed for {}, falling back to layer extraction: {}", image_ref, e);
-            None
-        }
-    };
-
+    // Assembly always parses the in-layer fragment.toml for the authoritative
+    // Fragment.  The annotation fast path is limited to metadata-only
+    // operations (inspect/list via load_registry_fragment_metadata_only)
+    // because annotations omit fields like conflicts.
     let tmp = tempfile::tempdir().context("creating temp dir")?;
     let oci_path = tmp.path().join("oci-layout");
 
@@ -421,19 +412,11 @@ pub fn load_registry_fragment(image_ref: &str) -> Result<LoadedFragment> {
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("no digest in layer descriptor"))?;
 
-    let layer_blob_path = oci_path
-        .join("blobs")
-        .join(layer_digest.replace(':', "/"));
+    let layer_blob_path = oci_path.join("blobs").join(layer_digest.replace(':', "/"));
     let layer_bytes = std::fs::read(&layer_blob_path)?;
 
-    // Use annotation fragment if available, otherwise parse from layer
-    let fragment = match annotation_fragment {
-        Some(f) => f,
-        None => {
-            let toml_content = extract_fragment_toml_from_bytes(&layer_bytes)?;
-            parse_fragment_toml(&toml_content)?
-        }
-    };
+    let toml_content = extract_fragment_toml_from_bytes(&layer_bytes)?;
+    let fragment = parse_fragment_toml(&toml_content)?;
 
     // Always extract tree paths from the layer (annotations don't carry these)
     let tree_paths = extract_tree_paths_from_bytes(&layer_bytes)?;
@@ -506,14 +489,7 @@ pub fn prebuild_local_fragment(dir: &Path, name: &str) -> Result<String> {
     let tag = format!("localhost/bootc-assemble/frag-{}:local", name);
 
     let status = std::process::Command::new("podman")
-        .args([
-            "build",
-            "-f",
-            "-",
-            "-t",
-            &tag,
-            &dir.to_string_lossy(),
-        ])
+        .args(["build", "-f", "-", "-t", &tag, &dir.to_string_lossy()])
         .stdin(std::process::Stdio::piped())
         .spawn()
         .and_then(|mut child| {
@@ -545,15 +521,10 @@ pub fn resolve_local_digest(image_ref: &str) -> Result<String> {
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!(
-            "podman image inspect failed for {}: {}",
-            image_ref, stderr
-        );
+        bail!("podman image inspect failed for {}: {}", image_ref, stderr);
     }
 
-    let digest = String::from_utf8(output.stdout)?
-        .trim()
-        .to_string();
+    let digest = String::from_utf8(output.stdout)?.trim().to_string();
 
     if digest.is_empty() || digest == "<nil>" {
         bail!(
@@ -577,9 +548,10 @@ mod tests {
         let loaded = load_local_fragment(&source).unwrap();
         assert_eq!(loaded.fragment.name, "epel");
         assert!(!loaded.has_configure_script);
-        assert!(loaded.tree_paths.iter().any(|p| p
-            .to_string_lossy()
-            .contains("yum.repos.d/epel.repo")));
+        assert!(loaded
+            .tree_paths
+            .iter()
+            .any(|p| p.to_string_lossy().contains("yum.repos.d/epel.repo")));
         assert!(loaded.resolved_digest.is_none());
     }
 
@@ -591,9 +563,10 @@ mod tests {
         let loaded = load_local_fragment(&source).unwrap();
         assert_eq!(loaded.fragment.name, "tailscale");
         assert!(loaded.has_configure_script);
-        assert!(loaded.tree_paths.iter().any(|p| p
-            .to_string_lossy()
-            .contains("system-preset")));
+        assert!(loaded
+            .tree_paths
+            .iter()
+            .any(|p| p.to_string_lossy().contains("system-preset")));
     }
 
     #[test]
@@ -677,7 +650,10 @@ phase = "repos"
     fn reject_traversal_path() {
         let tarball = create_test_tarball(&[
             ("../etc/passwd", b"evil"),
-            ("fragment/fragment.toml", b"[fragment]\nname=\"x\"\nversion=\"1\"\ndescription=\"x\"\nphase=\"repos\""),
+            (
+                "fragment/fragment.toml",
+                b"[fragment]\nname=\"x\"\nversion=\"1\"\ndescription=\"x\"\nphase=\"repos\"",
+            ),
         ]);
         // Fail-closed: traversal entries cause immediate failure
         let result = extract_fragment_toml_from_bytes(&tarball);
@@ -703,8 +679,14 @@ phase = "repos"
     #[test]
     fn reject_duplicate_toml_entries() {
         let tarball = create_test_tarball(&[
-            ("fragment/fragment.toml", b"[fragment]\nname=\"a\"\nversion=\"1\"\ndescription=\"a\"\nphase=\"repos\""),
-            ("fragment/fragment.toml", b"[fragment]\nname=\"b\"\nversion=\"2\"\ndescription=\"b\"\nphase=\"config\""),
+            (
+                "fragment/fragment.toml",
+                b"[fragment]\nname=\"a\"\nversion=\"1\"\ndescription=\"a\"\nphase=\"repos\"",
+            ),
+            (
+                "fragment/fragment.toml",
+                b"[fragment]\nname=\"b\"\nversion=\"2\"\ndescription=\"b\"\nphase=\"config\"",
+            ),
         ]);
         let result = extract_fragment_toml_from_bytes(&tarball);
         assert!(result.is_err());
