@@ -6,6 +6,7 @@ use crate::fragment::{
     is_repo_path, parse_fragment_toml, validate_phase_consistency, Fragment, FragmentConflicts,
     FragmentPackages, FragmentPhase, FragmentProvides,
 };
+use crate::generator::split_image_ref;
 use crate::manifest::FragmentSource;
 
 #[derive(Debug, Clone)]
@@ -286,11 +287,8 @@ fn try_annotation_fast_path(image_ref: &str) -> Result<Option<Fragment>> {
 
 pub fn load_registry_fragment(image_ref: &str) -> Result<LoadedFragment> {
     let digest = resolve_digest(image_ref)?;
-    let image_with_digest = format!(
-        "{}@{}",
-        image_ref.split('@').next().unwrap_or(image_ref),
-        digest
-    );
+    let (name, _tag) = split_image_ref(image_ref);
+    let image_with_digest = format!("{}@{}", name, digest);
 
     // Assembly always parses the in-layer fragment.toml for the authoritative
     // Fragment.  The annotation fast path is limited to metadata-only
@@ -395,11 +393,8 @@ pub fn load_registry_fragment(image_ref: &str) -> Result<LoadedFragment> {
 /// load_registry_fragment path, which always parses the in-layer TOML.
 pub fn load_registry_fragment_metadata_only(image_ref: &str) -> Result<LoadedFragment> {
     let digest = resolve_digest(image_ref)?;
-    let image_with_digest = format!(
-        "{}@{}",
-        image_ref.split('@').next().unwrap_or(image_ref),
-        digest
-    );
+    let (name, _tag) = split_image_ref(image_ref);
+    let image_with_digest = format!("{}@{}", name, digest);
 
     if let Some(fragment) = try_annotation_fast_path(image_ref)? {
         // Annotations present — return metadata without pulling layers.

@@ -12,7 +12,7 @@ use crate::validate::DeduplicationResult;
 /// This correctly handles registry ports (e.g., `localhost:5000/image:tag`).
 /// Returns `(full_ref, None)` when no tag is present or the ref already
 /// contains a digest (`@`).
-fn split_image_ref(image_ref: &str) -> (&str, Option<&str>) {
+pub fn split_image_ref(image_ref: &str) -> (&str, Option<&str>) {
     // Digests are not tags — leave them alone
     if image_ref.contains('@') {
         return (image_ref, None);
