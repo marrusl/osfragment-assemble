@@ -452,7 +452,7 @@ mod tests {
         let packages_pos = output.find("Packages").unwrap();
         let config_pos = output.find("Config files").unwrap();
         let scripts_pos = output.find("Scripts").unwrap();
-        let preset_pos = output.find("preset-apply").unwrap();
+        let preset_pos = output.find("preset-all").unwrap();
         let validation_pos = output.find("validation").unwrap();
         assert!(repo_pos < packages_pos);
         assert!(packages_pos < config_pos);
