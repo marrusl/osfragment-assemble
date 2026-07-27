@@ -3,13 +3,13 @@ use predicates::prelude::*;
 
 #[test]
 fn no_args_shows_help_or_requires_manifest() {
-    let mut cmd = Command::cargo_bin("bootc-assemble").unwrap();
+    let mut cmd = Command::cargo_bin("osfragment").unwrap();
     cmd.assert().failure();
 }
 
 #[test]
 fn inspect_local_directory() {
-    let mut cmd = Command::cargo_bin("bootc-assemble").unwrap();
+    let mut cmd = Command::cargo_bin("osfragment").unwrap();
     cmd.args(["inspect", "examples/fragments/epel"])
         .assert()
         .success()
@@ -20,7 +20,7 @@ fn inspect_local_directory() {
 
 #[test]
 fn inspect_tailscale_shows_script() {
-    let mut cmd = Command::cargo_bin("bootc-assemble").unwrap();
+    let mut cmd = Command::cargo_bin("osfragment").unwrap();
     cmd.args(["inspect", "examples/fragments/tailscale"])
         .assert()
         .success()

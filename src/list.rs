@@ -4,7 +4,7 @@ use crate::loader::LoadedFragment;
 use crate::manifest::Manifest;
 
 pub fn run_list(manifest: &Manifest, fragments: &[LoadedFragment]) -> Result<()> {
-    println!("Manifest: bootc-assemble.yaml");
+    println!("Manifest: osfragment.yaml");
     println!("Base:     {}", manifest.base);
     println!();
 

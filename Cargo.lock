@@ -101,23 +101,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b588b76d00fde79687d7646a9b5bdf3cc0f655e0bbd080335a95d7e96f3587da"
 
 [[package]]
-name = "bootc-assemble"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "assert_cmd",
- "clap",
- "flate2",
- "predicates",
- "serde",
- "serde_json",
- "serde_yaml",
- "tar",
- "tempfile",
- "toml",
-]
-
-[[package]]
 name = "bstr"
 version = "1.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -345,6 +328,23 @@ name = "once_cell_polyfill"
 version = "1.70.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
+
+[[package]]
+name = "osfragment"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "assert_cmd",
+ "clap",
+ "flate2",
+ "predicates",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "tar",
+ "tempfile",
+ "toml",
+]
 
 [[package]]
 name = "predicates"

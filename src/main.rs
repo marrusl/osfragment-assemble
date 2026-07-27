@@ -2,22 +2,22 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
-use bootc_assemble::generator::generate_containerfile;
-use bootc_assemble::inspect::run_inspect;
-use bootc_assemble::list::run_list;
-use bootc_assemble::loader::{
+use osfragment::generator::generate_containerfile;
+use osfragment::inspect::run_inspect;
+use osfragment::list::run_list;
+use osfragment::loader::{
     load_registry_fragment, load_registry_fragment_metadata_only, resolve_digest,
 };
-use bootc_assemble::manifest::parse_manifest;
-use bootc_assemble::ocp::generate_machine_os_config;
-use bootc_assemble::validate::validate_composition;
+use osfragment::manifest::parse_manifest;
+use osfragment::ocp::generate_machine_os_config;
+use osfragment::validate::validate_composition;
 
 #[derive(Parser)]
 #[command(
-    name = "bootc-assemble",
+    name = "osfragment",
     version,
-    about = "Generate Containerfiles from composable fragment images for bootc and RHCOS",
-    long_about = "Generate Containerfiles from composable fragment images for bootc and RHCOS.\n\n\
+    about = "Generate Containerfiles from composable fragment images for bootc-compatible OS images",
+    long_about = "Generate Containerfiles from composable fragment images for bootc-compatible OS images.\n\n\
         Run without a subcommand to read a manifest and generate a Containerfile.\n\
         Use 'inspect' to examine a fragment or 'list' to show manifest contents."
 )]
@@ -26,7 +26,7 @@ struct Cli {
     command: Option<Commands>,
 
     /// Path to the manifest file
-    #[arg(long, default_value = "bootc-assemble.yaml")]
+    #[arg(long, default_value = "osfragment.yaml")]
     manifest: PathBuf,
 
     /// Output path for the generated Containerfile
@@ -56,7 +56,7 @@ enum Commands {
     /// List fragments from the manifest in phase-sorted order
     List {
         /// Path to the manifest file
-        #[arg(long, default_value = "bootc-assemble.yaml")]
+        #[arg(long, default_value = "osfragment.yaml")]
         manifest: PathBuf,
     },
 }
@@ -77,7 +77,7 @@ fn main() -> Result<()> {
             let total = manifest_data.fragments.len();
             for (idx, mf) in manifest_data.fragments.iter().enumerate() {
                 let source = mf.resolve_source()?;
-                let bootc_assemble::manifest::FragmentSource::Registry { ref image_ref } = source;
+                let osfragment::manifest::FragmentSource::Registry { ref image_ref } = source;
                 eprintln!(
                     "Loading fragment metadata {}/{}: {}...",
                     idx + 1,
@@ -153,20 +153,20 @@ fn main() -> Result<()> {
 }
 
 fn load_all_fragments(
-    manifest: &bootc_assemble::manifest::Manifest,
+    manifest: &osfragment::manifest::Manifest,
     pin_digests: bool,
-) -> Result<Vec<bootc_assemble::loader::LoadedFragment>> {
+) -> Result<Vec<osfragment::loader::LoadedFragment>> {
     let mut fragments = Vec::new();
     let total = manifest.fragments.len();
 
     for (idx, mf) in manifest.fragments.iter().enumerate() {
         let source = mf.resolve_source()?;
-        let bootc_assemble::manifest::FragmentSource::Registry { ref image_ref } = source;
+        let osfragment::manifest::FragmentSource::Registry { ref image_ref } = source;
         eprintln!("Loading fragment {}/{}: {}...", idx + 1, total, image_ref);
         let mut loaded = load_registry_fragment(image_ref)?;
         if !pin_digests {
             // Use the manifest's declared image ref, not the digest-pinned ref
-            loaded.source = bootc_assemble::manifest::FragmentSource::Registry {
+            loaded.source = osfragment::manifest::FragmentSource::Registry {
                 image_ref: image_ref.clone(),
             };
             loaded.resolved_digest = None;
