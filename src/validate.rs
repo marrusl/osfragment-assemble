@@ -118,13 +118,8 @@ mod tests {
     use super::*;
     use crate::fragment::*;
     use crate::manifest::FragmentSource;
-    use std::path::PathBuf;
 
-    fn test_fragment(
-        name: &str,
-        repos: Vec<&str>,
-        conflicts: Vec<&str>,
-    ) -> LoadedFragment {
+    fn test_fragment(name: &str, repos: Vec<&str>, conflicts: Vec<&str>) -> LoadedFragment {
         LoadedFragment {
             fragment: crate::fragment::Fragment {
                 name: name.to_string(),
@@ -142,8 +137,8 @@ mod tests {
             },
             tree_paths: vec![],
             has_configure_script: false,
-            source: FragmentSource::Directory {
-                path: PathBuf::from("/test"),
+            source: FragmentSource::Registry {
+                image_ref: "test/placeholder:latest".to_string(),
             },
             resolved_digest: None,
             manifest_index: 0,

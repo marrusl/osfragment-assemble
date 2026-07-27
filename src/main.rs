@@ -6,10 +6,9 @@ use bootc_assemble::generator::generate_containerfile;
 use bootc_assemble::inspect::run_inspect;
 use bootc_assemble::list::run_list;
 use bootc_assemble::loader::{
-    load_local_fragment, load_registry_fragment, load_registry_fragment_metadata_only,
-    prebuild_local_fragment, resolve_digest, resolve_local_digest,
+    load_registry_fragment, load_registry_fragment_metadata_only, resolve_digest,
 };
-use bootc_assemble::manifest::{parse_manifest, FragmentSource};
+use bootc_assemble::manifest::parse_manifest;
 use bootc_assemble::validate::validate_composition;
 
 #[derive(Parser)]
@@ -29,14 +28,6 @@ struct Cli {
     /// Output path for the generated Containerfile
     #[arg(long, default_value = "Containerfile")]
     output: PathBuf,
-
-    /// After generating, run podman build
-    #[arg(long)]
-    build: bool,
-
-    /// Treat all fragment image values as local directory paths
-    #[arg(long)]
-    local: bool,
 }
 
 #[derive(Subcommand)]
@@ -51,10 +42,6 @@ enum Commands {
         /// Path to the manifest file
         #[arg(long, default_value = "bootc-assemble.yaml")]
         manifest: PathBuf,
-
-        /// Treat all fragment image values as local directory paths
-        #[arg(long)]
-        local: bool,
     },
 }
 
@@ -65,28 +52,16 @@ fn main() -> Result<()> {
         Some(Commands::Inspect { target }) => {
             run_inspect(&target)?;
         }
-        Some(Commands::List { manifest, local }) => {
+        Some(Commands::List { manifest }) => {
             let content = std::fs::read_to_string(&manifest)
                 .with_context(|| format!("reading manifest {}", manifest.display()))?;
             let manifest_data = parse_manifest(&content)?;
 
-            // List is metadata-only — read fragment.toml directly for
-            // dir: sources (no prebuild), use metadata-only for registry.
             let mut fragments = Vec::new();
             for (idx, mf) in manifest_data.fragments.iter().enumerate() {
-                let source = if local {
-                    FragmentSource::Directory {
-                        path: PathBuf::from(mf.image.strip_prefix("dir:").unwrap_or(&mf.image)),
-                    }
-                } else {
-                    mf.resolve_source()
-                };
-                let mut loaded = match &source {
-                    FragmentSource::Directory { .. } => load_local_fragment(&source)?,
-                    FragmentSource::Registry { image_ref } => {
-                        load_registry_fragment_metadata_only(image_ref)?
-                    }
-                };
+                let source = mf.resolve_source()?;
+                let bootc_assemble::manifest::FragmentSource::Registry { ref image_ref } = source;
+                let mut loaded = load_registry_fragment_metadata_only(image_ref)?;
                 loaded.manifest_index = idx;
                 fragments.push(loaded);
             }
@@ -105,11 +80,9 @@ fn main() -> Result<()> {
                 .with_context(|| format!("reading manifest {}", cli.manifest.display()))?;
             let manifest = parse_manifest(&content)?;
 
-            let (fragments, temp_images) = load_all_fragments(&manifest, cli.local, cli.build)?;
+            let fragments = load_all_fragments(&manifest)?;
             let dedup = validate_composition(&manifest, &fragments)?;
 
-            // Always resolve base image digest — the base is a registry
-            // image even when fragments are local directories.
             // Hard-fail if unreachable: an unpinned base violates the
             // digest contract.
             let base_digest = Some(resolve_digest(&manifest.base)?);
@@ -121,23 +94,6 @@ fn main() -> Result<()> {
                 .with_context(|| format!("writing {}", cli.output.display()))?;
 
             eprintln!("Containerfile written to {}", cli.output.display());
-
-            if cli.build {
-                let status = std::process::Command::new("podman")
-                    .args(["build", "-f", &cli.output.to_string_lossy(), "."])
-                    .status()
-                    .context("failed to run podman build")?;
-                if !status.success() {
-                    anyhow::bail!("podman build failed");
-                }
-            }
-
-            // Clean up prebuilt temp images
-            for tag in &temp_images {
-                let _ = std::process::Command::new("podman")
-                    .args(["rmi", tag])
-                    .output();
-            }
         }
     }
 
@@ -146,51 +102,13 @@ fn main() -> Result<()> {
 
 fn load_all_fragments(
     manifest: &bootc_assemble::manifest::Manifest,
-    local: bool,
-    build: bool,
-) -> Result<(Vec<bootc_assemble::loader::LoadedFragment>, Vec<String>)> {
+) -> Result<Vec<bootc_assemble::loader::LoadedFragment>> {
     let mut fragments = Vec::new();
-    let mut temp_images: Vec<String> = Vec::new();
 
     for (idx, mf) in manifest.fragments.iter().enumerate() {
-        let source = if local {
-            FragmentSource::Directory {
-                path: PathBuf::from(mf.image.strip_prefix("dir:").unwrap_or(&mf.image)),
-            }
-        } else {
-            mf.resolve_source()
-        };
-
-        let mut loaded = match &source {
-            FragmentSource::Directory { path } if build => {
-                // --build: prebuild to temp local image so COPY --from
-                // references resolve during the podman build.
-                let frag_toml = std::fs::read_to_string(path.join("fragment.toml"))?;
-                let frag_meta = bootc_assemble::fragment::parse_fragment_toml(&frag_toml)?;
-                let tag = prebuild_local_fragment(path, &frag_meta.name)?;
-                temp_images.push(tag.clone());
-                let local_digest = resolve_local_digest(&tag).with_context(|| {
-                    format!(
-                        "resolving digest for prebuilt fragment '{}'",
-                        frag_meta.name
-                    )
-                })?;
-                let pinned_ref = format!("{}@{}", tag, local_digest);
-                let mut l = load_local_fragment(&source)?;
-                l.source = FragmentSource::Registry {
-                    image_ref: pinned_ref,
-                };
-                l.resolved_digest = Some(local_digest);
-                l
-            }
-            FragmentSource::Directory { .. } => {
-                // No --build: load metadata from the local directory.
-                // The generated Containerfile will contain placeholder
-                // refs that the user replaces before building.
-                load_local_fragment(&source)?
-            }
-            FragmentSource::Registry { image_ref } => load_registry_fragment(image_ref)?,
-        };
+        let source = mf.resolve_source()?;
+        let bootc_assemble::manifest::FragmentSource::Registry { ref image_ref } = source;
+        let mut loaded = load_registry_fragment(image_ref)?;
         loaded.manifest_index = idx;
         fragments.push(loaded);
     }
@@ -203,5 +121,5 @@ fn load_all_fragments(
             .cmp(&b.fragment.phase.weight())
             .then(a.manifest_index.cmp(&b.manifest_index))
     });
-    Ok((fragments, temp_images))
+    Ok(fragments)
 }

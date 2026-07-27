@@ -1,11 +1,9 @@
 use anyhow::{bail, Context, Result};
 use serde::Deserialize;
-use std::path::PathBuf;
 
 #[derive(Debug, Clone)]
 pub enum FragmentSource {
     Registry { image_ref: String },
-    Directory { path: PathBuf },
 }
 
 // ManifestYaml fields are read during serde deserialization but not
@@ -44,16 +42,13 @@ pub struct ManifestFragment {
 }
 
 impl ManifestFragment {
-    pub fn resolve_source(&self) -> FragmentSource {
-        if let Some(dir_path) = self.image.strip_prefix("dir:") {
-            FragmentSource::Directory {
-                path: PathBuf::from(dir_path),
-            }
-        } else {
-            FragmentSource::Registry {
-                image_ref: self.image.clone(),
-            }
+    pub fn resolve_source(&self) -> Result<FragmentSource> {
+        if self.image.starts_with("dir:") {
+            bail!("local directory sources (dir:) are not supported — push fragments to a registry first");
         }
+        Ok(FragmentSource::Registry {
+            image_ref: self.image.clone(),
+        })
     }
 }
 
@@ -109,23 +104,12 @@ fragments:
     mirror: https://rpm-mirror.internal.corp/grafana/
 "#;
 
-    const LOCAL_DIR_YAML: &str = r#"
-apiVersion: bootc.io/v1alpha1
-kind: Composition
-base: registry.redhat.io/rhel10/rhel-bootc:10.0
-fragments:
-  - image: "dir:./examples/fragments/epel"
-"#;
-
     #[test]
     fn parse_minimal_manifest() {
         let manifest = parse_manifest(MINIMAL_YAML).unwrap();
         assert_eq!(manifest.base, "registry.redhat.io/rhel10/rhel-bootc:10.0");
         assert_eq!(manifest.fragments.len(), 2);
-        assert_eq!(
-            manifest.fragments[0].packages,
-            vec!["htop", "tmux"]
-        );
+        assert_eq!(manifest.fragments[0].packages, vec!["htop", "tmux"]);
         assert!(manifest.fragments[1].packages.is_empty());
     }
 
@@ -141,15 +125,25 @@ fragments:
     #[test]
     fn resolve_registry_source() {
         let manifest = parse_manifest(MINIMAL_YAML).unwrap();
-        let source = manifest.fragments[0].resolve_source();
+        let source = manifest.fragments[0].resolve_source().unwrap();
         assert!(matches!(source, FragmentSource::Registry { .. }));
     }
 
     #[test]
-    fn resolve_directory_source() {
-        let manifest = parse_manifest(LOCAL_DIR_YAML).unwrap();
-        let source = manifest.fragments[0].resolve_source();
-        assert!(matches!(source, FragmentSource::Directory { .. }));
+    fn reject_dir_source() {
+        let dir_yaml = r#"
+apiVersion: bootc.io/v1alpha1
+kind: Composition
+base: registry.redhat.io/rhel10/rhel-bootc:10.0
+fragments:
+  - image: "dir:./examples/fragments/epel"
+"#;
+        let manifest = parse_manifest(dir_yaml).unwrap();
+        let result = manifest.fragments[0].resolve_source();
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("local directory sources"));
+        assert!(err_msg.contains("not supported"));
     }
 
     #[test]

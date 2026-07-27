@@ -113,33 +113,18 @@ pub fn generate_containerfile(
     writeln!(out, "# --- Fragment stages ---")?;
     for loaded in fragments {
         let mf = &manifest.fragments[loaded.manifest_index];
-        match &loaded.source {
-            FragmentSource::Registry { image_ref } => {
-                let tag_comment = if image_ref.contains('@') {
-                    let (_, tag) = split_image_ref(&mf.image);
-                    tag.map(|t| format!("  # :{}", t)).unwrap_or_default()
-                } else {
-                    String::new()
-                };
-                writeln!(
-                    out,
-                    "FROM {} AS frag-{}{}",
-                    image_ref, loaded.fragment.name, tag_comment
-                )?;
-            }
-            FragmentSource::Directory { path } => {
-                // Local fragment without --build: the FROM target is a
-                // placeholder.  The user must publish the fragment or
-                // re-run with --build before this Containerfile can be
-                // built directly.
-                writeln!(out, "# local: {}", path.display())?;
-                writeln!(
-                    out,
-                    "FROM localhost/bootc-assemble/frag-{}:local AS frag-{}  # TODO: replace with published image ref",
-                    loaded.fragment.name, loaded.fragment.name
-                )?;
-            }
-        }
+        let FragmentSource::Registry { ref image_ref } = loaded.source;
+        let tag_comment = if image_ref.contains('@') {
+            let (_, tag) = split_image_ref(&mf.image);
+            tag.map(|t| format!("  # :{}", t)).unwrap_or_default()
+        } else {
+            String::new()
+        };
+        writeln!(
+            out,
+            "FROM {} AS frag-{}{}",
+            image_ref, loaded.fragment.name, tag_comment
+        )?;
     }
     writeln!(out)?;
 
@@ -642,52 +627,5 @@ mod tests {
         assert!(output.contains("FROM localhost:5000/rhel-bootc@sha256:base123"));
         // Tag comment should show the original tag
         assert!(output.contains("# :10.0"));
-    }
-
-    #[test]
-    fn local_directory_fragment_generates_placeholder() {
-        let loaded = LoadedFragment {
-            fragment: Fragment {
-                name: "epel".to_string(),
-                version: "10".into(),
-                description: "test".into(),
-                vendor: None,
-                phase: FragmentPhase::Repos,
-                provides: FragmentProvides {
-                    repos: vec!["epel".to_string()],
-                },
-                packages: FragmentPackages { available: vec![] },
-                conflicts: FragmentConflicts { fragments: vec![] },
-            },
-            tree_paths: vec![
-                PathBuf::from("tree/etc/yum.repos.d/epel.repo"),
-                PathBuf::from("tree/etc/pki/rpm-gpg/RPM-GPG-KEY-EPEL-10"),
-            ],
-            has_configure_script: false,
-            source: FragmentSource::Directory {
-                path: PathBuf::from("./examples/fragments/epel"),
-            },
-            resolved_digest: None,
-            manifest_index: 0,
-            repo_file_contents: std::collections::HashMap::new(),
-        };
-        let manifest_frag = ManifestFragment {
-            image: "dir:./examples/fragments/epel".into(),
-            packages: vec![],
-            mirror: None,
-        };
-        let manifest = Manifest {
-            base: "registry.redhat.io/rhel10/rhel-bootc:10.0".into(),
-            fragments: vec![manifest_frag],
-        };
-        let output =
-            generate_containerfile(&manifest, &[loaded], Some("sha256:base123"), &empty_dedup())
-                .unwrap();
-        // Local fragment should have a comment showing the source path
-        assert!(output.contains("# local: ./examples/fragments/epel"));
-        // FROM line should use a placeholder, not an ephemeral image ref
-        assert!(output.contains("FROM localhost/bootc-assemble/frag-epel:local AS frag-epel"));
-        // Should indicate user action needed
-        assert!(output.contains("TODO: replace with published image ref"));
     }
 }

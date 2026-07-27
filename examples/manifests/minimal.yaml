@@ -4,6 +4,6 @@ kind: Composition
 base: registry.redhat.io/rhel10/rhel-bootc:10.0
 
 fragments:
-  - image: "dir:examples/fragments/epel"
+  - image: quay.io/mrussell/fragments/epel:10
     packages: [htop, tmux]
-  - image: "dir:examples/fragments/cis-hardening"
+  - image: quay.io/mrussell/fragments/cis-hardening:2.1
