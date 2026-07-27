@@ -72,11 +72,7 @@ pub fn run_inspect(target: &str) -> Result<()> {
     Ok(())
 }
 
-fn collect_display_paths(
-    base: &Path,
-    prefix: &str,
-    paths: &mut Vec<String>,
-) -> Result<()> {
+fn collect_display_paths(base: &Path, prefix: &str, paths: &mut Vec<String>) -> Result<()> {
     let dir = base.join(prefix);
     if !dir.exists() {
         return Ok(());
@@ -86,11 +82,7 @@ fn collect_display_paths(
     Ok(())
 }
 
-fn collect_display_recursive(
-    dir: &Path,
-    base: &Path,
-    paths: &mut Vec<String>,
-) -> Result<()> {
+fn collect_display_recursive(dir: &Path, base: &Path, paths: &mut Vec<String>) -> Result<()> {
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
         let path = entry.path();

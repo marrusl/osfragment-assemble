@@ -92,8 +92,7 @@ pub struct Fragment {
 }
 
 pub fn parse_fragment_toml(content: &str) -> Result<Fragment> {
-    let parsed: FragmentToml =
-        toml::from_str(content).context("failed to parse fragment.toml")?;
+    let parsed: FragmentToml = toml::from_str(content).context("failed to parse fragment.toml")?;
     let inner = parsed.fragment;
     Ok(Fragment {
         name: inner.name,

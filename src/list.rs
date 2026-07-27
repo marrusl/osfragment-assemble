@@ -16,10 +16,7 @@ pub fn run_list(manifest: &Manifest, fragments: &[LoadedFragment]) -> Result<()>
             "NAME", "PHASE", "VERSION", "DIGEST"
         );
     } else {
-        println!(
-            "  {:<20} {:<8} {:<10} PACKAGES",
-            "NAME", "PHASE", "VERSION"
-        );
+        println!("  {:<20} {:<8} {:<10} PACKAGES", "NAME", "PHASE", "VERSION");
     }
 
     for loaded in fragments {
