@@ -8,4 +8,4 @@ phase = "config"
 repos = ["epel"]
 
 [fragment.packages]
-available = ["golang-github-prometheus-node-exporter"]
+available = ["node-exporter"]

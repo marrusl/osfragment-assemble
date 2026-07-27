@@ -16,6 +16,6 @@ fragments:
     packages: [vault]
   - image: quay.io/marrusl2/fragments/cis-hardening:2.1
   - image: quay.io/marrusl2/fragments/node-exporter:1.8.0
-    packages: [golang-github-prometheus-node-exporter]
+    packages: [node-exporter]
   - image: quay.io/marrusl2/fragments/nginx:1.26
     packages: [nginx]
