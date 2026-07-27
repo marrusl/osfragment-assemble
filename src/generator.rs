@@ -191,7 +191,8 @@ pub fn generate_containerfile(
         for pkg in &all_packages {
             writeln!(out, "        {} \\", pkg)?;
         }
-        writeln!(out, "    && dnf clean all")?;
+        writeln!(out, "    && dnf clean all \\")?;
+        writeln!(out, "    && rm -rf /var/log/dnf* /var/log/hawkey.log /var/lib/dnf/history.sqlite*")?;
         writeln!(out)?;
     }
 
