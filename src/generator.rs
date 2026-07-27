@@ -112,29 +112,15 @@ pub fn generate_containerfile(
     // Fragment FROM stages
     writeln!(out, "# --- Fragment stages ---")?;
     for loaded in fragments {
-        let mf = &manifest.fragments[loaded.manifest_index];
         let FragmentSource::Registry { ref image_ref } = loaded.source;
-        let tag_comment = if image_ref.contains('@') {
-            let (_, tag) = split_image_ref(&mf.image);
-            tag.map(|t| format!("  # :{}", t)).unwrap_or_default()
-        } else {
-            String::new()
-        };
-        writeln!(
-            out,
-            "FROM {} AS frag-{}{}",
-            image_ref, loaded.fragment.name, tag_comment
-        )?;
+        writeln!(out, "FROM {} AS frag-{}", image_ref, loaded.fragment.name)?;
     }
     writeln!(out)?;
 
     // Base
     writeln!(out, "# --- Base ---")?;
     let base_ref = if let Some(d) = base_digest {
-        let (base_name, tag) = split_image_ref(&manifest.base);
-        if let Some(t) = tag {
-            writeln!(out, "# base: {}:{}", base_name, t)?;
-        }
+        let (base_name, _tag) = split_image_ref(&manifest.base);
         format!("{}@{}", base_name, d)
     } else {
         manifest.base.clone()
@@ -627,7 +613,5 @@ mod tests {
                 .unwrap();
         // Must preserve the port in the pinned ref
         assert!(output.contains("FROM localhost:5000/rhel-bootc@sha256:base123"));
-        // Tag comment should show the original base ref
-        assert!(output.contains("# base: localhost:5000/rhel-bootc:10.0"));
     }
 }
