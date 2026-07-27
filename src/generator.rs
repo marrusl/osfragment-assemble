@@ -1,6 +1,7 @@
 use anyhow::Result;
 use std::fmt::Write;
 
+use crate::fragment::is_repo_path;
 use crate::loader::LoadedFragment;
 use crate::manifest::{FragmentSource, Manifest};
 use crate::validate::DeduplicationResult;
@@ -158,29 +159,29 @@ pub fn generate_containerfile(
         writeln!(out)?;
     }
 
-    // Copy fragment files — one COPY per fragment
-    let has_tree_content = fragments.iter().any(|f| {
-        f.tree_paths
-            .iter()
-            .any(|p| p.to_string_lossy().starts_with("tree/"))
-    });
-    if has_tree_content {
+    // Repo files — must land before dnf install
+    let has_repo_content = fragments
+        .iter()
+        .any(|f| f.tree_paths.iter().any(|p| is_repo_path(p)));
+    if has_repo_content {
         if !ocp {
-            writeln!(out, "# --- Fragment files ---")?;
+            writeln!(out, "# --- Repo files ---")?;
         }
         for loaded in fragments {
-            let has_tree = loaded
-                .tree_paths
-                .iter()
-                .any(|p| p.to_string_lossy().starts_with("tree/"));
-            if !has_tree {
+            let has_repo = loaded.tree_paths.iter().any(|p| is_repo_path(p));
+            if !has_repo {
                 continue;
             }
             let source = copy_from_source(loaded, use_named_stages);
-            writeln!(out, "COPY --from={} /fragment/tree/ /", source)?;
+            if loaded.tree_paths.iter().any(|p| p.to_string_lossy().contains("yum.repos.d")) {
+                writeln!(out, "COPY --from={} /fragment/tree/etc/yum.repos.d/ /etc/yum.repos.d/", source)?;
+            }
+            if loaded.tree_paths.iter().any(|p| p.to_string_lossy().contains("rpm-gpg")) {
+                writeln!(out, "COPY --from={} /fragment/tree/etc/pki/rpm-gpg/ /etc/pki/rpm-gpg/", source)?;
+            }
         }
 
-        // Mirror rewrites (must follow the COPYs)
+        // Mirror rewrites (must follow the repo COPYs)
         for loaded in fragments {
             let mf = &manifest.fragments[loaded.manifest_index];
             if let Some(mirror_url) = &mf.mirror {
@@ -228,6 +229,32 @@ pub fn generate_containerfile(
             out,
             "    && rm -rf /var/log/dnf* /var/log/hawkey.log /var/lib/dnf/history.sqlite*"
         )?;
+        if !ocp {
+            writeln!(out)?;
+        }
+    }
+
+    // Config files — after packages so fragment configs win over RPM defaults
+    let has_config_content = fragments.iter().any(|f| {
+        f.tree_paths
+            .iter()
+            .any(|p| p.to_string_lossy().starts_with("tree/") && !is_repo_path(p))
+    });
+    if has_config_content {
+        if !ocp {
+            writeln!(out, "# --- Config files ---")?;
+        }
+        for loaded in fragments {
+            let has_non_repo = loaded
+                .tree_paths
+                .iter()
+                .any(|p| p.to_string_lossy().starts_with("tree/") && !is_repo_path(p));
+            if !has_non_repo {
+                continue;
+            }
+            let source = copy_from_source(loaded, use_named_stages);
+            writeln!(out, "COPY --from={} /fragment/tree/ /", source)?;
+        }
         if !ocp {
             writeln!(out)?;
         }
@@ -399,13 +426,15 @@ mod tests {
             false,
         )
         .unwrap();
-        let files_pos = output.find("Fragment files").unwrap();
+        let repo_pos = output.find("Repo files").unwrap();
         let packages_pos = output.find("Packages").unwrap();
+        let config_pos = output.find("Config files").unwrap();
         let scripts_pos = output.find("Scripts").unwrap();
         let preset_pos = output.find("preset-apply").unwrap();
         let validation_pos = output.find("validation").unwrap();
-        assert!(files_pos < packages_pos);
-        assert!(packages_pos < scripts_pos);
+        assert!(repo_pos < packages_pos);
+        assert!(packages_pos < config_pos);
+        assert!(config_pos < scripts_pos);
         assert!(scripts_pos < preset_pos);
         assert!(preset_pos < validation_pos);
     }
@@ -686,8 +715,8 @@ mod tests {
         };
         let output =
             generate_containerfile(&manifest, &[epel], None, &empty_dedup(), false).unwrap();
-        // Inline image ref in COPY, no named FROM stage
-        assert!(output.contains("COPY --from=quay.io/test/epel:10 /fragment/tree/ /"));
+        // Inline image ref in COPY for repo files, no named FROM stage
+        assert!(output.contains("COPY --from=quay.io/test/epel:10 /fragment/tree/etc/yum.repos.d/"));
         assert!(!output.contains("AS frag-epel"));
     }
 
@@ -734,9 +763,9 @@ mod tests {
             false,
         )
         .unwrap();
-        // Named FROM stage and named COPY ref
+        // Named FROM stage and named COPY ref for repo files
         assert!(output.contains("FROM quay.io/test/epel@sha256:aaa111 AS frag-epel"));
-        assert!(output.contains("COPY --from=frag-epel /fragment/tree/ /"));
+        assert!(output.contains("COPY --from=frag-epel /fragment/tree/etc/yum.repos.d/"));
     }
 
     // --- OCP mode tests ---
@@ -790,7 +819,7 @@ mod tests {
         };
         let output =
             generate_containerfile(&manifest, &[epel], None, &empty_dedup(), true).unwrap();
-        assert!(output.contains("COPY --from=quay.io/test/epel:10 /fragment/tree/ /"));
+        assert!(output.contains("COPY --from=quay.io/test/epel:10 /fragment/tree/etc/yum.repos.d/"));
         assert!(!output.contains("AS frag-"));
     }
 
@@ -812,7 +841,7 @@ mod tests {
         // Named stages before FROM configs AS final
         assert!(output.contains("FROM quay.io/test/epel@sha256:aaa111 AS frag-epel"));
         assert!(output.contains("FROM configs AS final"));
-        assert!(output.contains("COPY --from=frag-epel /fragment/tree/ /"));
+        assert!(output.contains("COPY --from=frag-epel /fragment/tree/etc/yum.repos.d/"));
         // Fragment stages must appear before the main stage
         let stage_pos = output.find("AS frag-epel").unwrap();
         let final_pos = output.find("FROM configs AS final").unwrap();
