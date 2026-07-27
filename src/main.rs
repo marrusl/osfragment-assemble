@@ -15,7 +15,10 @@ use bootc_assemble::validate::validate_composition;
 #[command(
     name = "bootc-assemble",
     version,
-    about = "Composable image definitions for bootc and RHCOS"
+    about = "Generate Containerfiles from composable fragment images for bootc and RHCOS",
+    long_about = "Generate Containerfiles from composable fragment images for bootc and RHCOS.\n\n\
+        Run without a subcommand to read a manifest and generate a Containerfile.\n\
+        Use 'inspect' to examine a fragment or 'list' to show manifest contents."
 )]
 struct Cli {
     #[command(subcommand)]
