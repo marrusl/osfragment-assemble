@@ -1,5 +1,5 @@
 [package]
-name = "osfragment-assemble"
+name = "osfragment"
 version = "0.1.0"
 edition = "2021"
 description = "Composable image definitions for bootc-compatible OS images"

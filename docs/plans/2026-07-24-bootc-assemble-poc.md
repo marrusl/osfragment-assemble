@@ -1,14 +1,14 @@
-# osfragment-assemble POC Implementation Plan
+# osfragment POC Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Build a working POC of `osfragment-assemble` — a Rust CLI that reads a YAML manifest of fragment OCI images and generates a multi-stage Containerfile for bootc/RHCOS image builds, with 8 example fragments using real freely-available content.
+**Goal:** Build a working POC of `osfragment` — a Rust CLI that reads a YAML manifest of fragment OCI images and generates a multi-stage Containerfile for bootc/RHCOS image builds, with 8 example fragments using real freely-available content.
 
 **Architecture:** Fragment-first approach. The tool reads fragment metadata (via skopeo for registry images, direct filesystem reads for local directories), validates the manifest, and generates a Containerfile with digest-pinned FROM stages, phase-ordered content, tree-splitting for repo files, and a preset-apply step for service enablement. Fragments are single-layer OCI images built FROM scratch.
 
 **Tech Stack:** Rust (2021 edition), clap (CLI), serde + toml + serde_yaml (parsing), flate2 + tar (layer extraction), tempfile, anyhow (errors)
 
-**Spec:** `docs/specs/2026-07-24-osfragment-assemble-poc-design.md`
+**Spec:** `docs/specs/2026-07-24-osfragment-poc-design.md`
 
 ## Global Constraints
 
@@ -44,7 +44,7 @@
 
 ```toml
 [package]
-name = "osfragment-assemble"
+name = "osfragment"
 version = "0.1.0"
 edition = "2021"
 description = "Composable image definitions for bootc and RHCOS"
@@ -193,7 +193,7 @@ phase = "install"
 
 - [ ] **Step 4: Run tests to verify they fail**
 
-Run: `cd ~/Work/osfragment-assemble && cargo test --lib fragment`
+Run: `cd ~/Work/osfragment && cargo test --lib fragment`
 Expected: compilation errors — types not yet defined
 
 - [ ] **Step 5: Implement fragment.rs types and parsing**
@@ -348,20 +348,20 @@ pub fn validate_phase_consistency(fragment: &Fragment, tree_paths: &[PathBuf]) -
 use anyhow::Result;
 
 fn main() -> Result<()> {
-    println!("osfragment-assemble v0.1.0");
+    println!("osfragment v0.1.0");
     Ok(())
 }
 ```
 
 - [ ] **Step 7: Run tests to verify they pass**
 
-Run: `cd ~/Work/osfragment-assemble && cargo test --lib fragment`
+Run: `cd ~/Work/osfragment && cargo test --lib fragment`
 Expected: all 7 tests PASS
 
 - [ ] **Step 8: Commit**
 
 ```bash
-cd ~/Work/osfragment-assemble
+cd ~/Work/osfragment
 git add Cargo.toml src/
 git commit -m "feat: project scaffold and fragment.toml data model
 
@@ -494,7 +494,7 @@ fragments: []
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `cd ~/Work/osfragment-assemble && cargo test --lib manifest`
+Run: `cd ~/Work/osfragment && cargo test --lib manifest`
 Expected: compilation errors — types not defined
 
 - [ ] **Step 3: Implement manifest.rs types and parsing**
@@ -587,13 +587,13 @@ Add `pub mod manifest;` to `src/lib.rs`.
 
 - [ ] **Step 5: Run tests to verify they pass**
 
-Run: `cd ~/Work/osfragment-assemble && cargo test --lib manifest`
+Run: `cd ~/Work/osfragment && cargo test --lib manifest`
 Expected: all 6 tests PASS
 
 - [ ] **Step 6: Commit**
 
 ```bash
-cd ~/Work/osfragment-assemble
+cd ~/Work/osfragment
 git add src/manifest.rs src/lib.rs
 git commit -m "feat: manifest YAML data model and parsing
 
@@ -629,7 +629,7 @@ This task creates the 8 example fragments. Each fragment follows the same patter
 - [ ] **Step 1: Create directory structure for all 8 fragments**
 
 ```bash
-cd ~/Work/osfragment-assemble
+cd ~/Work/osfragment
 for frag in epel tailscale grafana postgresql hashicorp cis-hardening node-exporter nginx; do
   mkdir -p examples/fragments/$frag/tree examples/fragments/$frag/scripts
 done
@@ -1088,7 +1088,7 @@ fragments:
 - [ ] **Step 11: Verify all fragment.toml files parse correctly**
 
 ```bash
-cd ~/Work/osfragment-assemble
+cd ~/Work/osfragment
 cargo test --lib fragment -- --include-ignored 2>/dev/null
 # Also verify with a quick Rust script or add a test that reads each example:
 for f in examples/fragments/*/fragment.toml; do
@@ -1126,7 +1126,7 @@ fn parse_all_example_fragments() {
 - [ ] **Step 12: Commit**
 
 ```bash
-cd ~/Work/osfragment-assemble
+cd ~/Work/osfragment
 git add examples/
 git commit -m "feat: 8 example fragments and 3 manifests
 
@@ -1241,7 +1241,7 @@ mod tests {
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `cd ~/Work/osfragment-assemble && cargo test --lib loader`
+Run: `cd ~/Work/osfragment && cargo test --lib loader`
 Expected: compilation errors
 
 - [ ] **Step 3: Implement local directory loading**
@@ -1430,13 +1430,13 @@ Add `pub mod loader;` to `src/lib.rs`.
 
 - [ ] **Step 5: Run tests to verify they pass**
 
-Run: `cd ~/Work/osfragment-assemble && cargo test --lib loader`
+Run: `cd ~/Work/osfragment && cargo test --lib loader`
 Expected: all 5 tests PASS (registry tests require skopeo, tested in Task 7)
 
 - [ ] **Step 6: Commit**
 
 ```bash
-cd ~/Work/osfragment-assemble
+cd ~/Work/osfragment
 git add src/loader.rs src/lib.rs
 git commit -m "feat: fragment loading — local directory mode
 
@@ -1539,7 +1539,7 @@ phase = "repos"
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `cd ~/Work/osfragment-assemble && cargo test --lib loader::layer_tests`
+Run: `cd ~/Work/osfragment && cargo test --lib loader::layer_tests`
 Expected: compilation errors
 
 - [ ] **Step 3: Implement layer extraction with fail-closed contract**
@@ -1881,7 +1881,7 @@ fn extract_tree_paths_from_bytes(compressed: &[u8]) -> Result<Vec<PathBuf>> {
 }
 
 pub fn prebuild_local_fragment(dir: &Path, name: &str) -> Result<String> {
-    let tag = format!("localhost/osfragment-assemble/frag-{}:local", name);
+    let tag = format!("localhost/osfragment/frag-{}:local", name);
 
     let status = std::process::Command::new("podman")
         .args([
@@ -1916,13 +1916,13 @@ pub fn prebuild_local_fragment(dir: &Path, name: &str) -> Result<String> {
 
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `cd ~/Work/osfragment-assemble && cargo test --lib loader`
+Run: `cd ~/Work/osfragment && cargo test --lib loader`
 Expected: all layer extraction tests PASS. Registry tests require skopeo and a live registry — tested in integration (Task 8).
 
 - [ ] **Step 5: Commit**
 
 ```bash
-cd ~/Work/osfragment-assemble
+cd ~/Work/osfragment
 git add src/loader.rs
 git commit -m "feat: registry fragment loading and layer extraction
 
@@ -2158,7 +2158,7 @@ mod tests {
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `cd ~/Work/osfragment-assemble && cargo test --lib generator`
+Run: `cd ~/Work/osfragment && cargo test --lib generator`
 Expected: compilation errors
 
 - [ ] **Step 3: Implement Containerfile generation**
@@ -2181,8 +2181,8 @@ pub fn generate_containerfile(
     let mut out = String::new();
 
     // Header
-    writeln!(out, "# Generated by osfragment-assemble v0.1.0")?;
-    writeln!(out, "# Manifest: osfragment-assemble.yaml")?;
+    writeln!(out, "# Generated by osfragment v0.1.0")?;
+    writeln!(out, "# Manifest: osfragment.yaml")?;
 
     let frag_summary: Vec<String> = fragments
         .iter()
@@ -2466,13 +2466,13 @@ Add `pub mod generator;` to `src/lib.rs`.
 
 - [ ] **Step 5: Run tests to verify they pass**
 
-Run: `cd ~/Work/osfragment-assemble && cargo test --lib generator`
+Run: `cd ~/Work/osfragment && cargo test --lib generator`
 Expected: all 7 tests PASS
 
 - [ ] **Step 6: Commit**
 
 ```bash
-cd ~/Work/osfragment-assemble
+cd ~/Work/osfragment
 git add src/generator.rs src/lib.rs
 git commit -m "feat: Containerfile generation engine
 
@@ -2507,13 +2507,13 @@ use predicates::prelude::*;
 
 #[test]
 fn no_args_shows_help_or_requires_manifest() {
-    let mut cmd = Command::cargo_bin("osfragment-assemble").unwrap();
+    let mut cmd = Command::cargo_bin("osfragment").unwrap();
     cmd.assert().failure();
 }
 
 #[test]
 fn inspect_local_directory() {
-    let mut cmd = Command::cargo_bin("osfragment-assemble").unwrap();
+    let mut cmd = Command::cargo_bin("osfragment").unwrap();
     cmd.args(["inspect", "examples/fragments/epel"])
         .assert()
         .success()
@@ -2524,7 +2524,7 @@ fn inspect_local_directory() {
 
 #[test]
 fn inspect_tailscale_shows_script() {
-    let mut cmd = Command::cargo_bin("osfragment-assemble").unwrap();
+    let mut cmd = Command::cargo_bin("osfragment").unwrap();
     cmd.args(["inspect", "examples/fragments/tailscale"])
         .assert()
         .success()
@@ -2533,7 +2533,7 @@ fn inspect_tailscale_shows_script() {
 
 #[test]
 fn list_with_local_manifest() {
-    let mut cmd = Command::cargo_bin("osfragment-assemble").unwrap();
+    let mut cmd = Command::cargo_bin("osfragment").unwrap();
     cmd.args([
         "list",
         "--manifest",
@@ -2548,28 +2548,28 @@ fn list_with_local_manifest() {
 
 #[test]
 fn assemble_with_local_fragments() {
-    let mut cmd = Command::cargo_bin("osfragment-assemble").unwrap();
+    let mut cmd = Command::cargo_bin("osfragment").unwrap();
     cmd.args([
         "--manifest",
         "examples/manifests/minimal.yaml",
         "--local",
         "--output",
-        "/tmp/osfragment-assemble-test-containerfile",
+        "/tmp/osfragment-test-containerfile",
     ])
     .assert()
     .success();
 
-    let content = std::fs::read_to_string("/tmp/osfragment-assemble-test-containerfile").unwrap();
+    let content = std::fs::read_to_string("/tmp/osfragment-test-containerfile").unwrap();
     assert!(content.contains("Phase: repos"));
     assert!(content.contains("Phase: packages"));
     assert!(content.contains("bootc container lint"));
-    std::fs::remove_file("/tmp/osfragment-assemble-test-containerfile").ok();
+    std::fs::remove_file("/tmp/osfragment-test-containerfile").ok();
 }
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `cd ~/Work/osfragment-assemble && cargo test --test cli`
+Run: `cd ~/Work/osfragment && cargo test --test cli`
 Expected: compilation errors or missing binary
 
 - [ ] **Step 3: Implement inspect.rs**
@@ -2698,7 +2698,7 @@ use crate::loader::LoadedFragment;
 use crate::manifest::Manifest;
 
 pub fn run_list(manifest: &Manifest, fragments: &[LoadedFragment]) -> Result<()> {
-    println!("Manifest: osfragment-assemble.yaml");
+    println!("Manifest: osfragment.yaml");
     println!("Base:     {}", manifest.base);
     println!();
 
@@ -2762,21 +2762,21 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
-use osfragment_assemble::inspect::run_inspect;
-use osfragment_assemble::list::run_list;
-use osfragment_assemble::loader::{load_local_fragment, load_registry_fragment, prebuild_local_fragment, resolve_digest};
-use osfragment_assemble::manifest::{parse_manifest, FragmentSource};
-use osfragment_assemble::generator::generate_containerfile;
-use osfragment_assemble::validate::validate_composition;
+use osfragment::inspect::run_inspect;
+use osfragment::list::run_list;
+use osfragment::loader::{load_local_fragment, load_registry_fragment, prebuild_local_fragment, resolve_digest};
+use osfragment::manifest::{parse_manifest, FragmentSource};
+use osfragment::generator::generate_containerfile;
+use osfragment::validate::validate_composition;
 
 #[derive(Parser)]
-#[command(name = "osfragment-assemble", version, about = "Composable image definitions for bootc and RHCOS")]
+#[command(name = "osfragment", version, about = "Composable image definitions for bootc and RHCOS")]
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
 
     /// Path to the manifest file
-    #[arg(long, default_value = "osfragment-assemble.yaml")]
+    #[arg(long, default_value = "osfragment.yaml")]
     manifest: PathBuf,
 
     /// Output path for the generated Containerfile
@@ -2802,7 +2802,7 @@ enum Commands {
     /// List fragments from the manifest in phase-sorted order
     List {
         /// Path to the manifest file
-        #[arg(long, default_value = "osfragment-assemble.yaml")]
+        #[arg(long, default_value = "osfragment.yaml")]
         manifest: PathBuf,
 
         /// Treat all fragment image values as local directory paths
@@ -2902,9 +2902,9 @@ fn main() -> Result<()> {
 }
 
 fn load_all_fragments(
-    manifest: &osfragment_assemble::manifest::Manifest,
+    manifest: &osfragment::manifest::Manifest,
     local: bool,
-) -> Result<(Vec<osfragment_assemble::loader::LoadedFragment>, Vec<String>)> {
+) -> Result<(Vec<osfragment::loader::LoadedFragment>, Vec<String>)> {
     let mut fragments = Vec::new();
     let mut temp_images: Vec<String> = Vec::new();
 
@@ -2924,7 +2924,7 @@ fn load_all_fragments(
                 // Prebuild to temp local image, resolve its digest,
                 // then load metadata from the local directory
                 let frag_toml = std::fs::read_to_string(path.join("fragment.toml"))?;
-                let frag_meta = osfragment_assemble::fragment::parse_fragment_toml(&frag_toml)?;
+                let frag_meta = osfragment::fragment::parse_fragment_toml(&frag_toml)?;
                 let tag = prebuild_local_fragment(path, &frag_meta.name)?;
                 temp_images.push(tag.clone());
                 // Resolve digest from local podman storage (not skopeo —
@@ -2968,13 +2968,13 @@ pub mod validate;
 
 - [ ] **Step 7: Run tests to verify they pass**
 
-Run: `cd ~/Work/osfragment-assemble && cargo test`
+Run: `cd ~/Work/osfragment && cargo test`
 Expected: all unit tests and CLI integration tests PASS
 
 - [ ] **Step 8: Manual smoke test**
 
 ```bash
-cd ~/Work/osfragment-assemble
+cd ~/Work/osfragment
 
 # --- Local mode smoke tests ---
 # Uses dir: prefixed manifests so --local is not needed with registry-ref manifests
@@ -3000,13 +3000,13 @@ cargo run -- list --manifest /tmp/local-test.yaml
 # Assemble with local dir: fragments (prebuilds temp images)
 cargo run -- --manifest /tmp/local-test.yaml --output /tmp/local-test-containerfile
 cat /tmp/local-test-containerfile
-# Verify: FROM lines reference localhost/osfragment-assemble/frag-* temp images
+# Verify: FROM lines reference localhost/osfragment/frag-* temp images
 
 # --- Registry mode smoke tests (requires local registry) ---
 # Proves the full end-to-end: build fragments -> push -> assemble -> build image
 
 # Start a local registry
-podman run -d --name osfragment-assemble-registry -p 5000:5000 registry:2
+podman run -d --name osfragment-registry -p 5000:5000 registry:2
 
 # Build and push 5 example fragments (exceeds the 4-fragment success criterion)
 for frag in epel tailscale cis-hardening node-exporter nginx; do
@@ -3064,7 +3064,7 @@ else
 fi
 
 # Cleanup
-podman stop osfragment-assemble-registry && podman rm osfragment-assemble-registry
+podman stop osfragment-registry && podman rm osfragment-registry
 ```
 
 Verify the output matches the expected Containerfile format from the spec.
@@ -3072,7 +3072,7 @@ Verify the output matches the expected Containerfile format from the spec.
 - [ ] **Step 9: Commit**
 
 ```bash
-cd ~/Work/osfragment-assemble
+cd ~/Work/osfragment
 git add src/ tests/
 git commit -m "feat: CLI — default assembly, inspect, and list commands
 
@@ -3194,7 +3194,7 @@ mod tests {
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `cd ~/Work/osfragment-assemble && cargo test --lib validate`
+Run: `cd ~/Work/osfragment && cargo test --lib validate`
 Expected: compilation errors
 
 - [ ] **Step 3: Implement validation**
@@ -3321,7 +3321,7 @@ pub struct DeduplicationResult {
 Add before `generate_containerfile()` in the `None` (assembly) branch of main.rs:
 
 ```rust
-use osfragment_assemble::validate::validate_composition;
+use osfragment::validate::validate_composition;
 
 // ... after loading fragments:
 validate_composition(&manifest, &fragments)?;
@@ -3333,13 +3333,13 @@ Add `pub mod validate;` to `src/lib.rs`.
 
 - [ ] **Step 6: Run tests to verify they pass**
 
-Run: `cd ~/Work/osfragment-assemble && cargo test`
+Run: `cd ~/Work/osfragment && cargo test`
 Expected: all tests PASS
 
 - [ ] **Step 7: Commit**
 
 ```bash
-cd ~/Work/osfragment-assemble
+cd ~/Work/osfragment
 git add src/validate.rs src/lib.rs src/main.rs
 git commit -m "feat: composition validation — conflicts, dedup, name uniqueness
 
