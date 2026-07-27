@@ -249,56 +249,18 @@ pub fn generate_containerfile(
     if !config_fragments.is_empty() {
         writeln!(out, "# --- Phase: config (30) ---")?;
         for loaded in &config_fragments {
-            let non_repo_tree: Vec<_> = loaded
+            let has_tree = loaded
                 .tree_paths
                 .iter()
-                .filter(|p| p.to_string_lossy().starts_with("tree/") && !is_repo_path(p))
-                .collect();
+                .any(|p| p.to_string_lossy().starts_with("tree/") && !is_repo_path(p));
 
             writeln!(out, "# {}", loaded.fragment.name)?;
-            if !non_repo_tree.is_empty() {
-                // Determine the top-level dirs under tree/ that have non-repo content
-                let mut top_dirs: Vec<String> = non_repo_tree
-                    .iter()
-                    .filter_map(|p| {
-                        p.strip_prefix("tree/")
-                            .ok()
-                            .and_then(|r| r.components().next())
-                            .map(|c| c.as_os_str().to_string_lossy().to_string())
-                    })
-                    .collect::<std::collections::HashSet<_>>()
-                    .into_iter()
-                    .collect();
-                top_dirs.sort();
-
-                for dir in &top_dirs {
-                    if *dir == "etc" {
-                        // For /etc, skip repo subdirs but copy the rest
-                        let etc_paths: Vec<_> = non_repo_tree
-                            .iter()
-                            .filter(|p| p.to_string_lossy().starts_with("tree/etc/"))
-                            .collect();
-                        if !etc_paths.is_empty() {
-                            // Copy specific non-repo /etc paths
-                            for p in etc_paths {
-                                let dest = p.strip_prefix("tree").unwrap();
-                                writeln!(
-                                    out,
-                                    "COPY --from=frag-{} /fragment/{} {}",
-                                    loaded.fragment.name,
-                                    p.display(),
-                                    dest.display()
-                                )?;
-                            }
-                        }
-                    } else {
-                        writeln!(
-                            out,
-                            "COPY --from=frag-{} /fragment/tree/{dir}/ /{dir}/",
-                            loaded.fragment.name
-                        )?;
-                    }
-                }
+            if has_tree {
+                writeln!(
+                    out,
+                    "COPY --from=frag-{} /fragment/tree/ /",
+                    loaded.fragment.name
+                )?;
             }
             if loaded.has_configure_script {
                 writeln!(
