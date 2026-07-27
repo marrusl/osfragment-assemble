@@ -336,41 +336,45 @@ pub fn load_registry_fragment(image_ref: &str) -> Result<LoadedFragment> {
         .as_array()
         .ok_or_else(|| anyhow::anyhow!("no layers in manifest"))?;
 
-    if layers.len() != 1 {
-        bail!(
-            "fragment image must be single-layer, found {} layers",
-            layers.len()
-        );
+    // Try each layer until we find one containing fragment/fragment.toml
+    let mut fragment = None;
+    let mut relative_paths = Vec::new();
+    let mut has_configure_script = false;
+    let mut repo_file_contents = std::collections::HashMap::new();
+
+    for layer_desc in layers {
+        let layer_digest = layer_desc["digest"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("no digest in layer descriptor"))?;
+
+        let layer_blob_path = oci_path.join("blobs").join(layer_digest.replace(':', "/"));
+        let layer_bytes = std::fs::read(&layer_blob_path)?;
+
+        if let Ok(toml_content) = extract_fragment_toml_from_bytes(&layer_bytes) {
+            fragment = Some(parse_fragment_toml(&toml_content)?);
+
+            let tree_paths = extract_tree_paths_from_bytes(&layer_bytes)?;
+
+            has_configure_script = tree_paths
+                .iter()
+                .any(|p| p.to_string_lossy() == "fragment/scripts/configure.sh");
+
+            relative_paths = tree_paths
+                .iter()
+                .filter_map(|p| p.strip_prefix("fragment").ok())
+                .map(|p| p.to_path_buf())
+                .collect();
+
+            repo_file_contents = extract_repo_file_contents_from_bytes(&layer_bytes)?;
+            break;
+        }
     }
 
-    let layer_digest = layers[0]["digest"]
-        .as_str()
-        .ok_or_else(|| anyhow::anyhow!("no digest in layer descriptor"))?;
-
-    let layer_blob_path = oci_path.join("blobs").join(layer_digest.replace(':', "/"));
-    let layer_bytes = std::fs::read(&layer_blob_path)?;
-
-    let toml_content = extract_fragment_toml_from_bytes(&layer_bytes)?;
-    let fragment = parse_fragment_toml(&toml_content)?;
-
-    // Always extract tree paths from the layer (annotations don't carry these)
-    let tree_paths = extract_tree_paths_from_bytes(&layer_bytes)?;
-
-    let has_configure_script = tree_paths
-        .iter()
-        .any(|p| p.to_string_lossy() == "fragment/scripts/configure.sh");
-
-    // Remap paths: fragment/tree/... -> tree/..., fragment/scripts/... -> scripts/...
-    let relative_paths: Vec<PathBuf> = tree_paths
-        .iter()
-        .filter_map(|p| p.strip_prefix("fragment").ok())
-        .map(|p| p.to_path_buf())
-        .collect();
+    let fragment = fragment.ok_or_else(|| {
+        anyhow::anyhow!("no layer containing fragment/fragment.toml found in image")
+    })?;
 
     validate_phase_consistency(&fragment, &relative_paths)?;
-
-    // Extract .repo file contents from the layer for dedup comparison
-    let repo_file_contents = extract_repo_file_contents_from_bytes(&layer_bytes)?;
 
     Ok(LoadedFragment {
         fragment,
