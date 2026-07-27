@@ -20,11 +20,11 @@ The generated Containerfile is a build artifact customers can read, edit, and ve
 
 Building directly would make the tool a required dependency in the build pipeline and hide the actual image construction steps from operators.
 
-## Why scripts must not call dnf
+## Why manifest-declared packages are preferred over script-installed packages
 
-Fragment scripts run after all packages are installed. If a script calls `dnf install`, it breaks the assembly model's package deduplication and ordering guarantees. The tool already batched all requested packages into a single `RUN dnf install` layer — scripts calling dnf again would create redundant layers and bypass conflict detection.
+Packages declared in the manifest's `packages:` field are batched into a single `dnf install` layer and deduplicated across fragments. This gives the tool visibility into what's being installed and keeps the generated Containerfile predictable.
 
-Scripts are for post-install configuration: systemd preset application, file template expansion, user/group creation. Package installation is the manifest's job.
+Scripts that call `dnf` or run vendor installers (like NVIDIA's `.run` binaries) are not prevented — the tool doesn't enforce this. But packages installed by scripts bypass deduplication, won't appear in the manifest's package list, and create additional layers. When possible, prefer the manifest; when a script genuinely needs to install packages (vendor installers, complex dependency chains), that's fine.
 
 ## Why digest pinning is opt-in
 

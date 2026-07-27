@@ -86,7 +86,7 @@ RUN /tmp/frag-<name>-scripts/01-setup.sh && /tmp/frag-<name>-scripts/02-config.s
 
 1. All `.sh` and `.bash` files in `scripts/` are executed. Control ordering via naming (`01-`, `02-`, etc.).
 2. Scripts run as root in the target image's filesystem.
-3. Scripts must not call `dnf`, `yum`, or other package managers. Packages are installed by the manifest, not by scripts.
+3. Packages declared in the manifest are preferred — the tool can deduplicate and batch them. Scripts are not prevented from installing packages, but script-installed packages bypass deduplication and won't appear in the manifest's package list.
 4. Scripts should be idempotent where possible (though they only run once during build).
 5. Exit code 0 = success. Nonzero exits fail the build.
 
