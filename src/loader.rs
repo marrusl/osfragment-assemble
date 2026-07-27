@@ -336,9 +336,10 @@ pub fn load_registry_fragment(image_ref: &str) -> Result<LoadedFragment> {
         .as_array()
         .ok_or_else(|| anyhow::anyhow!("no layers in manifest"))?;
 
-    // Try each layer until we find one containing fragment/fragment.toml
+    // Scan all layers and aggregate: fragment.toml, tree paths, scripts,
+    // and repo file contents may be spread across multiple layers.
     let mut fragment = None;
-    let mut relative_paths = Vec::new();
+    let mut all_tree_paths = Vec::new();
     let mut has_configure_script = false;
     let mut repo_file_contents = std::collections::HashMap::new();
 
@@ -350,29 +351,34 @@ pub fn load_registry_fragment(image_ref: &str) -> Result<LoadedFragment> {
         let layer_blob_path = oci_path.join("blobs").join(layer_digest.replace(':', "/"));
         let layer_bytes = std::fs::read(&layer_blob_path)?;
 
-        if let Ok(toml_content) = extract_fragment_toml_from_bytes(&layer_bytes) {
-            fragment = Some(parse_fragment_toml(&toml_content)?);
-
-            let tree_paths = extract_tree_paths_from_bytes(&layer_bytes)?;
-
-            has_configure_script = tree_paths
-                .iter()
-                .any(|p| p.to_string_lossy() == "fragment/scripts/configure.sh");
-
-            relative_paths = tree_paths
-                .iter()
-                .filter_map(|p| p.strip_prefix("fragment").ok())
-                .map(|p| p.to_path_buf())
-                .collect();
-
-            repo_file_contents = extract_repo_file_contents_from_bytes(&layer_bytes)?;
-            break;
+        if fragment.is_none() {
+            if let Ok(toml_content) = extract_fragment_toml_from_bytes(&layer_bytes) {
+                fragment = Some(parse_fragment_toml(&toml_content)?);
+            }
         }
+
+        let tree_paths = extract_tree_paths_from_bytes(&layer_bytes)?;
+        if tree_paths
+            .iter()
+            .any(|p| p.to_string_lossy() == "fragment/scripts/configure.sh")
+        {
+            has_configure_script = true;
+        }
+        let remapped: Vec<PathBuf> = tree_paths
+            .iter()
+            .filter_map(|p| p.strip_prefix("fragment").ok())
+            .map(|p| p.to_path_buf())
+            .collect();
+        all_tree_paths.extend(remapped);
+
+        let layer_repo_contents = extract_repo_file_contents_from_bytes(&layer_bytes)?;
+        repo_file_contents.extend(layer_repo_contents);
     }
 
     let fragment = fragment.ok_or_else(|| {
         anyhow::anyhow!("no layer containing fragment/fragment.toml found in image")
     })?;
+    let relative_paths = all_tree_paths;
 
     validate_phase_consistency(&fragment, &relative_paths)?;
 
