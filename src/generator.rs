@@ -131,70 +131,33 @@ pub fn generate_containerfile(
     writeln!(out, "FROM {}", base_ref)?;
     writeln!(out)?;
 
-    // Phase: repos (10)
-    let has_repo_content = fragments
+    // Copy fragment files — one COPY per fragment
+    let has_tree_content = fragments
         .iter()
-        .any(|f| f.tree_paths.iter().any(|p| is_repo_path(p)));
-    if has_repo_content {
-        writeln!(out, "# --- Phase: repos (10) ---")?;
+        .any(|f| f.tree_paths.iter().any(|p| p.to_string_lossy().starts_with("tree/")));
+    if has_tree_content {
+        writeln!(out, "# --- Fragment files ---")?;
         for loaded in fragments {
-            let mf = &manifest.fragments[loaded.manifest_index];
-            let repo_paths: Vec<_> = loaded
+            let has_tree = loaded
                 .tree_paths
                 .iter()
-                .filter(|p| is_repo_path(p))
-                .collect();
-            if repo_paths.is_empty() {
+                .any(|p| p.to_string_lossy().starts_with("tree/"));
+            if !has_tree {
                 continue;
             }
-            // Skip non-canonical repo providers (dedup: first provider wins)
-            let dominated_repos: Vec<_> = loaded
-                .fragment
-                .provides
-                .repos
-                .iter()
-                .filter(|repo_id| {
-                    dedup
-                        .deduplicated_repos
-                        .get(repo_id.as_str())
-                        .map(|canonical| canonical != &loaded.fragment.name)
-                        .unwrap_or(false)
-                })
-                .collect();
-            if !dominated_repos.is_empty()
-                && dominated_repos.len() == loaded.fragment.provides.repos.len()
-            {
-                writeln!(
-                    out,
-                    "# {} — repo files deduplicated (provided by earlier fragment)",
-                    loaded.fragment.name
-                )?;
-                continue;
-            }
-            // Copy repo dirs
-            if repo_paths
-                .iter()
-                .any(|p| p.to_string_lossy().contains("yum.repos.d"))
-            {
-                writeln!(
-                    out,
-                    "COPY --from=frag-{} /fragment/tree/etc/yum.repos.d/ /etc/yum.repos.d/",
-                    loaded.fragment.name
-                )?;
-            }
-            if repo_paths
-                .iter()
-                .any(|p| p.to_string_lossy().contains("rpm-gpg"))
-            {
-                writeln!(
-                    out,
-                    "COPY --from=frag-{} /fragment/tree/etc/pki/rpm-gpg/ /etc/pki/rpm-gpg/",
-                    loaded.fragment.name
-                )?;
-            }
-            // Mirror rewrite — scoped to this fragment's repo files only
+            writeln!(
+                out,
+                "COPY --from=frag-{} /fragment/tree/ /",
+                loaded.fragment.name
+            )?;
+        }
+
+        // Mirror rewrites (must follow the COPYs)
+        for loaded in fragments {
+            let mf = &manifest.fragments[loaded.manifest_index];
             if let Some(mirror_url) = &mf.mirror {
-                let repo_files: Vec<_> = repo_paths
+                let repo_files: Vec<_> = loaded
+                    .tree_paths
                     .iter()
                     .filter(|p| p.to_string_lossy().contains("yum.repos.d"))
                     .filter_map(|p| {
@@ -214,7 +177,7 @@ pub fn generate_containerfile(
         writeln!(out)?;
     }
 
-    // Phase: packages (20)
+    // Packages
     let mut seen = std::collections::HashSet::new();
     let all_packages: Vec<String> = manifest
         .fragments
@@ -223,7 +186,7 @@ pub fn generate_containerfile(
         .filter(|p| seen.insert(p.clone()))
         .collect();
     if !all_packages.is_empty() {
-        writeln!(out, "# --- Phase: packages (20) ---")?;
+        writeln!(out, "# --- Packages ---")?;
         writeln!(out, "RUN dnf install -y \\")?;
         for pkg in &all_packages {
             writeln!(out, "        {} \\", pkg)?;
@@ -232,50 +195,26 @@ pub fn generate_containerfile(
         writeln!(out)?;
     }
 
-    // Phase: config (30)
-    let config_fragments: Vec<_> = fragments
+    // Scripts (must run after packages are installed)
+    let script_fragments: Vec<_> = fragments
         .iter()
-        .filter(|loaded| {
-            // Has non-repo tree content or configure.sh
-            let has_non_repo_tree = loaded
-                .tree_paths
-                .iter()
-                .filter(|p| p.to_string_lossy().starts_with("tree/"))
-                .any(|p| !is_repo_path(p));
-            has_non_repo_tree || loaded.has_configure_script
-        })
+        .filter(|f| f.has_configure_script)
         .collect();
-
-    if !config_fragments.is_empty() {
-        writeln!(out, "# --- Phase: config (30) ---")?;
-        for loaded in &config_fragments {
-            let has_tree = loaded
-                .tree_paths
-                .iter()
-                .any(|p| p.to_string_lossy().starts_with("tree/") && !is_repo_path(p));
-
-            writeln!(out, "# {}", loaded.fragment.name)?;
-            if has_tree {
-                writeln!(
-                    out,
-                    "COPY --from=frag-{} /fragment/tree/ /",
-                    loaded.fragment.name
-                )?;
-            }
-            if loaded.has_configure_script {
-                writeln!(
-                    out,
-                    "COPY --from=frag-{name} /fragment/scripts/configure.sh /tmp/frag-{name}-configure.sh",
-                    name = loaded.fragment.name
-                )?;
-                writeln!(
-                    out,
-                    "RUN /tmp/frag-{name}-configure.sh && rm -f /tmp/frag-{name}-configure.sh",
-                    name = loaded.fragment.name
-                )?;
-            }
-            writeln!(out)?;
+    if !script_fragments.is_empty() {
+        writeln!(out, "# --- Scripts ---")?;
+        for loaded in &script_fragments {
+            writeln!(
+                out,
+                "COPY --from=frag-{name} /fragment/scripts/configure.sh /tmp/frag-{name}-configure.sh",
+                name = loaded.fragment.name
+            )?;
+            writeln!(
+                out,
+                "RUN /tmp/frag-{name}-configure.sh && rm -f /tmp/frag-{name}-configure.sh",
+                name = loaded.fragment.name
+            )?;
         }
+        writeln!(out)?;
     }
 
     // Phase: preset-apply (35)
@@ -389,7 +328,7 @@ mod tests {
     }
 
     #[test]
-    fn generated_output_has_phase_ordering() {
+    fn generated_output_has_section_ordering() {
         let (epel, mf_epel) = make_repos_fragment("epel", "aaa111");
         let (mut cis, mf_cis) = make_config_fragment("cis", "bbb222");
         cis.manifest_index = 1;
@@ -404,14 +343,14 @@ mod tests {
             &empty_dedup(),
         )
         .unwrap();
-        let repos_pos = output.find("Phase: repos").unwrap();
-        let packages_pos = output.find("Phase: packages").unwrap();
-        let config_pos = output.find("Phase: config").unwrap();
-        let preset_pos = output.find("Phase: preset-apply").unwrap();
-        let validation_pos = output.find("Phase: validation").unwrap();
-        assert!(repos_pos < packages_pos);
-        assert!(packages_pos < config_pos);
-        assert!(config_pos < preset_pos);
+        let files_pos = output.find("Fragment files").unwrap();
+        let packages_pos = output.find("Packages").unwrap();
+        let scripts_pos = output.find("Scripts").unwrap();
+        let preset_pos = output.find("preset-apply").unwrap();
+        let validation_pos = output.find("validation").unwrap();
+        assert!(files_pos < packages_pos);
+        assert!(packages_pos < scripts_pos);
+        assert!(scripts_pos < preset_pos);
         assert!(preset_pos < validation_pos);
     }
 
