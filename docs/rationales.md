@@ -57,6 +57,12 @@ Pinned: `FROM quay.io/example/fragment@sha256:... AS frag-example` then `COPY --
 
 Digests are long and unreadable. Named stages make pinned Containerfiles easier to review. Unpinned refs are short enough to inline without harming readability.
 
+## Why config files land after packages
+
+Fragment config files are copied to the target image after package installation completes. This guarantees that fragment configurations always win when they overlap with RPM-installed files.
+
+During RPM installation, if a package installs a file that already exists on disk and isn't marked as `%config` in the RPM spec, the RPM will overwrite the existing file. If fragment configs were copied before packages, RPM installs could silently replace them with package defaults. Copying configs after package installation ensures fragment-supplied configurations are never overwritten — the intended state from the fragment is what lands in the final image.
+
 ## Trust boundary
 
 Fragments are trusted build code, not passive data. A fragment's `configure.sh` runs as root during image assembly. Pulling a fragment is equivalent to running an upstream install script — it's a supply chain trust decision. The tool does not sandbox fragment scripts or validate their behavior.

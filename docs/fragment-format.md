@@ -63,6 +63,15 @@ Phase-specific restrictions:
 - `repos` fragments: Tree may only contain paths under `etc/yum.repos.d/` or `etc/pki/rpm-gpg/`. Other paths cause assembly to fail.
 - `config` fragments: No restrictions.
 
+The generated Containerfile applies fragments in this order:
+1. Repo files (yum.repos.d, rpm-gpg) from all fragments
+2. Packages (single batched `dnf install` with all requested packages)
+3. Config files (full `tree/` content from config-phase fragments)
+4. Scripts (configure.sh execution)
+5. Preset application and validation
+
+Config files land after package installation to ensure fragment-supplied configurations are never overwritten by RPM defaults.
+
 ## `scripts/configure.sh` Contract
 
 A fragment may contain a shell script at `/fragment/scripts/configure.sh`. If present, the tool executes it after all packages are installed:
