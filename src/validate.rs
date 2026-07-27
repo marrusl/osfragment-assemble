@@ -136,7 +136,7 @@ mod tests {
                 },
             },
             tree_paths: vec![],
-            has_configure_script: false,
+            script_paths: vec![],
             source: FragmentSource::Registry {
                 image_ref: "test/placeholder:latest".to_string(),
             },

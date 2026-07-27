@@ -13,7 +13,7 @@ use crate::manifest::FragmentSource;
 pub struct LoadedFragment {
     pub fragment: Fragment,
     pub tree_paths: Vec<PathBuf>,
-    pub has_configure_script: bool,
+    pub script_paths: Vec<PathBuf>,
     pub source: FragmentSource,
     pub resolved_digest: Option<String>,
     /// Index into the original manifest.fragments vec, preserved through sorting.
@@ -340,7 +340,7 @@ pub fn load_registry_fragment(image_ref: &str) -> Result<LoadedFragment> {
     // and repo file contents may be spread across multiple layers.
     let mut fragment = None;
     let mut all_tree_paths = Vec::new();
-    let mut has_configure_script = false;
+    let mut all_script_paths = Vec::new();
     let mut repo_file_contents = std::collections::HashMap::new();
 
     for layer_desc in layers {
@@ -358,12 +358,20 @@ pub fn load_registry_fragment(image_ref: &str) -> Result<LoadedFragment> {
         }
 
         let tree_paths = extract_tree_paths_from_bytes(&layer_bytes)?;
-        if tree_paths
+
+        // Collect all .sh and .bash scripts in scripts/ directory
+        let script_paths: Vec<PathBuf> = tree_paths
             .iter()
-            .any(|p| p.to_string_lossy() == "fragment/scripts/configure.sh")
-        {
-            has_configure_script = true;
-        }
+            .filter(|p| {
+                let path_str = p.to_string_lossy();
+                path_str.starts_with("fragment/scripts/")
+                    && (path_str.ends_with(".sh") || path_str.ends_with(".bash"))
+            })
+            .filter_map(|p| p.strip_prefix("fragment/scripts").ok())
+            .map(|p| p.to_path_buf())
+            .collect();
+        all_script_paths.extend(script_paths);
+
         let remapped: Vec<PathBuf> = tree_paths
             .iter()
             .filter_map(|p| p.strip_prefix("fragment").ok())
@@ -380,12 +388,15 @@ pub fn load_registry_fragment(image_ref: &str) -> Result<LoadedFragment> {
     })?;
     let relative_paths = all_tree_paths;
 
+    // Sort scripts alphabetically
+    all_script_paths.sort();
+
     validate_phase_consistency(&fragment, &relative_paths)?;
 
     Ok(LoadedFragment {
         fragment,
         tree_paths: relative_paths,
-        has_configure_script,
+        script_paths: all_script_paths,
         source: FragmentSource::Registry {
             image_ref: image_with_digest,
         },
@@ -408,12 +419,12 @@ pub fn load_registry_fragment_metadata_only(image_ref: &str) -> Result<LoadedFra
 
     if let Some(fragment) = try_annotation_fast_path(image_ref)? {
         // Annotations present — return metadata without pulling layers.
-        // tree_paths and has_configure_script are unknown in this path;
+        // tree_paths and script_paths are unknown in this path;
         // inspect/list can display fragment metadata without them.
         return Ok(LoadedFragment {
             fragment,
             tree_paths: vec![],
-            has_configure_script: false,
+            script_paths: vec![],
             source: FragmentSource::Registry {
                 image_ref: image_with_digest,
             },

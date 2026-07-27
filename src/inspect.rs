@@ -6,16 +6,34 @@ use crate::fragment::parse_fragment_toml;
 pub fn run_inspect(target: &str) -> Result<()> {
     let path = Path::new(target);
 
-    let (fragment, tree_paths, has_script) = if path.is_dir() {
+    let (fragment, tree_paths, script_paths) = if path.is_dir() {
         let toml_path = path.join("fragment.toml");
         let content = std::fs::read_to_string(&toml_path)?;
         let frag = parse_fragment_toml(&content)?;
 
         let mut paths = Vec::new();
         collect_display_paths(path, "tree", &mut paths)?;
-        let script_paths_exist = path.join("scripts/configure.sh").exists();
 
-        (frag, paths, script_paths_exist)
+        // Collect all .sh and .bash scripts in scripts/ directory
+        let scripts_dir = path.join("scripts");
+        let mut script_list = Vec::new();
+        if scripts_dir.exists() && scripts_dir.is_dir() {
+            for entry in std::fs::read_dir(&scripts_dir)? {
+                let entry = entry?;
+                let entry_path = entry.path();
+                if entry_path.is_file() {
+                    if let Some(name) = entry_path.file_name() {
+                        let name_str = name.to_string_lossy();
+                        if name_str.ends_with(".sh") || name_str.ends_with(".bash") {
+                            script_list.push(name.to_os_string().into_string().unwrap());
+                        }
+                    }
+                }
+            }
+            script_list.sort();
+        }
+
+        (frag, paths, script_list)
     } else {
         // Inspect requires tree/ contents and scripts — always do a
         // full load (metadata-only path skips these). The annotation
@@ -33,7 +51,12 @@ pub fn run_inspect(target: &str) -> Result<()> {
                     .to_string()
             })
             .collect();
-        (loaded.fragment, display_paths, loaded.has_configure_script)
+        let script_list: Vec<String> = loaded
+            .script_paths
+            .iter()
+            .map(|p| p.to_string_lossy().to_string())
+            .collect();
+        (loaded.fragment, display_paths, script_list)
     };
 
     let phase_str = match fragment.phase {
@@ -62,9 +85,11 @@ pub fn run_inspect(target: &str) -> Result<()> {
     }
 
     println!();
-    if has_script {
+    if !script_paths.is_empty() {
         println!("scripts/");
-        println!("  configure.sh (present)");
+        for script in &script_paths {
+            println!("  {}", script);
+        }
     } else {
         println!("scripts/ (none)");
     }

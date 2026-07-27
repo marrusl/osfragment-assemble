@@ -279,7 +279,7 @@ pub fn generate_containerfile(
     // Scripts (must run after packages are installed)
     let script_fragments: Vec<_> = fragments
         .iter()
-        .filter(|f| f.has_configure_script)
+        .filter(|f| !f.script_paths.is_empty())
         .collect();
     if !script_fragments.is_empty() {
         if !ocp {
@@ -287,17 +287,23 @@ pub fn generate_containerfile(
         }
         for loaded in &script_fragments {
             let source = copy_from_source(loaded, use_named_stages);
+            let scripts_dir = format!("/tmp/frag-{}-scripts", loaded.fragment.name);
             writeln!(
                 out,
-                "COPY --from={source} /fragment/scripts/configure.sh /tmp/frag-{name}-configure.sh",
-                source = source,
-                name = loaded.fragment.name
+                "COPY --from={} /fragment/scripts/ {}/",
+                source, scripts_dir
             )?;
-            writeln!(
-                out,
-                "RUN /tmp/frag-{name}-configure.sh && rm -f /tmp/frag-{name}-configure.sh",
-                name = loaded.fragment.name
-            )?;
+
+            // Build chained RUN command: script1 && script2 && ... && cleanup
+            let mut run_cmd = String::from("RUN ");
+            for (i, script_path) in loaded.script_paths.iter().enumerate() {
+                if i > 0 {
+                    run_cmd.push_str(" && ");
+                }
+                run_cmd.push_str(&format!("{}/{}", scripts_dir, script_path.display()));
+            }
+            run_cmd.push_str(&format!(" && rm -rf {}", scripts_dir));
+            writeln!(out, "{}", run_cmd)?;
         }
         if !ocp {
             writeln!(out)?;
@@ -354,7 +360,7 @@ mod tests {
                 PathBuf::from("tree/etc/yum.repos.d/test.repo"),
                 PathBuf::from("tree/etc/pki/rpm-gpg/RPM-GPG-KEY-test"),
             ],
-            has_configure_script: false,
+            script_paths: vec![],
             source: FragmentSource::Registry {
                 image_ref: format!("quay.io/test/{}@sha256:{}", name, digest),
             },
@@ -383,7 +389,7 @@ mod tests {
                 conflicts: FragmentConflicts { fragments: vec![] },
             },
             tree_paths: vec![PathBuf::from("tree/usr/lib/sysctl.d/99-hardening.conf")],
-            has_configure_script: true,
+            script_paths: vec![PathBuf::from("configure.sh")],
             source: FragmentSource::Registry {
                 image_ref: format!("quay.io/test/{}@sha256:{}", name, digest),
             },
@@ -675,7 +681,7 @@ mod tests {
                 PathBuf::from("tree/etc/yum.repos.d/test.repo"),
                 PathBuf::from("tree/etc/pki/rpm-gpg/RPM-GPG-KEY-test"),
             ],
-            has_configure_script: false,
+            script_paths: vec![],
             source: FragmentSource::Registry {
                 image_ref: format!("quay.io/test/{}:10", name),
             },
@@ -704,7 +710,7 @@ mod tests {
                 conflicts: FragmentConflicts { fragments: vec![] },
             },
             tree_paths: vec![PathBuf::from("tree/usr/lib/sysctl.d/99-hardening.conf")],
-            has_configure_script: true,
+            script_paths: vec![PathBuf::from("configure.sh")],
             source: FragmentSource::Registry {
                 image_ref: format!("quay.io/test/{}:2.1", name),
             },
@@ -760,8 +766,10 @@ mod tests {
         let output =
             generate_containerfile(&manifest, &[cis], None, &empty_dedup(), false).unwrap();
         assert!(output.contains(
-            "COPY --from=quay.io/test/cis:2.1 /fragment/scripts/configure.sh /tmp/frag-cis-configure.sh"
+            "COPY --from=quay.io/test/cis:2.1 /fragment/scripts/ /tmp/frag-cis-scripts/"
         ));
+        assert!(output
+            .contains("RUN /tmp/frag-cis-scripts/configure.sh && rm -rf /tmp/frag-cis-scripts"));
     }
 
     #[test]
@@ -875,5 +883,63 @@ mod tests {
             generate_containerfile(&manifest, &[epel], None, &empty_dedup(), true).unwrap();
         assert!(output.contains("systemctl preset-all"));
         assert!(output.contains("bootc container lint"));
+    }
+
+    #[test]
+    fn multiple_scripts_run_in_alphabetical_order() {
+        let mut loaded = LoadedFragment {
+            fragment: Fragment {
+                name: "multi-script".to_string(),
+                version: "1.0".into(),
+                description: "test".into(),
+                vendor: None,
+                phase: FragmentPhase::Config,
+                provides: FragmentProvides { repos: vec![] },
+                packages: FragmentPackages { available: vec![] },
+                conflicts: FragmentConflicts { fragments: vec![] },
+            },
+            tree_paths: vec![],
+            script_paths: vec![
+                PathBuf::from("03-final.sh"),
+                PathBuf::from("01-first.bash"),
+                PathBuf::from("02-second.sh"),
+            ],
+            source: FragmentSource::Registry {
+                image_ref: "quay.io/test/multi-script:1.0".into(),
+            },
+            resolved_digest: None,
+            manifest_index: 0,
+            repo_file_contents: std::collections::HashMap::new(),
+        };
+        loaded.script_paths.sort(); // Simulate what loader does
+        let manifest_frag = ManifestFragment {
+            image: "quay.io/test/multi-script:1.0".into(),
+            packages: vec![],
+            mirror: None,
+        };
+        let manifest = Manifest {
+            base: "registry.redhat.io/rhel10/rhel-bootc:10.0".into(),
+            fragments: vec![manifest_frag],
+        };
+        let output =
+            generate_containerfile(&manifest, &[loaded], None, &empty_dedup(), false).unwrap();
+
+        // Verify all three scripts are present in the RUN command
+        assert!(output.contains("/tmp/frag-multi-script-scripts/01-first.bash"));
+        assert!(output.contains("/tmp/frag-multi-script-scripts/02-second.sh"));
+        assert!(output.contains("/tmp/frag-multi-script-scripts/03-final.sh"));
+
+        // Verify alphabetical ordering by checking positions
+        let first_pos = output
+            .find("/tmp/frag-multi-script-scripts/01-first.bash")
+            .unwrap();
+        let second_pos = output
+            .find("/tmp/frag-multi-script-scripts/02-second.sh")
+            .unwrap();
+        let third_pos = output
+            .find("/tmp/frag-multi-script-scripts/03-final.sh")
+            .unwrap();
+        assert!(first_pos < second_pos);
+        assert!(second_pos < third_pos);
     }
 }
