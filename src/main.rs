@@ -106,8 +106,13 @@ fn main() -> Result<()> {
             eprintln!("Validating composition...");
             let dedup = validate_composition(&manifest, &fragments)?;
 
-            let containerfile =
-                generate_containerfile(&manifest, &fragments, base_digest.as_deref(), &dedup)?;
+            let containerfile = generate_containerfile(
+                &manifest,
+                &fragments,
+                base_digest.as_deref(),
+                &dedup,
+                false,
+            )?;
 
             std::fs::write(&cli.output, &containerfile)
                 .with_context(|| format!("writing {}", cli.output.display()))?;

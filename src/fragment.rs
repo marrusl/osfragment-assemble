@@ -18,29 +18,23 @@ impl FragmentPhase {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
-#[derive(Default)]
+#[derive(Debug, Clone, Deserialize, Default)]
 pub struct FragmentProvides {
     #[serde(default)]
     pub repos: Vec<String>,
 }
 
-
-#[derive(Debug, Clone, Deserialize)]
-#[derive(Default)]
+#[derive(Debug, Clone, Deserialize, Default)]
 pub struct FragmentPackages {
     #[serde(default)]
     pub available: Vec<String>,
 }
 
-
-#[derive(Debug, Clone, Deserialize)]
-#[derive(Default)]
+#[derive(Debug, Clone, Deserialize, Default)]
 pub struct FragmentConflicts {
     #[serde(default)]
     pub fragments: Vec<String>,
 }
-
 
 #[derive(Debug, Clone, Deserialize)]
 struct FragmentToml {
