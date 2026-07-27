@@ -11,7 +11,7 @@ bootc-assemble reads a YAML manifest declaring a base bootc/RHCOS image and a se
 ### Prerequisites
 
 - Rust toolchain (1.70 or later)
-- skopeo
+- skopeo (must be installed and authenticated to pull from registries)
 - podman
 
 ### Build
@@ -30,97 +30,15 @@ Examine a local fragment's metadata and contents:
 ./target/release/bootc-assemble inspect examples/fragments/tailscale
 ```
 
-This shows the fragment's structure, metadata from `fragment.toml`, and files in the `tree/` directory.
+### Generate a Containerfile
 
-### Build and push fragment images
-
-Each fragment directory contains a `Containerfile.fragment`. Build and push them to a registry:
-
-```bash
-# Start a local registry (for testing)
-podman run -d -p 5050:5000 --name registry docker.io/library/registry:2
-
-# Build and push a fragment
-cd examples/fragments/epel
-podman build -f Containerfile.fragment -t localhost:5050/fragments/epel:10 .
-podman push localhost:5050/fragments/epel:10
-
-# Repeat for other fragments
-cd ../tailscale
-podman build -f Containerfile.fragment -t localhost:5050/fragments/tailscale:1.82.0 .
-podman push localhost:5050/fragments/tailscale:1.82.0
-
-cd ../grafana
-podman build -f Containerfile.fragment -t localhost:5050/fragments/grafana:11.0 .
-podman push localhost:5050/fragments/grafana:11.0
-
-cd ../postgresql
-podman build -f Containerfile.fragment -t localhost:5050/fragments/postgresql:17 .
-podman push localhost:5050/fragments/postgresql:17
-
-cd ../hashicorp
-podman build -f Containerfile.fragment -t localhost:5050/fragments/hashicorp:1.0 .
-podman push localhost:5050/fragments/hashicorp:1.0
-
-cd ../cis-hardening
-podman build -f Containerfile.fragment -t localhost:5050/fragments/cis-hardening:2.1 .
-podman push localhost:5050/fragments/cis-hardening:2.1
-
-cd ../node-exporter
-podman build -f Containerfile.fragment -t localhost:5050/fragments/node-exporter:1.8.0 .
-podman push localhost:5050/fragments/node-exporter:1.8.0
-
-cd ../nginx
-podman build -f Containerfile.fragment -t localhost:5050/fragments/nginx:1.26 .
-podman push localhost:5050/fragments/nginx:1.26
-```
-
-For production use, push to quay.io or another public registry:
-
-```bash
-podman build -f Containerfile.fragment -t quay.io/your-username/fragments/epel:10 .
-podman push quay.io/your-username/fragments/epel:10
-```
-
-### Update the manifest
-
-Edit `examples/manifests/full.yaml` to point at your registry:
-
-```yaml
-apiVersion: bootc.io/v1alpha1
-kind: Composition
-
-base: quay.io/centos-bootc/centos-bootc:stream10
-
-fragments:
-  - image: localhost:5050/fragments/epel:10
-    packages: [htop, tmux, jq]
-  - image: localhost:5050/fragments/tailscale:1.82.0
-    packages: [tailscale]
-  - image: localhost:5050/fragments/grafana:11.0
-    packages: [grafana]
-  - image: localhost:5050/fragments/postgresql:17
-    packages: [postgresql17-server]
-  - image: localhost:5050/fragments/hashicorp:1.0
-    packages: [vault]
-  - image: localhost:5050/fragments/cis-hardening:2.1
-  - image: localhost:5050/fragments/node-exporter:1.8.0
-    packages: [node-exporter]
-  - image: localhost:5050/fragments/nginx:1.26
-    packages: [nginx]
-```
-
-### Generate the Containerfile
+Pre-built fragment images are available at `quay.io/marrusl2/fragments/`. Generate a Containerfile using them:
 
 ```bash
 ./target/release/bootc-assemble --manifest examples/manifests/full.yaml --output Containerfile
 ```
 
-This reads the manifest and generates a multi-stage Containerfile that:
-1. Extracts files from each fragment's `tree/` directory
-2. Installs packages in the correct order
-3. Runs scripts from each fragment
-4. Deduplicates identical repo files
+The manifest at `examples/manifests/full.yaml` already points to these public images, so no editing is needed.
 
 ### Build the final image
 
@@ -149,7 +67,34 @@ The `tree/` directory mirrors the target filesystem layout. Files are copied ver
 
 The `scripts/` directory contains shell scripts executed after package installation.
 
-## CLI commands
+## Building your own fragments
+
+Fragment images are standard OCI images. Each fragment directory contains a `Containerfile.fragment` that builds it:
+
+```dockerfile
+FROM scratch
+COPY fragment.toml tree/ scripts/ /fragment/
+```
+
+Build and push to a registry:
+
+```bash
+cd my-fragment
+podman build -f Containerfile.fragment -t quay.io/your-username/my-fragment:1.0 .
+podman push quay.io/your-username/my-fragment:1.0
+```
+
+Then reference it in your manifest:
+
+```yaml
+fragments:
+  - image: quay.io/your-username/my-fragment:1.0
+    packages: [my-package]
+```
+
+See `examples/fragments/` for ready-to-use examples.
+
+## CLI
 
 ### Generate a Containerfile
 
@@ -157,10 +102,11 @@ The `scripts/` directory contains shell scripts executed after package installat
 bootc-assemble [OPTIONS]
 ```
 
-Options:
-- `--manifest <path>` - Path to manifest file (default: `bootc-assemble.yaml`)
-- `--output <path>` - Output Containerfile path (default: `Containerfile`)
-- `--pin-digests` - Resolve and pin all image refs to sha256 digests
+- `--manifest <path>` — Path to manifest file (default: `bootc-assemble.yaml`)
+- `--output <path>` — Output Containerfile path (default: `Containerfile`)
+- `--pin-digests` — Resolve and pin all image refs to sha256 digests
+- `--ocp [<path>]` — Generate a MachineOSConfig YAML for OpenShift (default: `machineosbuild.yaml`)
+- `--pool <name>` — MachineConfigPool name for `--ocp` output (default: `worker`)
 
 ### Inspect a fragment
 
@@ -168,7 +114,7 @@ Options:
 bootc-assemble inspect <image-or-directory>
 ```
 
-Examine a fragment's metadata and contents. Accepts either a local directory path or an OCI image reference.
+Examine a fragment's metadata and contents. Accepts a local directory path or an OCI image reference.
 
 ### List fragments in a manifest
 

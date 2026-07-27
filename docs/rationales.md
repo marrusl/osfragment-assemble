@@ -1,0 +1,64 @@
+# Design Rationales
+
+Engineering decisions behind bootc-assemble's fragment format and assembly model.
+
+## Why fragments are standard OCI images
+
+Fragments use the existing OCI distribution stack — no new builder, no custom registry plugins, no client-side tooling changes. Vendors can publish fragments to quay.io, GHCR, or ECR using the same workflows they use for container images. Customers can pull them with skopeo, mirror them with podman, and scan them with existing supply chain tools.
+
+Alternative considered: a custom archive format (`.tar.gz` or `.zip`). Rejected because it requires a separate distribution story and doesn't benefit from existing registry infrastructure.
+
+## Why no fragment type taxonomy
+
+All fragments follow the same format (`fragment.toml`, `tree/`, `scripts/`). The `phase` field controls ordering, but there's no type system distinguishing "repo fragments" from "config fragments" from "service fragments". A fragment that installs a repo is structurally identical to one that drops a config file.
+
+This keeps the format simple and avoids artificial constraints — a fragment can deliver repo definitions, config files, and scripts in a single unit when that's the right packaging boundary.
+
+## Why the tool generates Containerfiles instead of building directly
+
+The generated Containerfile is a build artifact customers can read, edit, and version. No lock-in. If bootc-assemble stops meeting their needs, they take the Containerfile and maintain it manually. The tool's job is codegen, not gatekeeping.
+
+Building directly would make the tool a required dependency in the build pipeline and hide the actual image construction steps from operators.
+
+## Why scripts must not call dnf
+
+Fragment scripts run after all packages are installed. If a script calls `dnf install`, it breaks the assembly model's package deduplication and ordering guarantees. The tool already batched all requested packages into a single `RUN dnf install` layer — scripts calling dnf again would create redundant layers and bypass conflict detection.
+
+Scripts are for post-install configuration: systemd preset application, file template expansion, user/group creation. Package installation is the manifest's job.
+
+## Why `configure.sh` is the only script entrypoint
+
+Fragments may contain arbitrary scripts in `scripts/`, but the tool only executes `configure.sh`. This convention prevents accidental execution of helper scripts, test fixtures, or documentation examples that happen to be executable.
+
+If a fragment needs to run multiple scripts, `configure.sh` sources them. The single entrypoint makes execution order explicit and prevents surprises.
+
+## Why digest pinning is opt-in
+
+Digest pinning guarantees reproducibility but makes the generated Containerfile harder to read and breaks registry mirrors that don't preserve digests. The default (`--pin-digests` omitted) uses tags, which are more human-friendly and work with disconnected/airgap scenarios where images are re-pushed to internal registries.
+
+When digests are pinned, the tool switches to named stages (`AS frag-<name>`) for readability — otherwise it uses inline `COPY --from=<image-ref>` to keep the Containerfile compact.
+
+## Why the tool cleans up dnf artifacts in the same RUN layer
+
+The `RUN dnf install ... && dnf clean all && rm -rf /var/log/dnf*` pattern runs in a single layer to prevent dnf metadata from inflating the image size. If cleanup ran in a separate `RUN`, the previous layer would still carry the full dnf cache even though it's deleted in the next layer.
+
+This is standard Containerfile practice, not specific to bootc-assemble.
+
+## Why `FROM configs AS final` for OCP mode
+
+OpenShift's on-cluster build system uses `FROM configs AS final` to mark the stage MCO should extract. The base image and fragment stages are build-time dependencies only — the `final` stage is what gets deployed to nodes.
+
+Standalone mode uses `FROM <base-image>` because there's no special stage marker needed outside the MCO context.
+
+## Why inline image refs by default, named stages when pinning
+
+Unpinned: `COPY --from=quay.io/example/fragment:1.0 /fragment/tree/ /`  
+Pinned: `FROM quay.io/example/fragment@sha256:... AS frag-example` then `COPY --from=frag-example /fragment/tree/ /`
+
+Digests are long and unreadable. Named stages make pinned Containerfiles easier to review. Unpinned refs are short enough to inline without harming readability.
+
+## Trust boundary
+
+Fragments are trusted build code, not passive data. A fragment's `configure.sh` runs as root during image assembly. Pulling a fragment is equivalent to running an upstream install script — it's a supply chain trust decision. The tool does not sandbox fragment scripts or validate their behavior.
+
+Repo deduplication prevents different fragments from silently overwriting each other's repos, but it's not a security boundary — if two fragments provide the same repo with different content, the build fails rather than choosing one.
