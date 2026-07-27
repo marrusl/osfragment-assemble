@@ -1,2 +1,4 @@
 FROM scratch
-COPY fragment.toml tree/ scripts/ /fragment/
+COPY fragment.toml /fragment/
+COPY tree/ /fragment/tree/
+COPY scripts/ /fragment/scripts/
