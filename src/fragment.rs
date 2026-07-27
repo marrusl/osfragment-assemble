@@ -19,44 +19,28 @@ impl FragmentPhase {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[derive(Default)]
 pub struct FragmentProvides {
     #[serde(default)]
     pub repos: Vec<String>,
 }
 
-impl Default for FragmentProvides {
-    fn default() -> Self {
-        Self { repos: Vec::new() }
-    }
-}
 
 #[derive(Debug, Clone, Deserialize)]
+#[derive(Default)]
 pub struct FragmentPackages {
     #[serde(default)]
     pub available: Vec<String>,
 }
 
-impl Default for FragmentPackages {
-    fn default() -> Self {
-        Self {
-            available: Vec::new(),
-        }
-    }
-}
 
 #[derive(Debug, Clone, Deserialize)]
+#[derive(Default)]
 pub struct FragmentConflicts {
     #[serde(default)]
     pub fragments: Vec<String>,
 }
 
-impl Default for FragmentConflicts {
-    fn default() -> Self {
-        Self {
-            fragments: Vec::new(),
-        }
-    }
-}
 
 #[derive(Debug, Clone, Deserialize)]
 struct FragmentToml {
