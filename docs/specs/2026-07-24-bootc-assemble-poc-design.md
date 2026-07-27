@@ -153,7 +153,7 @@ Fragments are self-contained — each carries everything it needs to work, inclu
 ## CLI Design
 
 ```
-bootc-assemble [--manifest bootc-assemble.yaml] [--output Containerfile] [--build]
+bootc-assemble [--manifest bootc-assemble.yaml] [--output Containerfile]
 bootc-assemble inspect <fragment-image-or-directory>
 bootc-assemble list [--manifest bootc-assemble.yaml]
 ```
@@ -163,20 +163,18 @@ bootc-assemble list [--manifest bootc-assemble.yaml]
 No subcommand needed — the tool name is the verb.
 
 1. Parse manifest
-2. Pull fragment metadata via skopeo (or read from local directory)
-3. Read `fragment.toml` from each fragment (annotations fast path, layer extraction fallback)
+2. Pull fragment metadata via skopeo
+3. Read `fragment.toml` from each fragment (layer extraction; annotations fast path for inspect/list only)
 4. Validate: declared conflicts, phase consistency, repo deduplication
 5. Sort fragments by phase weight, preserve manifest order within phases
 6. Compute override summary — detect file path collisions between fragments
 7. Generate Containerfile with override summary as header comment
 8. Write to `--output` path (default: `./Containerfile`)
-9. If `--build`: shell out to `podman build -f <generated-Containerfile> .`
-
 **Flags:**
 - `--manifest <path>`: Manifest file (default: `./bootc-assemble.yaml`)
 - `--output <path>`: Containerfile output path (default: `./Containerfile`)
-- `--build`: After generating, run `podman build`
-- `--local`: Treat all fragment `image:` values as local directory paths (dev mode shortcut — applies globally; use `dir:` prefix in individual `image:` entries to mix local and registry sources in one manifest)
+
+> **Deferred:** `--build` (run `podman build` after generation) and `--local` (local directory assembly mode) were removed from the POC. The generated Containerfile is a draft — users edit it before building with `podman build -f Containerfile .` directly.
 
 ### `inspect`
 
@@ -240,21 +238,11 @@ When extracting `fragment.toml` from a layer tarball, the tool follows a fail-cl
 - **Cap metadata size.** Reject `fragment.toml` entries larger than 64 KB (well beyond any reasonable metadata).
 - **Fail on ambiguity.** If multiple entries claim the `/fragment/fragment.toml` path, fail with an error rather than picking one.
 
-### Local Directory Mode
+### Local Directory Mode (Deferred)
 
-`image: dir:./my-fragment/` points at an unpacked fragment directory on the filesystem. Essential for iterating on fragment structure during development.
+Local directory assembly (`dir:` prefix, `--local` flag) was removed from the POC — the prebuild/cleanup complexity was disproportionate to its value. Fragment development workflow: build the fragment image with `podman build`, push to a registry, then reference it in the manifest.
 
-For metadata reads (`inspect`, `list`), the tool reads `fragment.toml` directly from the directory. For assembly (`--build` or Containerfile generation), the tool prebuilds a temporary local image from the directory using `podman build -f - dir:./my-fragment/ <<< "FROM scratch\nCOPY . /fragment/"`, then treats it as a registry fragment in the generated Containerfile. This keeps a single codegen path — all fragments become `FROM ... AS frag-<name>` stages regardless of source. Temporary images are tagged `localhost/bootc-assemble/frag-<name>:local` and cleaned up after the build.
-
-Internally modeled as a `FragmentSource` enum:
-```rust
-enum FragmentSource {
-    Registry { image_ref: String },
-    Directory { path: PathBuf },
-}
-```
-
-The `Directory` variant prebuilds to a local image before codegen. The generated Containerfile is always self-contained and portable.
+The `inspect` command retains local directory support (`bootc-assemble inspect ./my-fragment/`) for examining fragments during development — this reads files directly with no prebuild infrastructure.
 
 ## Generated Containerfile
 

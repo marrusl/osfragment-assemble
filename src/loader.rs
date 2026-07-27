@@ -45,6 +45,8 @@ pub fn resolve_digest(image_ref: &str) -> Result<String> {
     let digest_output = std::process::Command::new("skopeo")
         .args([
             "inspect",
+            "--override-os",
+            "linux",
             "--format",
             "{{.Digest}}",
             &format!("docker://{}", image_ref),
@@ -207,7 +209,13 @@ fn extract_repo_file_contents_from_bytes(
 /// manifest annotations without pulling any layers.
 fn try_annotation_fast_path(image_ref: &str) -> Result<Option<Fragment>> {
     let output = std::process::Command::new("skopeo")
-        .args(["inspect", "--raw", &format!("docker://{}", image_ref)])
+        .args([
+            "inspect",
+            "--override-os",
+            "linux",
+            "--raw",
+            &format!("docker://{}", image_ref),
+        ])
         .output()
         .context("failed to run skopeo inspect --raw")?;
 
@@ -294,7 +302,9 @@ pub fn load_registry_fragment(image_ref: &str) -> Result<LoadedFragment> {
     let status = std::process::Command::new("skopeo")
         .args([
             "copy",
-            &format!("docker://{}", image_ref),
+            "--override-os",
+            "linux",
+            &format!("docker://{}", image_with_digest),
             &format!("oci:{}", oci_path.display()),
         ])
         .status()
