@@ -1,6 +1,6 @@
 # Design Rationales
 
-Engineering decisions behind osfragment's fragment format and assembly model.
+Engineering decisions behind osfragment-assemble's fragment format and assembly model.
 
 ## Why fragments are standard OCI images
 
@@ -16,7 +16,7 @@ This keeps the format simple and avoids artificial constraints — a fragment ca
 
 ## Why the tool generates Containerfiles instead of building directly
 
-The generated Containerfile is a build artifact customers can read, edit, and version. No lock-in. If osfragment stops meeting their needs, they take the Containerfile and maintain it manually. The tool's job is codegen, not gatekeeping.
+The generated Containerfile is a build artifact customers can read, edit, and version. No lock-in. If osfragment-assemble stops meeting their needs, they take the Containerfile and maintain it manually. The tool's job is codegen, not gatekeeping.
 
 Building directly would make the tool a required dependency in the build pipeline and hide the actual image construction steps from operators.
 
@@ -42,7 +42,7 @@ When digests are pinned, the tool switches to named stages (`AS frag-<name>`) fo
 
 The `RUN dnf install ... && dnf clean all && rm -rf /var/log/dnf*` pattern runs in a single layer to prevent dnf metadata from inflating the image size. If cleanup ran in a separate `RUN`, the previous layer would still carry the full dnf cache even though it's deleted in the next layer.
 
-This is standard Containerfile practice, not specific to osfragment.
+This is standard Containerfile practice, not specific to osfragment-assemble.
 
 ## Why `FROM configs AS final` for OCP mode
 

@@ -1,10 +1,10 @@
-# osfragment
+# osfragment-assemble
 
 A tool for building composable bootc-compatible OS images from fragment OCI images.
 
 ## What it does
 
-osfragment reads a YAML manifest declaring a base bootc-compatible image and a set of fragment OCI images, then generates a multi-stage Containerfile. Fragments are standard OCI images that package repo configs, RPM GPG keys, config files, systemd presets, and scripts into reusable units. The tool handles ordering (repo files before packages, packages before config files, config files before scripts), deduplication (identical repo definitions from multiple fragments), and optionally pins all references to content-addressed digests.
+osfragment-assemble reads a YAML manifest declaring a base bootc-compatible image and a set of fragment OCI images, then generates a multi-stage Containerfile. Fragments are standard OCI images that package repo configs, RPM GPG keys, config files, systemd presets, and scripts into reusable units. The tool handles ordering (repo files before packages, packages before config files, config files before scripts), deduplication (identical repo definitions from multiple fragments), and optionally pins all references to content-addressed digests.
 
 ## Getting Started
 
@@ -20,14 +20,14 @@ osfragment reads a YAML manifest declaring a base bootc-compatible image and a s
 cargo build --release
 ```
 
-The binary will be at `target/release/osfragment`.
+The binary will be at `target/release/osfragment-assemble`.
 
 ### Inspect a fragment
 
 Examine a local fragment's metadata and contents:
 
 ```bash
-./target/release/osfragment inspect examples/fragments/tailscale
+./target/release/osfragment-assemble inspect examples/fragments/tailscale
 ```
 
 ### Generate a Containerfile
@@ -35,7 +35,7 @@ Examine a local fragment's metadata and contents:
 Pre-built fragment images are available at `quay.io/marrusl2/fragments/`. Generate a Containerfile using them:
 
 ```bash
-./target/release/osfragment --manifest examples/manifests/full.yaml --output Containerfile
+./target/release/osfragment-assemble --manifest examples/manifests/full.yaml --output Containerfile
 ```
 
 The manifest at `examples/manifests/full.yaml` already points to these public images, so no editing is needed.
@@ -99,10 +99,10 @@ See `examples/fragments/` for ready-to-use examples.
 ### Generate a Containerfile
 
 ```bash
-osfragment [OPTIONS]
+osfragment-assemble [OPTIONS]
 ```
 
-- `--manifest <path>` — Path to manifest file (default: `osfragment.yaml`)
+- `--manifest <path>` — Path to manifest file (default: `osfragment-assemble.yaml`)
 - `--output <path>` — Output Containerfile path (default: `Containerfile`)
 - `--pin-digests` — Resolve and pin all image refs to sha256 digests
 - `--ocp [<path>]` — Generate a MachineOSConfig YAML for OpenShift (default: `machineosbuild.yaml`)
@@ -111,7 +111,7 @@ osfragment [OPTIONS]
 ### Inspect a fragment
 
 ```bash
-osfragment inspect <image-or-directory>
+osfragment-assemble inspect <image-or-directory>
 ```
 
 Examine a fragment's metadata and contents. Accepts a local directory path or an OCI image reference.
@@ -119,7 +119,7 @@ Examine a fragment's metadata and contents. Accepts a local directory path or an
 ### List fragments in a manifest
 
 ```bash
-osfragment list --manifest <path>
+osfragment-assemble list --manifest <path>
 ```
 
 List fragments in phase-sorted order (the order they'll appear in the generated Containerfile).

@@ -1,6 +1,6 @@
 # Fragment Format Specification
 
-Authoritative specification for the osfragment fragment format.
+Authoritative specification for the osfragment-assemble fragment format.
 
 ## Fragment Image Anatomy
 
