@@ -4,4 +4,5 @@ pub mod inspect;
 pub mod list;
 pub mod loader;
 pub mod manifest;
+pub mod ocp;
 pub mod validate;

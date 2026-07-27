@@ -9,6 +9,7 @@ use bootc_assemble::loader::{
     load_registry_fragment, load_registry_fragment_metadata_only, resolve_digest,
 };
 use bootc_assemble::manifest::parse_manifest;
+use bootc_assemble::ocp::generate_machine_os_config;
 use bootc_assemble::validate::validate_composition;
 
 #[derive(Parser)]
@@ -35,6 +36,14 @@ struct Cli {
     /// Pin all image references to resolved digests for reproducibility
     #[arg(long)]
     pin_digests: bool,
+
+    /// Generate a MachineOSConfig YAML for OpenShift on-cluster builds
+    #[arg(long, value_name = "FILE", num_args = 0..=1, default_missing_value = "machineosbuild.yaml")]
+    ocp: Option<PathBuf>,
+
+    /// MachineConfigPool name for --ocp output (only meaningful with --ocp)
+    #[arg(long, default_value = "worker")]
+    pool: String,
 }
 
 #[derive(Subcommand)]
@@ -122,6 +131,21 @@ fn main() -> Result<()> {
                 cli.output.display(),
                 fragments.len()
             );
+
+            // OCP MachineOSConfig generation
+            if let Some(ocp_path) = &cli.ocp {
+                let ocp_containerfile = generate_containerfile(
+                    &manifest,
+                    &fragments,
+                    base_digest.as_deref(),
+                    &dedup,
+                    true,
+                )?;
+                let mosc = generate_machine_os_config(&ocp_containerfile, &cli.pool)?;
+                std::fs::write(ocp_path, &mosc)
+                    .with_context(|| format!("writing {}", ocp_path.display()))?;
+                eprintln!("MachineOSConfig written to {}", ocp_path.display());
+            }
         }
     }
 
