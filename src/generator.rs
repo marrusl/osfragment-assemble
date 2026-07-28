@@ -260,7 +260,7 @@ pub fn generate_containerfile(
         writeln!(out, "    && dnf clean all \\")?;
         writeln!(
             out,
-            "    && rm -rf /var/log/dnf* /var/log/hawkey.log /var/lib/dnf/history.sqlite*"
+            "    && rm -rf /var/cache/dnf /var/log/dnf* /var/log/hawkey.log /var/lib/dnf/history.sqlite*"
         )?;
         if !ocp {
             writeln!(out)?;
