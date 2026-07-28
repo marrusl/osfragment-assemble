@@ -5,8 +5,6 @@ base: quay.io/centos-bootc/centos-bootc:stream10
 
 fragments:
   - image: quay.io/marrusl2/fragments/grafana:11.0
-    packages: [grafana]
     mirror: https://rpm-mirror.internal.corp/grafana/
   - image: quay.io/marrusl2/fragments/tailscale:1.82.0
-    packages: [tailscale]
     mirror: https://rpm-mirror.internal.corp/tailscale/
