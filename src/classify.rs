@@ -26,8 +26,9 @@ pub fn capabilities_for_base_type(base_type: BaseType) -> CapabilitySet {
     }
 }
 
-/// Label key checked on the base image via `skopeo inspect`.
-const BOOTC_LABEL_KEY: &str = "containers.bootc";
+/// Go template format string for extracting the containers.bootc label.
+/// The double braces are Go template syntax, not Rust format placeholders.
+const BOOTC_LABEL_FORMAT: &str = "{{.Labels.containers\\.bootc}}";
 
 /// Testable classification: accepts probe result directly instead of running skopeo.
 pub(crate) fn classify_base_with_probe(
@@ -87,7 +88,7 @@ fn probe_bootc_label(base_image: &str) -> Option<bool> {
             "--override-os",
             "linux",
             "--format",
-            &format!("{{{{.Labels.{}}}}}", BOOTC_LABEL_KEY.replace('.', "\\.")),
+            BOOTC_LABEL_FORMAT,
             &format!("docker://{}", base_image),
         ])
         .output();
@@ -198,5 +199,13 @@ mod tests {
         let caps = classify_base("nonexistent.invalid/no-such-image:1", None);
         assert!(caps.contains(&Capability::Bootc));
         assert!(caps.contains(&Capability::Systemd));
+    }
+
+    #[test]
+    fn bootc_label_format_uses_go_template_syntax() {
+        // Verify the format string is valid Go template syntax for skopeo
+        assert!(BOOTC_LABEL_FORMAT.starts_with("{{"));
+        assert!(BOOTC_LABEL_FORMAT.ends_with("}}"));
+        assert!(BOOTC_LABEL_FORMAT.contains("containers\\.bootc"));
     }
 }
