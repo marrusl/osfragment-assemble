@@ -8,6 +8,34 @@ Fragments use the existing OCI distribution stack — no new builder, no custom 
 
 Alternative considered: a custom archive format (`.tar.gz` or `.zip`). Rejected because it requires a separate distribution story and doesn't benefit from existing registry infrastructure.
 
+## Why the fragment format is as light as possible, and no simpler
+
+The design goal for `fragment.toml` is to be the *minimum* metadata that lets reusable units be muxed together, and deliberately nothing more.
+
+### As light as possible: the muxer knows what a unit is, not what it does
+
+The RPM ecosystem already has more than enough ways to declare how a system should be configured — kickstart, osbuild blueprints, rpm-ostree treefiles, Kiwi XML, comps groups, cloud-init, Butane. Adding another one would be a mistake, and `fragment.toml` deliberately isn't one.
+
+`fragment.toml` carries `name`, `version`, `description`, `vendor`, `phase`, `conflicts`, and `provides`. Every one of those answers a question about the *unit* — what is this thing, who published it, what version is it, what can it not be combined with, when does it apply relative to other units. None of them answers a question about the *system* — no users, no services, no firewall rules, no partitioning, no file contents. The format has no vocabulary for expressing system state and is not intended to grow one.
+
+The right comparison is an RPM spec header or an OCI annotation set, not a blueprint. `Name:`, `Version:`, `Provides:`, and `Conflicts:` in an RPM spec are not a configuration language either — they are how the packaging system identifies a unit and reasons about combining it with other units. `fragment.toml` occupies exactly that role, which is why its fields map cleanly onto the `io.bootc.fragment.*` OCI annotations: both describe the artifact, not the machine.
+
+Actual system configuration lives in the payload, in formats that already exist. `tree/` carries config files verbatim. `hooks/` runs real binaries with their own CLIs and config files. A fragment is free to carry a kickstart file, a blueprint, or a cloud-init config and invoke the appropriate interpreter from a hook — the assembly tool never parses those files and holds no opinion about them. Whichever declarative format a shop has standardized on keeps working; a fragment is how it gets packaged, versioned, and distributed.
+
+The practical test for any proposed addition to `fragment.toml`: does it describe the fragment, or does it describe the system the fragment configures? The first belongs here. The second belongs in `tree/` or `hooks/`.
+
+### And no simpler: below this floor, the concept fails
+
+Each remaining field is load-bearing. Remove any one and reusable units stop working:
+
+- **Identity and versioning** (`name`, `version`) — without them a unit cannot be published to a registry, referenced, pinned, or upgraded. There is nothing to depend on.
+- **Ordering** (`phase`) — repo definitions must land before packages install, and configuration must land after, or RPM defaults silently overwrite fragment-supplied files. Without a declared ordering the composition is a coin flip.
+- **Conflicts and provides** (`conflicts.fragments`, `provides.repos`) — without them, two fragments that supply the same repo or occupy the same role fight silently and the failure surfaces at runtime, on the deployed system, rather than at build time.
+
+The zero-format alternative already exists and is what this tool is a response to: prose install instructions and copy-paste Containerfile snippets. That approach has no identity, no versions, no ordering guarantees, and no conflict detection. It does not compose, it cannot be updated in place, and every consumer re-derives the same integration by hand. Its failure is the reason for the format.
+
+So the floor is: enough metadata to identify a unit and reason about combining it with other units. Everything above that floor belongs to formats that already exist.
+
 ## Why no fragment type taxonomy
 
 All fragments follow the same format (`fragment.toml`, `tree/`, `hooks/`). The `phase` field controls ordering, but there's no type system distinguishing "repo fragments" from "config fragments" from "service fragments". A fragment that installs a repo is structurally identical to one that drops a config file.
