@@ -34,9 +34,10 @@ Environment, all confirmed in `buildrequest.go`:
 - `HOME=/home/build`, build context at `/home/build/context`
 
 Practical consequence: **the OCP path is the one output target where the builder
-is known in advance.** Buildah extensions are safe there. They are not
-automatically safe on the generic path, where the user picks the builder. That
-asymmetry is why the fallback emission mode is scoped to the generic path only.
+is known in advance.** Buildah extensions are safe there. On the generic path
+the user picks the builder, but buildah 1.24.0+ (January 2022) is old enough
+that every target platform ships it. The tool emits `RUN --mount` on all paths
+with no COPY fallback.
 
 ## Version floor is not a live concern
 

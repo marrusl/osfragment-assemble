@@ -7,11 +7,6 @@ Consolidates five changes to the generator, the OpenShift emitter, and the
 fragment schema. Each is independent and can land separately. Change 1 fixes a
 defect; the rest are design changes.
 
-One item in change 1 is **open**, not resolved: the `COPY` fallback leaks hook
-bytes into the image and no fix is adopted here. Its scope narrowed during this
-revision, because the verification that gated it returned. See "The `COPY`
-fallback leaks hook bytes" below.
-
 ---
 
 ## 1. Build inputs stay out of the target image
@@ -41,8 +36,6 @@ implementer should not try to collapse them into one mount.
 Applies to hooks and any future non-`tree/` payload. `tree/` content keeps being
 copied; that is the delivered payload, not a build input.
 
-Retain the current `COPY` form as an explicit fallback mode (flag-selected).
-
 **Why.** The current emission is a defect. `generator.rs` writes the `COPY` and
 the `RUN ... && rm -rf` as separate instructions, so they land in separate
 layers. The `rm -rf` only writes a whiteout; the hook bytes remain in the
@@ -53,17 +46,17 @@ The bind mount is one instruction and one layer, so nothing persists and no
 cleanup is needed. It also removes a failure class: hooks can no longer collide
 in `/tmp`, and nothing leaks when a hook exits nonzero mid-chain.
 
-**Why the fallback is retained.** One reason survives, and a second that used to
-be given does not. Both are set out here because the second was load bearing in
-the previous draft and its removal is what changes the design.
+**Why there is no COPY fallback.** An earlier draft retained a flag-selected
+COPY fallback for builders that might not support `RUN --mount`. That fallback
+is removed. `RUN --mount=type=bind` is a BuildKit/Buildah extension, and buildah
+has supported it since 1.24.0 (January 2022). Every target platform ships a
+newer version. If a user hits a builder that rejects the instruction, the error
+is immediate and legible; writing the COPY line by hand is a one-time
+workaround, not a mode the tool needs to own.
 
-The surviving reason: `RUN --mount=type=bind,from=` is a BuildKit/Buildah
-extension rather than base Dockerfile, and hand-maintainability of the generated
-Containerfile is a stated design goal. A user building with arbitrary tooling
-may hit a builder that rejects the instruction.
-
-The reason that does not survive is on-cluster OpenShift builds, and it needs
-stating precisely because it is easy to overstate. `RUN --mount=type=bind` takes a `from=`
+The on-cluster OpenShift case warrants separate analysis because it is the
+environment users most often assume `RUN --mount` cannot reach.
+`RUN --mount=type=bind` takes a `from=`
 with three distinct sources:
 
 - `from=context`, which requires a build context holding the user's files.
@@ -109,17 +102,14 @@ through the same image-rootfs resolution and the same `--authfile`, so the mount
 form requires strictly nothing that the `COPY` form this tool already emits does
 not already require.
 
-**Consequence: the OCP path takes the bind mount like every other path, and the
-fallback is not needed there.** The fallback survives only as a flag-selected
-escape hatch for the generic path, where the builder is unknown and
-`RUN --mount=type=bind,from=` is a BuildKit/Buildah extension rather than base
-Dockerfile. That first reason is the only one left standing.
+**Consequence: the bind mount is the only hook emission path, for all output.**
+There is no fallback mode, no flag to select one, and no target-driven
+divergence. Every output path — standalone and MachineOSConfig — emits
+`RUN --mount`.
 
 This reverses the rule that round 1 review asked for (MachineOSConfig output
 implies the fallback). That recommendation was correct given what was known at
-the time; the verification removed its premise. The OCP path is in fact the one
-path where the builder is *known* to be a buildah past the required version,
-which makes it the safest target for `RUN --mount`, not the riskiest.
+the time; the verification removed its premise.
 
 Two details to carry into implementation:
 
@@ -130,24 +120,35 @@ Two details to carry into implementation:
   (`source=/fragment/hooks`). Subdirectory sources are standard buildah with no
   special-casing, but the evidence is one step less direct there.
 
-**Mode selection.** All output, standalone and MachineOSConfig alike, emits the
-bind mount by default. An explicit opt-in flag forces the fallback for builders
-that reject `RUN --mount`; that failure is immediate and legible (the builder
-errors on the instruction), so the flag is an escape hatch discovered at the
-point of failure, not a decision required up front. Document the flag next to
-that error case in the README so the builder error leads to it.
+Caveats that do not gate implementation:
 
-The MachineOSConfig output does **not** select the fallback and has no
-target-driven mode of its own. Note that `--ocp <path>` adds a second output
-artifact rather than switching modes; the standalone Containerfile is still
-written by the same invocation, and both now carry the same hook emission.
+- **`source=<subdirectory>`.** The production evidence (MCO template) uses
+  `source=/`. This tool mounts `source=/fragment/hooks`, a subdirectory.
+  Subdirectory sources are standard buildah and require no special-casing, but
+  the evidence is one step less direct.
+- **`from=<stage>` vs `from=<registry pullspec>`.** Production evidence covers a
+  registry pullspec. Under `--pin-digests` the emitted form resolves to a named
+  build stage (`FROM <fragment ref> AS frag-<name>`). The conclusion holds — OCL
+  builds already use named stages via `COPY --from=` — but the mount's `from=`
+  uses a stage where the evidence uses a pullspec.
+- **Mount `from=` resolution under `--pin-digests`.** The existing `COPY --from=`
+  path pulls fragment content by digest-pinned ref. The mount's `from=` must
+  resolve through the same mechanism. If it does not, an implementer could leave
+  hook images pulled by mutable tag while payload images stay pinned. Specify
+  that the mount `from=` uses the same resolution as `copy_from_source`.
 
-**Open decision: the `COPY` fallback leaks hook bytes.**
+**`--ocp` adds a second artifact.** `--ocp <path>` adds a MachineOSConfig
+alongside the standalone Containerfile; it does not switch modes. Both artifacts
+emit hooks via `RUN --mount`. The standalone Containerfile is still written by
+the same invocation, and both carry the same hook emission.
 
-The fallback is **size-correct but not layer-correct**. The `rm -rf` writes a
-whiteout, so the files are absent from the mounted filesystem and absent from
-what a deployed bootc node sees. The bytes themselves remain in the `COPY`
-layer and are extractable with `podman save` or `skopeo copy`.
+**Why COPY was rejected (context for the bind-mount-only decision).**
+
+The current two-instruction form (`COPY` then `RUN ... && rm -rf`) is
+**filesystem-correct but not layer-correct**. The `rm -rf` writes a whiteout,
+so the files are absent from the mounted filesystem and absent from what a
+deployed bootc node sees. The bytes themselves remain in the `COPY` layer and
+are extractable with `podman save` or `skopeo copy`.
 
 No single-instruction fix exists. `COPY` is a build directive, not a shell
 command; it cannot be combined with `rm -rf` in one instruction, and it always
@@ -155,53 +156,34 @@ produces its own layer. An earlier draft of this spec claimed the fallback could
 fold the `rm -rf` into the `COPY` and become correct. That claim is withdrawn;
 the operation it describes does not exist.
 
-The options considered and their status:
+The alternatives considered:
 
 - **Multi-stage variant.** Copy hooks into a disposable stage, then
-  `RUN --mount=type=bind,from=<stage>` in the final stage. This does eliminate
-  the leak, but it depends on `RUN --mount`, which is the exact instruction the
-  fallback exists to avoid. A builder that rejects the instruction rejects this
-  too, so it cannot fix the one path the fallback still serves. (It could not
-  have rescued the OCP path either, back when the fallback was mandatory there.)
+  `RUN --mount=type=bind,from=<stage>` in the final stage. This eliminates the
+  leak, but it depends on `RUN --mount`, so it is not a path that avoids the
+  instruction — it is just a different use of the same instruction.
 - **`--squash`.** Lossy, non-standard, and contrary to the hand-maintainable
   Containerfile goal. Rejected.
-- **Accept the leak as a documented limitation of the fallback path.** Hooks are
-  operational scripts, not secrets, so the impact is pull size at fleet scale
-  plus disclosure of a fragment's implementation logic (relevant for
-  security-oriented fragments such as `cis-hardening`). This remains a
-  candidate. It is **not adopted here.**
+- **Accept the leak as a documented limitation.** Hook scripts are operational,
+  not secrets, so the impact is pull size at fleet scale plus disclosure of a
+  fragment's implementation logic (relevant for security-oriented fragments such
+  as `cis-hardening`).
 
-**What the verification changed.** This question was gated on whether
-`RUN --mount=type=bind,from=<registry image>` works inside an on-cluster
-MachineOSConfig build. It does (see "Why the fallback is retained" above), so
-the fallback is no longer emitted on the OCP path and the leak disappears from
-every path the tool selects on its own.
-
-**What remains open.** The leak is now confined to the opt-in fallback flag, on
-the generic path, where the user has explicitly asked for it because their
-builder rejects `RUN --mount`. Whether to accept it there as a documented
-limitation, the last surviving candidate above, is a decision that has not been
-made and is not made here. It is a materially smaller decision than it was: it
-no longer affects any default output, and it no longer silently ships hook bytes
-in every OCL-built image.
+The bind mount avoids this entire class of problem: one instruction, one layer,
+nothing committed, nothing to clean up. With the verification that it works on
+every target platform including on-cluster OCP builds, there is no remaining
+reason to carry a COPY path.
 
 **Acceptance.**
-- Default output executes hooks via `RUN --mount`, with no `COPY` of `hooks/`.
-- **MachineOSConfig output does the same.** A test asserts `hooks/` never appears
-  in a `COPY` instruction in either standalone or `--ocp` output, and that the
-  two paths do not diverge in hook emission.
+- All output executes hooks via `RUN --mount`, with no `COPY` of `hooks/`.
+  There is no fallback mode.
+- A test asserts `hooks/` never appears in a `COPY` instruction in either
+  standalone or `--ocp` output, and that the two paths do not diverge in hook
+  emission.
 - All hooks belonging to one fragment execute in a single `RUN --mount`
   instruction, preserving the current `&&` chaining.
 - Emitted mounts carry `bind-propagation=rshared,z`, matching MCO's own
   on-cluster-build template.
-- The fallback is reachable only through the explicit opt-in flag. No target,
-  mode, or output artifact selects it automatically.
-- Fallback mode emits the current two-instruction form unchanged: `COPY` of the
-  hooks directory, then a chained `RUN` ending in `rm -rf`.
-- Neither this spec, the generated Containerfile, nor the docs claim that the
-  fallback eliminates the leaked bytes. Documentation states the tradeoff
-  explicitly: filesystem-correct, not layer-correct, and scoped to a flag the
-  user opted into.
 
 ---
 
@@ -263,20 +245,18 @@ Recorded here so it is not rediscovered mid-implementation and mistaken for a
 gap.
 
 **Acceptance.**
-- Output validates against the v1 schema.
+- Output validates against the v1 schema once placeholders are substituted (the
+  hardcoded `REPLACE_WITH_SECRET_NAME` is intentionally not a valid `dns1123Subdomain`).
 - Tests assert v1 field names, the `Job` builder type, and the name-matching rule.
 - A test asserts `containerfileArch: NoArch` exactly, in PascalCase.
 - `renderedImagePushSecret` is emitted at `spec.renderedImagePushSecret`.
 - `baseImagePullSecret` is not emitted.
 - The 4096-character check is retained.
 
-**Size ceiling cross-reference.** Round 1 flagged that the `COPY` fallback costs
-more characters per fragment than the bind-mount form, tightening the practical
-fragment ceiling under the 4096-character limit. Since the OCP path now emits
-the bind mount (change 1), this moves from a cost to a modest gain: replacing a
-per-fragment `COPY` plus `RUN` pair with a single `RUN --mount` should buy some
-headroom against the cap. Worth measuring during implementation, not worth
-assuming. See "The MachineOSConfig size ceiling" under Out of scope.
+**Size ceiling cross-reference.** Replacing the per-fragment `COPY` plus `RUN`
+pair with a single `RUN --mount` (change 1) should buy some headroom against the
+4096-character cap. Worth measuring during implementation, not worth assuming.
+See "The MachineOSConfig size ceiling" under Out of scope.
 
 ---
 
@@ -368,34 +348,29 @@ The old key is **not** read, and no alias is kept. `available` and `required`
 mean different things, so silently reading one as the other would turn a
 catalogue listing into a forced install.
 
-Consequence, stated so it is not a surprise: a fragment image built before the
-rename, carrying only the old annotation, shows an empty package list under
-`inspect` and `list`. That is acceptable because the annotation fast path is
-metadata-only and used exclusively for those display commands. Assembly always
-parses the in-layer `fragment.toml` for the authoritative fragment, so a stale
-annotation can never affect a generated Containerfile.
-
-### Migration hazard: `available` must not parse silently
+### Migration hazard: unknown keys must not parse silently
 
 `FragmentPackages` derives `Deserialize` without `#[serde(deny_unknown_fields)]`.
 If `available` is simply deleted and `required` added, an existing
 `fragment.toml` that still declares `available = ["grafana"]` parses
 successfully into an empty `required` list. The fragment stops installing
-anything and its author gets no error and no warning.
+anything and its author gets no error and no warning. The same class of bug
+applies to any typo: `requred = ["grafana"]` silently parses into an empty
+list.
 
-**Resolution:** keep `available` in the deserialization struct as a rejected
-key. Parse it into an `Option<Vec<String>>` and fail at
-`parse_fragment_toml` with a message naming the rename, for example:
+**Resolution:** add `#[serde(deny_unknown_fields)]` to `FragmentPackages`. This
+rejects `available`, any other unknown key, and any typo of `required` with a
+parse error naming the offending field. It also rejects unknown keys from newer
+fragments read by older tools (forward compatibility); that is the intended
+behaviour — forward compatibility (newer fragment read by older tool) is not a
+design goal, and an older tool failing on an unrecognised field is the correct
+outcome.
 
-```
-fragment.toml: field `available` has been renamed to `required`
-```
-
-Chosen over `#[serde(deny_unknown_fields)]` because serde's error names the
-offending field but cannot mention the rename, and the rename is the thing the
-author needs to be told. `deny_unknown_fields` also changes behaviour for every
-other unknown key in the same struct, which is a wider change than this
-migration needs.
+The rename-specific error message (`available has been renamed to required`) is
+not provided by serde's generic unknown-field error. This is an acceptable
+tradeoff: serde's error names the offending field and lists the valid fields,
+which is sufficient for the author to find `required`. A bespoke check for one
+historical key leaves the general case (typos, future fields) broken.
 
 ### Migration
 
@@ -437,8 +412,8 @@ read path in `loader.rs`, `inspect` output, the annotation key list in
 - A manifest may select a package no fragment declares, and this is not an error.
 - `postgresql` emits `postgresql17-server` and `postgresql17` with no manifest
   entry, and keeps `phase = "repos"`.
-- `available` in a `fragment.toml` is a hard parse error whose message names the
-  rename to `required`.
+- `available` or any other unknown key in `fragment.toml`'s `[fragment.packages]`
+  is a hard parse error (via `#[serde(deny_unknown_fields)]`).
 - The OCI annotation is emitted and read as
   `io.bootc.fragment.packages.required`; the old key is not read anywhere.
 - Example fragments and docs updated, including the annotation key list and the
@@ -492,11 +467,18 @@ the reason, and continue. Classification is not worth turning into a hard
 network dependency, and the manifest override is the deterministic path for
 anyone who needs one.
 
-**OCP output is always bootc.** MachineOSConfig exists only to build OpenShift
-node OS images, and those are bootc by definition. The OCP output emits both
-steps unconditionally and performs no base inspection or classification. The
-conditional logic applies to the standalone Containerfile only. This keeps the
-OCP code path free of a branch that has exactly one possible outcome.
+**MachineOSConfig steps are always bootc.** MachineOSConfig exists only to build
+OpenShift node OS images, and those are bootc by definition. The MachineOSConfig
+artifact always emits both steps, regardless of the base classification result.
+
+Because `--ocp` adds a second artifact rather than switching modes (change 1),
+classification always runs — the standalone Containerfile needs it. With
+`baseType: container` and `--ocp`, the two artifacts diverge: the standalone
+Containerfile omits bootc steps while the MachineOSConfig includes them. This is
+not a conflict. The standalone artifact reflects the declared base; the
+MachineOSConfig reflects the OCP target, which is bootc by definition. A user
+declaring `baseType: container` while also requesting `--ocp` output is building
+for two different targets, and the outputs are individually correct.
 
 ### Phase table direction
 
@@ -523,8 +505,9 @@ an abstraction to build out now.
   classified bootc. Covered by a test.
 - The manifest `baseType` override wins over the label. Covered by a test.
 - A failed label lookup warns and classifies bootc, and does not fail assembly.
-- OCP output emits both steps regardless of classification, with no inspection
-  performed. Covered by a test.
+- The MachineOSConfig artifact emits both steps regardless of classification.
+  The standalone artifact reflects the classification. Both are produced by the
+  same invocation; classification always runs. Covered by a test.
 - No classification path inspects the image name.
 
 ---
@@ -540,9 +523,8 @@ Rationale for the packages split and the flat-list guardrail is already in
 - Manifest documentation: the new `baseType` field, its values, and its default.
 - Base classification: which signals are checked, in what order, and what
   happens when the label is absent or the lookup fails.
-- Hook execution: the bind-mount default, the fallback flag documented next to
-  the builder error that leads a user to it, and an explicit statement that the
-  fallback is filesystem-correct but not layer-correct.
+- Hook execution: the bind-mount emission, why COPY was rejected, and a note
+  that `RUN --mount=type=bind` requires BuildKit/Buildah (buildah 1.24.0+).
 
 ---
 

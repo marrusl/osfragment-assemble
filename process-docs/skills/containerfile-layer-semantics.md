@@ -10,7 +10,7 @@ COPY --from=<ref> /fragment/hooks/ /tmp/frag-hooks/
 RUN /tmp/frag-hooks/configure.sh && rm -rf /tmp/frag-hooks
 ```
 
-This is **size-correct but not layer-correct**. The `rm -rf` writes a whiteout
+This is **filesystem-correct but not layer-correct**. The `rm -rf` writes a whiteout
 in the `RUN` layer. The files are absent from the mounted filesystem and absent
 from what a deployed bootc node sees, because ostree/composefs only surfaces
 what is in the commit. The bytes themselves remain in the `COPY` layer and come
