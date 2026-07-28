@@ -26,9 +26,9 @@ pub fn capabilities_for_base_type(base_type: BaseType) -> CapabilitySet {
     }
 }
 
-/// Go template format string for extracting the containers.bootc label.
-/// The double braces are Go template syntax, not Rust format placeholders.
-const BOOTC_LABEL_FORMAT: &str = "{{.Labels.containers\\.bootc}}";
+/// Go template for extracting the containers.bootc label via skopeo inspect.
+/// Uses the index function because the dotted key is not a valid Go field path.
+const BOOTC_LABEL_FORMAT: &str = "{{index .Labels \"containers.bootc\"}}";
 
 /// Testable classification: accepts probe result directly instead of running skopeo.
 pub(crate) fn classify_base_with_probe(
@@ -203,9 +203,9 @@ mod tests {
 
     #[test]
     fn bootc_label_format_uses_go_template_syntax() {
-        // Verify the format string is valid Go template syntax for skopeo
         assert!(BOOTC_LABEL_FORMAT.starts_with("{{"));
         assert!(BOOTC_LABEL_FORMAT.ends_with("}}"));
-        assert!(BOOTC_LABEL_FORMAT.contains("containers\\.bootc"));
+        assert!(BOOTC_LABEL_FORMAT.contains("containers.bootc"));
+        assert!(BOOTC_LABEL_FORMAT.contains("index"));
     }
 }
