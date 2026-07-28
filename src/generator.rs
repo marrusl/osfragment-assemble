@@ -1300,4 +1300,94 @@ mod tests {
             standalone_mount, ocp_mount
         );
     }
+
+    #[test]
+    fn one_mount_per_fragment_not_per_hook() {
+        // Fragment with 3 hooks
+        let mut loaded = LoadedFragment {
+            fragment: Fragment {
+                name: "multi-hook".to_string(),
+                version: "1.0".into(),
+                description: "test".into(),
+                vendor: None,
+                phase: FragmentPhase::Config,
+                provides: FragmentProvides { repos: vec![] },
+                packages: FragmentPackages { available: vec![] },
+                conflicts: FragmentConflicts { fragments: vec![] },
+            },
+            tree_paths: vec![],
+            hook_paths: vec![
+                PathBuf::from("01-first.sh"),
+                PathBuf::from("02-second.sh"),
+                PathBuf::from("03-third.sh"),
+            ],
+            source: FragmentSource::Registry {
+                image_ref: "quay.io/test/multi-hook:1.0".into(),
+            },
+            resolved_digest: None,
+            manifest_index: 0,
+            repo_file_contents: std::collections::HashMap::new(),
+        };
+        loaded.hook_paths.sort();
+        let manifest_frag = ManifestFragment {
+            image: "quay.io/test/multi-hook:1.0".into(),
+            packages: vec![],
+            mirror: None,
+        };
+
+        // Second fragment with 1 hook
+        let loaded2 = LoadedFragment {
+            fragment: Fragment {
+                name: "single-hook".to_string(),
+                version: "1.0".into(),
+                description: "test".into(),
+                vendor: None,
+                phase: FragmentPhase::Config,
+                provides: FragmentProvides { repos: vec![] },
+                packages: FragmentPackages { available: vec![] },
+                conflicts: FragmentConflicts { fragments: vec![] },
+            },
+            tree_paths: vec![],
+            hook_paths: vec![PathBuf::from("setup.sh")],
+            source: FragmentSource::Registry {
+                image_ref: "quay.io/test/single-hook:1.0".into(),
+            },
+            resolved_digest: None,
+            manifest_index: 1,
+            repo_file_contents: std::collections::HashMap::new(),
+        };
+        let manifest_frag2 = ManifestFragment {
+            image: "quay.io/test/single-hook:1.0".into(),
+            packages: vec![],
+            mirror: None,
+        };
+
+        let manifest = Manifest {
+            base: "registry.redhat.io/rhel10/rhel-bootc:10.0".into(),
+            fragments: vec![manifest_frag, manifest_frag2],
+        };
+        let output = generate_containerfile(
+            &manifest,
+            &[loaded, loaded2],
+            None,
+            &empty_dedup(),
+            false,
+        )
+        .unwrap();
+
+        // Two fragments with hooks -> exactly two RUN --mount instructions
+        let mount_count = output.matches("RUN --mount=type=bind").count();
+        assert_eq!(
+            mount_count, 2,
+            "expected 2 RUN --mount instructions (one per fragment), got {}:\n{}",
+            mount_count, output
+        );
+
+        // First fragment's hooks all chained in one line
+        assert!(
+            output.contains("/frag-hooks/01-first.sh && /frag-hooks/02-second.sh && /frag-hooks/03-third.sh"),
+            "expected all hooks chained with && in one instruction:\n{}",
+            output
+        );
+    }
 }
