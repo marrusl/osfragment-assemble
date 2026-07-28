@@ -230,8 +230,8 @@ fn try_annotation_fast_path(image_ref: &str) -> Result<Option<Fragment>> {
         .and_then(|s| serde_json::from_str(s).ok())
         .unwrap_or_default();
 
-    let available: Vec<String> = annotations
-        .get("io.bootc.fragment.packages.available")
+    let required: Vec<String> = annotations
+        .get("io.bootc.fragment.packages.required")
         .and_then(|v| v.as_str())
         .and_then(|s| serde_json::from_str(s).ok())
         .unwrap_or_default();
@@ -248,7 +248,7 @@ fn try_annotation_fast_path(image_ref: &str) -> Result<Option<Fragment>> {
         vendor,
         phase,
         provides: FragmentProvides { repos },
-        packages: FragmentPackages { available },
+        packages: FragmentPackages { required },
         conflicts: FragmentConflicts { fragments: vec![] },
     }))
 }

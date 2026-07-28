@@ -69,8 +69,8 @@ pub fn run_inspect(target: &str) -> Result<()> {
     if !fragment.provides.repos.is_empty() {
         println!("Repos:    {}", fragment.provides.repos.join(", "));
     }
-    if !fragment.packages.available.is_empty() {
-        println!("Packages: {}", fragment.packages.available.join(", "));
+    if !fragment.packages.required.is_empty() {
+        println!("Packages: {}", fragment.packages.required.join(", "));
     }
 
     if !tree_paths.is_empty() {

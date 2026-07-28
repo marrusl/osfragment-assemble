@@ -130,7 +130,7 @@ mod tests {
                 provides: FragmentProvides {
                     repos: repos.into_iter().map(String::from).collect(),
                 },
-                packages: FragmentPackages { available: vec![] },
+                packages: FragmentPackages { required: vec![] },
                 conflicts: FragmentConflicts {
                     fragments: conflicts.into_iter().map(String::from).collect(),
                 },
