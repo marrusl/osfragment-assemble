@@ -153,8 +153,12 @@ Assisted-by: Claude Code (claude-opus-5)"
 - Modify: `src/inspect.rs:72-73` (display output)
 - Modify: `src/loader.rs:233-237` (annotation read)
 - Modify: `src/loader.rs:244-253` (Fragment construction from annotations)
+- Modify: `src/validate.rs:133` (test helper `test_fragment`)
 - Modify: `src/generator.rs:356` (test helper `make_repos_fragment`)
 - Modify: `src/generator.rs:389` (test helper `make_config_fragment`)
+- Modify: `src/generator.rs:677` (test helper `make_unpinned_repos_fragment`)
+- Modify: `src/generator.rs:709` (test helper `make_unpinned_config_fragment`)
+- Modify: `src/generator.rs:898` (test fixture `multiple_hooks_run_in_alphabetical_order`)
 
 **Interfaces:**
 - Consumes: `FragmentPackages { required }` from Task 1
@@ -194,7 +198,7 @@ At line 244-253, change the struct field in the `Fragment` construction:
     }))
 ```
 
-- [ ] **Step 3: Update generator test helpers**
+- [ ] **Step 3: Update generator test helpers and fixtures**
 
 In `make_repos_fragment` at line 356:
 ```rust
@@ -206,17 +210,42 @@ In `make_config_fragment` at line 389:
                 packages: FragmentPackages { required: vec![] },
 ```
 
-- [ ] **Step 4: Search for any remaining `.available` references**
+In `make_unpinned_repos_fragment` at line 677:
+```rust
+                packages: FragmentPackages { required: vec![] },
+```
+
+In `make_unpinned_config_fragment` at line 709:
+```rust
+                packages: FragmentPackages { required: vec![] },
+```
+
+In `multiple_hooks_run_in_alphabetical_order` test at line 898:
+```rust
+                packages: FragmentPackages { required: vec![] },
+```
+
+- [ ] **Step 4: Update validate.rs test helper**
+
+In `test_fragment` helper at line 133:
+```rust
+                packages: FragmentPackages { required: vec![] },
+```
+
+- [ ] **Step 5: Search for any remaining `available` references**
 
 ```bash
 cd /Users/mrussell/Work/osfragment-assemble
 grep -rn '\.available' src/
 grep -rn 'packages.available' src/
+grep -rn 'available' src/ | grep -v 'required'
 ```
 
-Expect: zero hits.
+The third grep catches struct literal field initializers (`available: vec![]`) that the dot-prefixed patterns miss.
 
-- [ ] **Step 5: Run full test suite**
+Expect: zero hits from all three commands.
+
+- [ ] **Step 6: Run full test suite**
 
 ```bash
 cd /Users/mrussell/Work/osfragment-assemble
@@ -225,10 +254,10 @@ cargo test 2>&1
 
 Expect: all tests pass except `parse_all_example_fragments` (examples still use `available`).
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
-git add src/inspect.rs src/loader.rs src/generator.rs
+git add src/inspect.rs src/loader.rs src/generator.rs src/validate.rs
 git commit -m "refactor: update all .available references to .required across codebase
 
 Assisted-by: Claude Code (claude-opus-5)"
@@ -759,9 +788,10 @@ Assisted-by: Claude Code (claude-opus-5)"
 
 **Files:**
 - Modify: `src/generator.rs` (test module)
+- Modify: `src/fragment.rs` (test module, phase verification against real example)
 
 **Interfaces:**
-- Consumes: generator logic from Task 3, `FragmentPackages.required`
+- Consumes: generator logic from Task 3, `FragmentPackages.required`, migrated examples from Task 5
 - Produces: test coverage for "postgresql emits postgresql17-server and postgresql17 with no manifest entry, and keeps phase = repos"
 
 - [ ] **Step 1: Write test**
@@ -808,23 +838,55 @@ Assisted-by: Claude Code (claude-opus-5)"
     }
 ```
 
-- [ ] **Step 2: Run test to verify it passes**
+- [ ] **Step 2: Write test -- postgresql example preserves phase = repos after migration**
+
+The generator test above uses a synthetic `make_repos_fragment` helper, so it proves package emission but never reads the real migrated example. This test parses the actual `examples/fragments/postgresql/fragment.toml` and verifies the phase field survived migration intact.
+
+Add in `src/fragment.rs` tests module, after `parse_all_example_fragments`:
+
+```rust
+    #[test]
+    fn postgresql_example_preserves_repos_phase() {
+        let toml_path = Path::new("examples/fragments/postgresql/fragment.toml");
+        let content = std::fs::read_to_string(toml_path)
+            .expect("postgresql example fragment should exist");
+        let frag = parse_fragment_toml(&content)
+            .expect("postgresql example fragment should parse");
+        assert_eq!(
+            frag.phase,
+            FragmentPhase::Repos,
+            "postgresql must stay phase=repos after migration to required packages"
+        );
+        assert!(
+            frag.packages.required.contains(&"postgresql17-server".to_string()),
+            "postgresql must declare postgresql17-server as required"
+        );
+        assert!(
+            frag.packages.required.contains(&"postgresql17".to_string()),
+            "postgresql must declare postgresql17 as required"
+        );
+    }
+```
+
+- [ ] **Step 3: Run tests to verify they pass**
 
 ```bash
 cd /Users/mrussell/Work/osfragment-assemble
 cargo test --lib generator::tests::postgresql_forces_packages_as_repos_phase
+cargo test --lib fragment::tests::postgresql_example_preserves_repos_phase
 ```
 
-Expect: PASS.
+Expect: both PASS.
 
-- [ ] **Step 3: Commit**
+- [ ] **Step 4: Commit**
 
 ```bash
-git add src/generator.rs
-git commit -m "test: add integration test for postgresql forced packages
+git add src/generator.rs src/fragment.rs
+git commit -m "test: add integration tests for postgresql forced packages
 
-Verifies postgresql17-server and postgresql17 appear in dnf install
-output with no manifest entry, while fragment stays repos-phase.
+Generator test verifies postgresql17-server and postgresql17 appear in
+dnf install output with no manifest entry. Fragment test parses the real
+example and asserts phase=repos and required packages survived migration.
 
 Assisted-by: Claude Code (claude-opus-5)"
 ```
@@ -880,7 +942,7 @@ Expect: zero hits.
 | Forced and selected deduplicate, exact-string, first-seen wins, required before selected | Task 3 (test + impl) |
 | Two fragments requiring same package: one entry, no warning | Task 3 (test) |
 | Manifest may select a package no fragment declares, not an error | Task 4 (test) |
-| `postgresql` emits postgresql17-server and postgresql17 with no manifest entry, keeps `phase = "repos"` | Task 7 (test) |
+| `postgresql` emits postgresql17-server and postgresql17 with no manifest entry, keeps `phase = "repos"` | Task 7 (generator test for emission, fragment test for real example phase + packages) |
 | `available` or unknown key in `[fragment.packages]` is hard parse error | Task 1 (tests) |
 | OCI annotation emitted and read as `io.bootc.fragment.packages.required`; old key not read | Task 2 (loader change) |
 | Example fragments updated | Task 5 (all 8 fragments covered) |
@@ -892,7 +954,7 @@ No steps contain TBD, TODO, or "implement later". All steps have concrete code o
 
 ### Type consistency
 
-- `FragmentPackages { required: Vec<String> }` -- used consistently across fragment.rs, loader.rs, inspect.rs, generator.rs, and all test helpers.
+- `FragmentPackages { required: Vec<String> }` -- used consistently across fragment.rs, loader.rs, inspect.rs, generator.rs, validate.rs, and all test helpers (including `make_unpinned_repos_fragment`, `make_unpinned_config_fragment`, `multiple_hooks_run_in_alphabetical_order`).
 - `#[serde(deny_unknown_fields)]` only on `FragmentPackages` -- other structs unchanged.
 
 ### Example migration
