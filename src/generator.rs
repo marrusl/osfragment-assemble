@@ -1756,4 +1756,119 @@ mod tests {
         assert!(output.contains("systemctl preset-all"));
         assert!(!output.contains("bootc container lint"));
     }
+
+    #[test]
+    fn ocp_always_emits_bootc_steps_regardless_of_caps() {
+        // Even with empty capabilities, OCP mode forces bootc steps
+        // because MachineOSConfig always targets bootc.
+        // This test verifies the *caller* pattern: main.rs always passes
+        // bootc_caps() for OCP. The generator itself is capability-gated.
+        let (epel, mf_epel) = make_unpinned_repos_fragment("epel");
+        let manifest = Manifest {
+            base: "quay.io/fedora/fedora:41".into(),
+            base_type: Some(crate::manifest::BaseType::Container),
+            fragments: vec![mf_epel],
+        };
+        // OCP caller always passes full bootc caps
+        let ocp_caps = bootc_caps();
+        let output = generate_containerfile(
+            &manifest,
+            &[epel],
+            None,
+            &empty_dedup(),
+            true,
+            &ocp_caps,
+        )
+        .unwrap();
+        assert!(output.contains("systemctl preset-all"));
+        assert!(output.contains("bootc container lint"));
+    }
+
+    #[test]
+    fn container_base_with_ocp_produces_divergent_outputs() {
+        let (epel, mf_epel) = make_unpinned_repos_fragment("epel");
+        let manifest = Manifest {
+            base: "quay.io/fedora/fedora:41".into(),
+            base_type: Some(crate::manifest::BaseType::Container),
+            fragments: vec![mf_epel.clone()],
+        };
+
+        // Standalone: container capabilities (empty set)
+        let standalone_caps = empty_caps();
+        let standalone = generate_containerfile(
+            &manifest,
+            &[epel.clone()],
+            None,
+            &empty_dedup(),
+            false,
+            &standalone_caps,
+        )
+        .unwrap();
+
+        // OCP: always bootc capabilities
+        let ocp_caps = bootc_caps();
+        let ocp = generate_containerfile(
+            &manifest,
+            &[epel],
+            None,
+            &empty_dedup(),
+            true,
+            &ocp_caps,
+        )
+        .unwrap();
+
+        // Standalone omits bootc steps
+        assert!(!standalone.contains("systemctl preset-all"));
+        assert!(!standalone.contains("bootc container lint"));
+
+        // OCP includes bootc steps
+        assert!(ocp.contains("systemctl preset-all"));
+        assert!(ocp.contains("bootc container lint"));
+    }
+
+    #[test]
+    fn no_base_type_with_bootc_caps_preserves_current_output() {
+        // Simulates: no manifest override, label absent -> default bootc
+        let (epel, mf_epel) = make_unpinned_repos_fragment("epel");
+        let manifest = Manifest {
+            base: "registry.redhat.io/rhel10/rhel-bootc:10.0".into(),
+            base_type: None,
+            fragments: vec![mf_epel],
+        };
+        let output = generate_containerfile(
+            &manifest,
+            &[epel],
+            None,
+            &empty_dedup(),
+            false,
+            &bootc_caps(),
+        )
+        .unwrap();
+        // Same as pre-change output — both steps present
+        assert!(output.contains("systemctl preset-all"));
+        assert!(output.contains("bootc container lint"));
+    }
+
+    #[test]
+    fn manifest_override_container_omits_steps() {
+        // baseType: container in manifest -> no bootc steps
+        // regardless of what label inspection would return
+        let (epel, mf_epel) = make_unpinned_repos_fragment("epel");
+        let manifest = Manifest {
+            base: "registry.redhat.io/rhel10/rhel-bootc:10.0".into(),
+            base_type: Some(crate::manifest::BaseType::Container),
+            fragments: vec![mf_epel],
+        };
+        let output = generate_containerfile(
+            &manifest,
+            &[epel],
+            None,
+            &empty_dedup(),
+            false,
+            &empty_caps(),
+        )
+        .unwrap();
+        assert!(!output.contains("systemctl preset-all"));
+        assert!(!output.contains("bootc container lint"));
+    }
 }
