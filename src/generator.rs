@@ -1529,4 +1529,27 @@ mod tests {
             "repos-phase required should appear before config-phase required"
         );
     }
+
+    #[test]
+    fn manifest_selected_package_no_fragment_declaration() {
+        let (epel, mut mf_epel) = make_repos_fragment("epel", "aaa111");
+        mf_epel.packages = vec!["unrelated-tool".into()];
+        let manifest = Manifest {
+            base: "registry.redhat.io/rhel10/rhel-bootc:10.0".into(),
+            fragments: vec![mf_epel],
+        };
+        let output = generate_containerfile(
+            &manifest,
+            &[epel],
+            Some("sha256:base123"),
+            &empty_dedup(),
+            false,
+        )
+        .unwrap();
+        assert!(
+            output.contains("unrelated-tool"),
+            "manifest-selected package should appear even when no fragment declares it:\n{}",
+            output
+        );
+    }
 }
