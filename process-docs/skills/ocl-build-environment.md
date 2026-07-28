@@ -3,13 +3,19 @@
 What the `--ocp` output path actually runs inside. Verified 2026-07-27 against
 `openshift/machine-config-operator` and `containers/buildah` sources.
 
+For *which* Containerfile constructs keep bytes out of an image, and the
+`from=context` / `from=<image>` / `from=<stage>` distinction, see
+`containerfile-layer-semantics.md`. This file covers the environment those
+constructs run in.
+
 ## The builder is buildah, and you can rely on that
 
 An OCL build is `buildah bud`. Not podman, not BuildKit, not Docker.
 
-The build runs as an init container named `image-build` in a Kubernetes Job. The
+It runs as an init container named `image-build` in a Kubernetes Job. The
 container image is the MCO image itself, which installs `buildah` from the
-RHEL 9 base repos. The invocation lives in
+RHEL 9 base repos (`Dockerfile`: `dnf install -y buildah fuse-overlayfs cpp`).
+The invocation lives in
 `pkg/controller/build/buildrequest/assets/buildah-build.sh`:
 
 ```
@@ -18,104 +24,80 @@ buildah bud --log-level=DEBUG --storage-driver vfs \
   --file="$build_context/Containerfile" ... "$build_context"
 ```
 
-Environment: `BUILDAH_ISOLATION=chroot`, running as user `build` (uid 1000),
-empty `securityContext` (not privileged), `--storage-driver vfs`,
-ServiceAccount `machine-os-builder`.
+Environment, all confirmed in `buildrequest.go`:
 
-Practical consequence: the OCP path is the one output target where the builder
-is known in advance. Buildah extensions are safe there. They are not
-automatically safe on the generic path, where the user picks the builder.
+- `BUILDAH_ISOLATION=chroot`
+- runs as user `build`, uid 1000, via `su -m build`
+- `securityContext` is an empty struct: **not privileged**, no added capabilities
+- ServiceAccount `machine-os-builder`
+- `--storage-driver vfs`, cache volume at `/home/build/.local/share/containers`
+- `HOME=/home/build`, build context at `/home/build/context`
 
-## `RUN --mount=type=bind,from=<registry-image>` works. Use it.
+Practical consequence: **the OCP path is the one output target where the builder
+is known in advance.** Buildah extensions are safe there. They are not
+automatically safe on the generic path, where the user picks the builder. That
+asymmetry is why the fallback emission mode is scoped to the generic path only.
 
-This is the important one, because the opposite was assumed for a while.
+## Version floor is not a live concern
 
-MCO ships this exact instruction in its own on-cluster-build Containerfile
-template (`assets/Containerfile.on-cluster-build-template`, line 25) to mount
-the extensions image:
+Buildah gained buildkit-style `--mount=type=bind` in **v1.24.0 (2022-01-26)**;
+`from=<stage>` predates that (v1.29.0 carries a *fix* to it). RHEL 9 has shipped
+buildah 1.29+ since 9.2 and 1.33+ since 9.4, and OCL itself only appeared in
+OCP 4.16. Every OCP release that can run OCL at all is far past the floor.
 
-```dockerfile
-RUN --mount=type=bind,from={{.ExtensionsImage}},source=/,target=/tmp/mco-extensions/os-extensions-content,bind-propagation=rshared,z \
-    bash <<'EOF'
-```
-
-`{{.ExtensionsImage}}` is a registry pullspec, not a build stage. The user's
-`containerFile` is rendered into this same template and validated by the same
-validator, so anything MCO does here is available to us.
-
-**Do not emit a `COPY`-based fallback for `--ocp` output.** A `COPY` cannot
-avoid leaving its bytes in a layer (see below), so a fallback there ships hook
-bytes in every image for no benefit.
-
-Mirror MCO's options rather than emitting the bare form:
-`bind-propagation=rshared,z`. The `z` is an SELinux relabel and MCO presumably
-added both deliberately.
-
-## Three `from=` sources, do not conflate them
-
-`RUN --mount=type=bind` accepts `from=` naming three different things, and
-buildah resolves them in this order (`imagebuildah/stage_executor.go`,
-`stageMountPoints`):
-
-1. an additional build context (`--build-context name=...`) - MCO passes none
-2. an earlier build stage in the same Containerfile
-3. otherwise, an image name, pulled if not in local storage
-
-Only form 1 needs a build context. The claim "OCL has no build context" is both
-inaccurate and irrelevant to us:
-
-- It is inaccurate: `buildah-build.sh` creates `/home/build/context` and passes
-  it to `buildah bud`. The real constraint is that **the user cannot put files
-  into it** - the only user input is the `containerFile` string.
-- It is irrelevant: this tool emits forms 2 and 3, which never touch the build
-  context.
+Do not add version-gating logic for this.
 
 ## Credentials: one authfile for everything
 
-There is a single global `--authfile="$BASE_IMAGE_PULL_CREDS"`, sourced from the
-MachineOSConfig's base image pull secret. It covers every pull in the build,
-including images named in `COPY --from=` and `RUN --mount=...,from=`.
+A single global `--authfile="$BASE_IMAGE_PULL_CREDS"`, sourced from the
+MachineOSConfig's base image pull secret, covers every pull in the build:
+the base image, images named in `COPY --from=`, and images named in
+`RUN --mount=...,from=`.
 
 **Constraint:** a fragment image must be pullable with the same secret that
-pulls the base image. This is not new with mounts - buildah routes
-`COPY --from=<image>` and `RUN --mount=...,from=<image>` through the same
-`getImageRootfs` function, so both have always had this property.
+pulls the base image. Not new with mounts - buildah routes `COPY --from=<image>`
+and `RUN --mount=...,from=<image>` through the same `getImageRootfs` function,
+so both have always had this property.
 
-## MCO validates the Containerfile, but does not restrict flags
+The build pod also gets RHSM certs, entitlements, `yum.repos.d`, and `rpm-gpg`
+bind-mounted in via `--volume` when the corresponding secrets exist, which is
+what makes subscription-backed `dnf` work inside a fragment hook.
+
+## MCO validates the Containerfile but does not restrict flags
 
 `pkg/controller/build/buildrequest/buildrequest.go` validates twice: the user's
 `containerFile` alone, and the fully rendered Containerfile.
 
 - Requires at least one `FROM` (regex `^\s*FROM`).
 - Parses with `github.com/openshift/imagebuilder/dockerfile/parser`. Instruction
-  flags are collected generically into `Flags []string`. **There is no allowlist
-  or inspection of flag contents.**
+  flags are collected generically into `Flags []string`. **No allowlist, no
+  inspection of flag contents.**
 - Checks that instructions requiring arguments have them.
 - Error handling is deliberately permissive where imagebuilder is stricter than
   buildah: heredoc syntax and unquoted LABEL/ENV values are waved through, with
   a source comment noting "imagebuilder cannot parse them but buildah/podman
   will."
 
-So heredocs are safe, and `--mount` flags are safe.
+So heredocs are safe, and `--mount` flags are safe. If a future emission is
+rejected by MCO, suspect the character cap before suspecting the parser.
 
 ## The 4096-character cap is the real OCL constraint
 
 `containerFile` is capped at 4096 characters (`openshift/api`,
 `machineconfiguration/v1/types_machineosconfig.go`). This is the binding limit
-on how many fragments the OCP path can carry, roughly 6-8 with per-fragment
-`COPY` emission. Switching to a single `RUN --mount` per fragment reduces the
-per-fragment cost; measure it rather than assuming a specific new ceiling.
+on fragment count for the OCP path, roughly 6-8 with per-fragment `COPY`
+emission. A single `RUN --mount` per fragment costs fewer characters than a
+`COPY` plus a separate `RUN`; measure the new ceiling rather than assuming one.
 
-Also: MachineOSConfig has graduated to `v1`. The `v1alpha1` type is gone, and
+MachineOSConfig has graduated to `v1`. The `v1alpha1` type is gone, and
 `imageBuilderType` accepts only `Job`.
 
-## Why `COPY` then `rm` never works
+## The user does not control the build context
 
-Worth restating because it is the bug that started this. `COPY` is a build
-directive and cannot be combined with a shell `rm` in one instruction, so it
-always lands its own layer. A later `RUN ... && rm -rf` only writes a whiteout;
-the bytes remain in the earlier layer and are recoverable with `podman save`.
+`buildah-build.sh` creates `/home/build/context` and copies in the Containerfile,
+`machineconfig/machineconfig.json.gz`, and the CA bundle, then passes it to
+`buildah bud`. A build context exists, but the only user-supplied input reaching
+it is the `containerFile` string itself, delivered via ConfigMap.
 
-`RUN --mount` is the only construct that keeps build-input bytes out of the
-image. This applies to hooks and any other build input. Content under `tree/` is
-payload and should still be copied in, because it is the deliverable.
+Anything a fragment needs must therefore arrive as a registry image, never as a
+context file.
