@@ -14,9 +14,9 @@
 
 - Rust 2021 edition, stable toolchain
 - Fragment images must be single-layer (one COPY instruction in Containerfile.fragment)
-- `configure.sh` is the only script entrypoint, must not call dnf/rpm
+- All files in `hooks/` are executed in alphabetical order, must not call dnf/rpm
 - Fragments declare phase `repos` or `config` only
-- `repos` fragments must contain only `tree/etc/yum.repos.d/` and `tree/etc/pki/rpm-gpg/` — no scripts, no other tree content
+- `repos` fragments must contain only `tree/etc/yum.repos.d/` and `tree/etc/pki/rpm-gpg/` — no hooks, no other tree content
 - All FROM references in generated Containerfiles use `@sha256:` digests
 - Layer extraction is stream-only, fail-closed (no disk unpacking, reject traversal/links/dupes, 64KB cap)
 - Tree-splitting: repo paths copy at weight 10 regardless of declared phase; remaining tree at weight 30
@@ -147,7 +147,7 @@ phase = "install"
     fn phase_consistency_repos_fragment_with_scripts_fails() {
         let paths = vec![
             PathBuf::from("tree/etc/yum.repos.d/epel.repo"),
-            PathBuf::from("scripts/configure.sh"),
+            PathBuf::from("hooks/configure.sh"),
         ];
         let frag = parse_fragment_toml(MINIMAL_TOML).unwrap();
         assert!(validate_phase_consistency(&frag, &paths).is_err());
@@ -178,7 +178,7 @@ phase = "install"
         let paths = vec![
             PathBuf::from("tree/etc/yum.repos.d/tailscale.repo"),
             PathBuf::from("tree/usr/lib/systemd/system-preset/50-tailscale.preset"),
-            PathBuf::from("scripts/configure.sh"),
+            PathBuf::from("hooks/configure.sh"),
         ];
         let frag = parse_fragment_toml(FULL_TOML).unwrap();
         assert!(validate_phase_consistency(&frag, &paths).is_ok());
@@ -319,12 +319,12 @@ pub fn validate_phase_consistency(fragment: &Fragment, tree_paths: &[PathBuf]) -
     if fragment.phase != FragmentPhase::Repos {
         return Ok(());
     }
-    let has_scripts = tree_paths
+    let has_hooks = tree_paths
         .iter()
-        .any(|p| p.to_string_lossy().starts_with("scripts/"));
-    if has_scripts {
+        .any(|p| p.to_string_lossy().starts_with("hooks/"));
+    if has_hooks {
         bail!(
-            "repos fragment '{}' must not contain scripts — change phase to 'config'",
+            "repos fragment '{}' must not contain hooks — change phase to 'config'",
             fragment.name
         );
     }
@@ -609,13 +609,13 @@ Assisted-by: Claude Code (claude-opus-4-6)"
 
 **Files:**
 - Create: `examples/fragments/epel/{fragment.toml,tree/etc/yum.repos.d/epel.repo,tree/etc/pki/rpm-gpg/RPM-GPG-KEY-EPEL-10,Containerfile.fragment}`
-- Create: `examples/fragments/tailscale/{fragment.toml,tree/etc/yum.repos.d/tailscale.repo,tree/etc/pki/rpm-gpg/RPM-GPG-KEY-tailscale,tree/usr/lib/systemd/system-preset/50-tailscale.preset,scripts/configure.sh,Containerfile.fragment}`
-- Create: `examples/fragments/grafana/{fragment.toml,tree/...,scripts/configure.sh,Containerfile.fragment}`
+- Create: `examples/fragments/tailscale/{fragment.toml,tree/etc/yum.repos.d/tailscale.repo,tree/etc/pki/rpm-gpg/RPM-GPG-KEY-tailscale,tree/usr/lib/systemd/system-preset/50-tailscale.preset,hooks/configure.sh,Containerfile.fragment}`
+- Create: `examples/fragments/grafana/{fragment.toml,tree/...,hooks/configure.sh,Containerfile.fragment}`
 - Create: `examples/fragments/postgresql/{fragment.toml,tree/...,Containerfile.fragment}`
-- Create: `examples/fragments/hashicorp/{fragment.toml,tree/...,scripts/configure.sh,Containerfile.fragment}`
-- Create: `examples/fragments/cis-hardening/{fragment.toml,tree/...,scripts/configure.sh,Containerfile.fragment}`
-- Create: `examples/fragments/node-exporter/{fragment.toml,tree/...,scripts/configure.sh,Containerfile.fragment}`
-- Create: `examples/fragments/nginx/{fragment.toml,tree/...,scripts/configure.sh,Containerfile.fragment}`
+- Create: `examples/fragments/hashicorp/{fragment.toml,tree/...,hooks/configure.sh,Containerfile.fragment}`
+- Create: `examples/fragments/cis-hardening/{fragment.toml,tree/...,hooks/configure.sh,Containerfile.fragment}`
+- Create: `examples/fragments/node-exporter/{fragment.toml,tree/...,hooks/configure.sh,Containerfile.fragment}`
+- Create: `examples/fragments/nginx/{fragment.toml,tree/...,hooks/configure.sh,Containerfile.fragment}`
 - Create: `examples/manifests/minimal.yaml`
 - Create: `examples/manifests/full.yaml`
 - Create: `examples/manifests/mirror-demo.yaml`
@@ -624,14 +624,14 @@ Assisted-by: Claude Code (claude-opus-4-6)"
 - Consumes: Fragment data model from Task 1 (fragment.toml schema)
 - Produces: 8 buildable fragment directories, 3 example manifests. Used by all later tasks for testing.
 
-This task creates the 8 example fragments. Each fragment follows the same pattern: `fragment.toml` + `tree/` directory structure + optional `scripts/configure.sh` + `Containerfile.fragment`. All fragments use freely available RPM repos and real GPG keys fetched from upstream.
+This task creates the 8 example fragments. Each fragment follows the same pattern: `fragment.toml` + `tree/` directory structure + optional `hooks/configure.sh` + `Containerfile.fragment`. All fragments use freely available RPM repos and real GPG keys fetched from upstream.
 
 - [ ] **Step 1: Create directory structure for all 8 fragments**
 
 ```bash
 cd ~/Work/osfragment-assemble
 for frag in epel tailscale grafana postgresql hashicorp cis-hardening node-exporter nginx; do
-  mkdir -p examples/fragments/$frag/tree examples/fragments/$frag/scripts
+  mkdir -p examples/fragments/$frag/tree examples/fragments/$frag/hooks
 done
 mkdir -p examples/manifests
 ```
@@ -682,10 +682,10 @@ curl -sL https://dl.fedoraproject.org/pub/epel/RPM-GPG-KEY-EPEL-10 \
 `examples/fragments/epel/Containerfile.fragment`:
 ```dockerfile
 FROM scratch
-COPY fragment.toml tree/ scripts/ /fragment/
+COPY fragment.toml tree/ hooks/ /fragment/
 ```
 
-No `scripts/configure.sh` — EPEL is a pure repo connector.
+No `hooks/configure.sh` — EPEL is a pure repo connector.
 
 - [ ] **Step 3: Create Tailscale fragment (phase: config — full spectrum)**
 
@@ -728,7 +728,7 @@ curl -sL https://pkgs.tailscale.com/stable/rhel/repo.gpg \
 enable tailscaled.service
 ```
 
-`examples/fragments/tailscale/scripts/configure.sh`:
+`examples/fragments/tailscale/hooks/configure.sh`:
 ```bash
 #!/bin/bash
 set -euo pipefail
@@ -737,12 +737,12 @@ set -euo pipefail
 echo "Tailscale fragment: configuration complete"
 ```
 
-Make it executable: `chmod +x examples/fragments/tailscale/scripts/configure.sh`
+Make it executable: `chmod +x examples/fragments/tailscale/hooks/configure.sh`
 
 `examples/fragments/tailscale/Containerfile.fragment`:
 ```dockerfile
 FROM scratch
-COPY fragment.toml tree/ scripts/ /fragment/
+COPY fragment.toml tree/ hooks/ /fragment/
 ```
 
 - [ ] **Step 4: Create Grafana fragment (phase: config — monitoring story)**
@@ -786,7 +786,7 @@ curl -sL https://rpm.grafana.com/gpg.key \
 enable grafana-server.service
 ```
 
-`examples/fragments/grafana/scripts/configure.sh`:
+`examples/fragments/grafana/hooks/configure.sh`:
 ```bash
 #!/bin/bash
 set -euo pipefail
@@ -882,7 +882,7 @@ curl -sL https://rpm.releases.hashicorp.com/gpg \
 enable vault.service
 ```
 
-`examples/fragments/hashicorp/scripts/configure.sh`:
+`examples/fragments/hashicorp/hooks/configure.sh`:
 ```bash
 #!/bin/bash
 set -euo pipefail
@@ -930,7 +930,7 @@ z /etc/cron.weekly 0700 root root -
 z /etc/cron.monthly 0700 root root -
 ```
 
-`examples/fragments/cis-hardening/scripts/configure.sh`:
+`examples/fragments/cis-hardening/hooks/configure.sh`:
 ```bash
 #!/bin/bash
 set -euo pipefail
@@ -971,7 +971,7 @@ cp examples/fragments/epel/tree/etc/pki/rpm-gpg/RPM-GPG-KEY-EPEL-10 \
 enable prometheus-node-exporter.service
 ```
 
-`examples/fragments/node-exporter/scripts/configure.sh`:
+`examples/fragments/node-exporter/hooks/configure.sh`:
 ```bash
 #!/bin/bash
 set -euo pipefail
@@ -1020,7 +1020,7 @@ curl -sL https://nginx.org/keys/nginx_signing.key \
 enable nginx.service
 ```
 
-`examples/fragments/nginx/scripts/configure.sh`:
+`examples/fragments/nginx/hooks/configure.sh`:
 ```bash
 #!/bin/bash
 set -euo pipefail
@@ -1222,7 +1222,7 @@ mod tests {
         assert!(!is_repo_path(Path::new(
             "tree/usr/lib/sysctl.d/99-hardening.conf"
         )));
-        assert!(!is_repo_path(Path::new("scripts/configure.sh")));
+        assert!(!is_repo_path(Path::new("hooks/configure.sh")));
     }
 
     #[test]
@@ -1326,7 +1326,7 @@ pub fn load_local_fragment(source: &FragmentSource) -> Result<LoadedFragment> {
     all_paths.extend(collect_relative_paths(dir, "tree")?);
     all_paths.extend(collect_relative_paths(dir, "scripts")?);
 
-    let has_configure_script = dir.join("scripts/configure.sh").exists();
+    let has_configure_script = dir.join("hooks/configure.sh").exists();
 
     validate_phase_consistency(&fragment, &all_paths)?;
 
@@ -1765,9 +1765,9 @@ pub fn load_registry_fragment(image_ref: &str) -> Result<LoadedFragment> {
 
     let has_configure_script = tree_paths
         .iter()
-        .any(|p| p.to_string_lossy() == "fragment/scripts/configure.sh");
+        .any(|p| p.to_string_lossy() == "fragment/hooks/configure.sh");
 
-    // Remap paths: fragment/tree/... -> tree/..., fragment/scripts/... -> scripts/...
+    // Remap paths: fragment/tree/... -> tree/..., fragment/hooks/... -> hooks/...
     let relative_paths: Vec<PathBuf> = tree_paths
         .iter()
         .filter_map(|p| p.strip_prefix("fragment").ok())
@@ -1899,7 +1899,7 @@ pub fn prebuild_local_fragment(dir: &Path, name: &str) -> Result<String> {
                 use std::io::Write;
                 write!(
                     stdin,
-                    "FROM scratch\nCOPY fragment.toml tree/ scripts/ /fragment/\n"
+                    "FROM scratch\nCOPY fragment.toml tree/ hooks/ /fragment/\n"
                 )?;
             }
             child.wait()
@@ -2431,7 +2431,7 @@ pub fn generate_containerfile(
             if loaded.has_configure_script {
                 writeln!(
                     out,
-                    "COPY --from=frag-{name} /fragment/scripts/configure.sh /tmp/frag-{name}-configure.sh",
+                    "COPY --from=frag-{name} /fragment/hooks/configure.sh /tmp/frag-{name}-configure.sh",
                     name = loaded.fragment.name
                 )?;
                 writeln!(
@@ -2591,7 +2591,7 @@ pub fn run_inspect(target: &str) -> Result<()> {
 
         let mut paths = Vec::new();
         collect_display_paths(path, "tree", &mut paths)?;
-        let script_paths_exist = path.join("scripts/configure.sh").exists();
+        let script_paths_exist = path.join("hooks/configure.sh").exists();
 
         (frag, paths, script_paths_exist)
     } else {
@@ -2641,10 +2641,10 @@ pub fn run_inspect(target: &str) -> Result<()> {
 
     println!();
     if has_script {
-        println!("scripts/");
+        println!("hooks/");
         println!("  configure.sh (present)");
     } else {
-        println!("scripts/ (none)");
+        println!("hooks/ (none)");
     }
 
     Ok(())

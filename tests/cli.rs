@@ -19,7 +19,7 @@ fn inspect_local_directory() {
 }
 
 #[test]
-fn inspect_tailscale_shows_script() {
+fn inspect_tailscale_shows_hook() {
     let mut cmd = Command::cargo_bin("osfragment-assemble").unwrap();
     cmd.args(["inspect", "examples/fragments/tailscale"])
         .assert()

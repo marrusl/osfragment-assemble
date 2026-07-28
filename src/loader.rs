@@ -13,7 +13,7 @@ use crate::manifest::FragmentSource;
 pub struct LoadedFragment {
     pub fragment: Fragment,
     pub tree_paths: Vec<PathBuf>,
-    pub script_paths: Vec<PathBuf>,
+    pub hook_paths: Vec<PathBuf>,
     pub source: FragmentSource,
     pub resolved_digest: Option<String>,
     /// Index into the original manifest.fragments vec, preserved through sorting.
@@ -304,11 +304,11 @@ pub fn load_registry_fragment(image_ref: &str) -> Result<LoadedFragment> {
         .as_array()
         .ok_or_else(|| anyhow::anyhow!("no layers in manifest"))?;
 
-    // Scan all layers and aggregate: fragment.toml, tree paths, scripts,
+    // Scan all layers and aggregate: fragment.toml, tree paths, hooks,
     // and repo file contents may be spread across multiple layers.
     let mut fragment = None;
     let mut all_tree_paths = Vec::new();
-    let mut all_script_paths = Vec::new();
+    let mut all_hook_paths = Vec::new();
     let mut repo_file_contents = std::collections::HashMap::new();
 
     for layer_desc in layers {
@@ -327,18 +327,14 @@ pub fn load_registry_fragment(image_ref: &str) -> Result<LoadedFragment> {
 
         let tree_paths = extract_tree_paths_from_bytes(&layer_bytes)?;
 
-        // Collect all .sh and .bash scripts in scripts/ directory
-        let script_paths: Vec<PathBuf> = tree_paths
+        // Collect all executable files in hooks/ directory
+        let hook_paths: Vec<PathBuf> = tree_paths
             .iter()
-            .filter(|p| {
-                let path_str = p.to_string_lossy();
-                path_str.starts_with("fragment/scripts/")
-                    && (path_str.ends_with(".sh") || path_str.ends_with(".bash"))
-            })
-            .filter_map(|p| p.strip_prefix("fragment/scripts").ok())
+            .filter(|p| p.to_string_lossy().starts_with("fragment/hooks/"))
+            .filter_map(|p| p.strip_prefix("fragment/hooks").ok())
             .map(|p| p.to_path_buf())
             .collect();
-        all_script_paths.extend(script_paths);
+        all_hook_paths.extend(hook_paths);
 
         let remapped: Vec<PathBuf> = tree_paths
             .iter()
@@ -356,15 +352,15 @@ pub fn load_registry_fragment(image_ref: &str) -> Result<LoadedFragment> {
     })?;
     let relative_paths = all_tree_paths;
 
-    // Sort scripts alphabetically
-    all_script_paths.sort();
+    // Sort hooks alphabetically
+    all_hook_paths.sort();
 
     validate_phase_consistency(&fragment, &relative_paths)?;
 
     Ok(LoadedFragment {
         fragment,
         tree_paths: relative_paths,
-        script_paths: all_script_paths,
+        hook_paths: all_hook_paths,
         source: FragmentSource::Registry {
             image_ref: image_with_digest,
         },
@@ -387,12 +383,12 @@ pub fn load_registry_fragment_metadata_only(image_ref: &str) -> Result<LoadedFra
 
     if let Some(fragment) = try_annotation_fast_path(image_ref)? {
         // Annotations present — return metadata without pulling layers.
-        // tree_paths and script_paths are unknown in this path;
+        // tree_paths and hook_paths are unknown in this path;
         // inspect/list can display fragment metadata without them.
         return Ok(LoadedFragment {
             fragment,
             tree_paths: vec![],
-            script_paths: vec![],
+            hook_paths: vec![],
             source: FragmentSource::Registry {
                 image_ref: image_with_digest,
             },
@@ -419,7 +415,7 @@ mod tests {
         assert!(!is_repo_path(Path::new(
             "tree/usr/lib/sysctl.d/99-hardening.conf"
         )));
-        assert!(!is_repo_path(Path::new("scripts/configure.sh")));
+        assert!(!is_repo_path(Path::new("hooks/configure.sh")));
     }
 
     #[test]
@@ -589,5 +585,29 @@ phase = "repos"
         assert_eq!(result.len(), 1);
         assert!(result.contains_key("epel.repo"));
         assert!(result["epel.repo"].contains("[epel]"));
+    }
+
+    #[test]
+    fn hooks_collected_regardless_of_extension() {
+        let tarball = create_test_tarball(&[
+            ("fragment/hooks/01-setup.sh", b"#!/bin/bash\necho setup"),
+            ("fragment/hooks/02-config.bash", b"#!/bin/bash\necho config"),
+            ("fragment/hooks/configure", b"#!/bin/sh\necho configure"),
+            ("fragment/hooks/setup.py", b"#!/usr/bin/env python3\nprint('ok')"),
+            ("fragment/tree/etc/foo.conf", b"data"),
+        ]);
+        let paths = extract_tree_paths_from_bytes(&tarball).unwrap();
+        let hook_paths: Vec<PathBuf> = paths
+            .iter()
+            .filter(|p| p.to_string_lossy().starts_with("fragment/hooks/"))
+            .filter_map(|p| p.strip_prefix("fragment/hooks").ok())
+            .map(|p| p.to_path_buf())
+            .collect();
+        assert_eq!(hook_paths.len(), 4);
+        let names: Vec<String> = hook_paths.iter().map(|p| p.display().to_string()).collect();
+        assert!(names.contains(&"01-setup.sh".to_string()));
+        assert!(names.contains(&"02-config.bash".to_string()));
+        assert!(names.contains(&"configure".to_string()));
+        assert!(names.contains(&"setup.py".to_string()));
     }
 }

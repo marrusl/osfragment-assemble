@@ -4,7 +4,7 @@ A tool for building composable bootc-compatible OS images from fragment OCI imag
 
 ## What it does
 
-osfragment-assemble reads a YAML manifest declaring a base bootc-compatible image and a set of fragment OCI images, then generates a Containerfile. It can also generate a MachineOSConfig YAML for OpenShift/OKD on-cluster layering. Fragments are standard OCI images that package repo configs, RPM GPG keys, config files, systemd presets, and scripts into reusable units. The tool handles ordering (repo files before packages, packages before config files, config files before scripts), deduplication (identical repo definitions from multiple fragments), and optionally pins all references to content-addressed digests.
+osfragment-assemble reads a YAML manifest declaring a base bootc-compatible image and a set of fragment OCI images, then generates a Containerfile. It can also generate a MachineOSConfig YAML for OpenShift/OKD on-cluster layering. Fragments are standard OCI images that package repo configs, RPM GPG keys, config files, systemd presets, and hooks into reusable units. The tool handles ordering (repo files before packages, packages before config files, config files before hooks), deduplication (identical repo definitions from multiple fragments), and optionally pins all references to content-addressed digests.
 
 ## Getting Started
 
@@ -86,15 +86,15 @@ RUN dnf install -y \
 # --- Config files ---
 COPY --from=quay.io/marrusl2/fragments/cis-hardening:2.1 /fragment/tree/ /
 
-# --- Scripts ---
-COPY --from=quay.io/marrusl2/fragments/cis-hardening:2.1 /fragment/scripts/ /tmp/frag-cis-hardening-scripts/
-RUN /tmp/frag-cis-hardening-scripts/configure.sh && rm -rf /tmp/frag-cis-hardening-scripts
+# --- Hooks ---
+COPY --from=quay.io/marrusl2/fragments/cis-hardening:2.1 /fragment/hooks/ /tmp/frag-cis-hardening-hooks/
+RUN /tmp/frag-cis-hardening-hooks/configure.sh && rm -rf /tmp/frag-cis-hardening-hooks
 
 RUN systemctl preset-all --preset-mode=enable-only 2>/dev/null || true
 RUN bootc container lint
 ```
 
-Repo files land before packages, config files land after packages (so they aren't overwritten by RPM defaults), and scripts run last.
+Repo files land before packages, config files land after packages (so they aren't overwritten by RPM defaults), and hooks run last.
 
 ## Fragment structure
 
@@ -107,13 +107,13 @@ my-fragment/
 ├── tree/                     # Files to copy into the base image
 │   ├── etc/yum.repos.d/my.repo
 │   └── etc/pki/rpm-gpg/RPM-GPG-KEY-my
-└── scripts/                  # Scripts to run after package installation (.sh, .bash)
+└── hooks/                    # Executables to run after package installation
     └── configure.sh          # Executed in alphabetical order
 ```
 
 The `tree/` directory mirrors the target filesystem layout. Files are copied verbatim.
 
-The `scripts/` directory contains shell scripts executed after package installation.
+The `hooks/` directory contains executables run after package installation. Fragment authors are responsible for ensuring files are executable and that any required interpreters are available in the image at build time.
 
 ## Building your own fragments
 
@@ -121,7 +121,7 @@ Fragment images are standard OCI images. Each fragment directory contains a `Con
 
 ```dockerfile
 FROM scratch
-COPY fragment.toml tree/ scripts/ /fragment/
+COPY fragment.toml tree/ hooks/ /fragment/
 ```
 
 Build and push to a registry:

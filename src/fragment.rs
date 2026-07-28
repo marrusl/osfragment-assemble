@@ -95,12 +95,12 @@ pub fn validate_phase_consistency(fragment: &Fragment, tree_paths: &[PathBuf]) -
     if fragment.phase != FragmentPhase::Repos {
         return Ok(());
     }
-    let has_scripts = tree_paths
+    let has_hooks = tree_paths
         .iter()
-        .any(|p| p.to_string_lossy().starts_with("scripts/"));
-    if has_scripts {
+        .any(|p| p.to_string_lossy().starts_with("hooks/"));
+    if has_hooks {
         bail!(
-            "repos fragment '{}' must not contain scripts — change phase to 'config'",
+            "repos fragment '{}' must not contain hooks — change phase to 'config'",
             fragment.name
         );
     }
@@ -183,10 +183,10 @@ phase = "install"
     }
 
     #[test]
-    fn phase_consistency_repos_fragment_with_scripts_fails() {
+    fn phase_consistency_repos_fragment_with_hooks_fails() {
         let paths = vec![
             PathBuf::from("tree/etc/yum.repos.d/epel.repo"),
-            PathBuf::from("scripts/configure.sh"),
+            PathBuf::from("hooks/configure.sh"),
         ];
         let frag = parse_fragment_toml(MINIMAL_TOML).unwrap();
         assert!(validate_phase_consistency(&frag, &paths).is_err());
@@ -217,7 +217,7 @@ phase = "install"
         let paths = vec![
             PathBuf::from("tree/etc/yum.repos.d/tailscale.repo"),
             PathBuf::from("tree/usr/lib/systemd/system-preset/50-tailscale.preset"),
-            PathBuf::from("scripts/configure.sh"),
+            PathBuf::from("hooks/configure.sh"),
         ];
         let frag = parse_fragment_toml(FULL_TOML).unwrap();
         assert!(validate_phase_consistency(&frag, &paths).is_ok());

@@ -13,9 +13,9 @@ A fragment is a single-layer OCI image with this directory structure under `/fra
 │   ├── etc/yum.repos.d/*.repo
 │   ├── etc/pki/rpm-gpg/RPM-GPG-KEY-*
 │   └── ...            # Arbitrary filesystem paths
-└── scripts/           # Optional: post-install configuration (.sh, .bash)
+└── hooks/             # Optional: post-install executables (any language)
     ├── 01-setup.sh    # Executed in alphabetical order
-    └── 02-config.sh
+    └── 02-configure
 ```
 
 ## `fragment.toml` Schema
@@ -44,8 +44,8 @@ available = ["tailscale"]
 - `description`: Single-line text. Displayed by `inspect` and `list`.
 - `vendor`: Optional. Identifies the fragment publisher.
 - `phase`: Must be `"repos"` or `"config"`. Controls execution order.
-  - `repos` (weight 10): Runs before packages are installed. Tree content is restricted to repo definitions and GPG keys (paths under `etc/yum.repos.d/` or `etc/pki/rpm-gpg/`). Must not contain scripts.
-  - `config` (weight 30): Runs after packages are installed. No tree restrictions. May contain scripts.
+  - `repos` (weight 10): Runs before packages are installed. Tree content is restricted to repo definitions and GPG keys (paths under `etc/yum.repos.d/` or `etc/pki/rpm-gpg/`). Must not contain hooks.
+  - `config` (weight 30): Runs after packages are installed. No tree restrictions. May contain hooks.
 - `conflicts.fragments`: Optional array of fragment names this fragment is incompatible with. Assembly fails if any listed fragment is present in the manifest.
 - `packages.available`: Optional array of package names this fragment can install. Not enforced — used by `inspect` and for future dependency analysis.
 
@@ -68,26 +68,26 @@ The generated Containerfile applies fragments in this order:
 1. Repo files (yum.repos.d, rpm-gpg) from all fragments
 2. Packages (single batched `dnf install` with all requested packages)
 3. Config files (full `tree/` content from config-phase fragments)
-4. Scripts (all `.sh` and `.bash` files in `scripts/`, alphabetical order)
+4. Hooks (all files in `hooks/`, alphabetical order)
 5. Preset application and validation
 
 Config files land after package installation to ensure fragment-supplied configurations are never overwritten by RPM defaults.
 
-## Scripts Contract
+## Hooks Contract
 
-All `.sh` and `.bash` files in `/fragment/scripts/` are executed after packages are installed, in alphabetical order. The generated Containerfile copies the entire `scripts/` directory and chains execution:
+All files in `/fragment/hooks/` are executed after packages are installed, in alphabetical order. Fragment authors are responsible for ensuring files are executable and that any required interpreters are available in the image at build time. The generated Containerfile copies the entire `hooks/` directory and chains execution:
 
 ```dockerfile
-COPY --from=<fragment> /fragment/scripts/ /tmp/frag-<name>-scripts/
-RUN /tmp/frag-<name>-scripts/01-setup.sh && /tmp/frag-<name>-scripts/02-config.sh && rm -rf /tmp/frag-<name>-scripts
+COPY --from=<fragment> /fragment/hooks/ /tmp/frag-<name>-hooks/
+RUN /tmp/frag-<name>-hooks/01-setup.sh && /tmp/frag-<name>-hooks/02-config && rm -rf /tmp/frag-<name>-hooks
 ```
 
 ### Rules
 
-1. All `.sh` and `.bash` files in `scripts/` are executed. Control ordering via naming (`01-`, `02-`, etc.).
-2. Scripts run as root in the target image's filesystem.
-3. Packages declared in the manifest are preferred — the tool can deduplicate and batch them. Scripts are not prevented from installing packages, but script-installed packages bypass deduplication and won't appear in the manifest's package list.
-4. Scripts should be idempotent where possible (though they only run once during build).
+1. All files in `hooks/` are executed. Control ordering via naming (`01-`, `02-`, etc.).
+2. Hooks run as root in the target image's filesystem.
+3. Packages declared in the manifest are preferred — the tool can deduplicate and batch them. Hooks are not prevented from installing packages, but hook-installed packages bypass deduplication and won't appear in the manifest's package list.
+4. Hooks should be idempotent where possible (though they only run once during build).
 5. Exit code 0 = success. Nonzero exits fail the build.
 
 Typical uses:
@@ -102,7 +102,7 @@ Fragments are built with this single-layer pattern:
 
 ```dockerfile
 FROM scratch
-COPY fragment.toml tree/ scripts/ /fragment/
+COPY fragment.toml tree/ hooks/ /fragment/
 ```
 
 No `RUN` commands, no base image. The fragment carries only the files needed for assembly.

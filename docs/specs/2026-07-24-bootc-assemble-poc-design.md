@@ -2,7 +2,7 @@
 
 ## Overview
 
-`osfragment-assemble` is a CLI tool that reads a YAML manifest of fragment OCI images and generates a multi-stage Containerfile for building bootc/RHCOS images. Fragments are a packaging convention — standard OCI images carrying any combination of repo configs, scripts, config files, systemd units, and filesystem overlays. The tool is codegen on top of existing build tooling: it generates Containerfiles that buildah/podman build consumes. No new image format, no new builder, no new package manager.
+`osfragment-assemble` is a CLI tool that reads a YAML manifest of fragment OCI images and generates a multi-stage Containerfile for building bootc/RHCOS images. Fragments are a packaging convention — standard OCI images carrying any combination of repo configs, hooks, config files, systemd units, and filesystem overlays. The tool is codegen on top of existing build tooling: it generates Containerfiles that buildah/podman build consumes. No new image format, no new builder, no new package manager.
 
 **Language:** Rust
 **Repository:** `~/Work/osfragment`
@@ -16,16 +16,16 @@ A fragment is a standard OCI image with this internal structure:
 /fragment/
   fragment.toml          # metadata
   tree/                  # files overlaid into the image
-  scripts/
-    configure.sh         # optional configuration script (the only entrypoint)
+  hooks/                 # optional post-install executables (any language)
+    configure.sh         # executed in alphabetical order
 ```
 
-There is no type taxonomy. A fragment's content determines what it is — a lightweight repo connector carries only `tree/etc/yum.repos.d/` and a GPG key. An opinionated capability fragment carries repo config, default configuration, a `configure.sh` script, and systemd units. Same format, same tooling.
+There is no type taxonomy. A fragment's content determines what it is — a lightweight repo connector carries only `tree/etc/yum.repos.d/` and a GPG key. An opinionated capability fragment carries repo config, default configuration, hooks, and systemd units. Same format, same tooling.
 
-### Script Contract
+### Hooks Contract
 
-- **Single entrypoint:** `scripts/configure.sh` is the only supported script entrypoint. It is optional — fragments that only contribute files via `tree/` do not need it. The tool runs it if present, skips it if absent.
-- **Configuration only.** Scripts must not call `dnf`, `rpm`, or otherwise mutate package state. The manifest-driven `dnf install` is the sole package installation mechanism. This preserves the package-management firewall: the manifest declares intent, dnf resolves, and scripts configure what was installed.
+- **All files executed:** All executable files in `hooks/` are run in alphabetical order after package installation. Fragment authors are responsible for ensuring files are executable and that any required interpreters are available in the image at build time.
+- **Configuration only.** Hooks should not call `dnf`, `rpm`, or otherwise mutate package state. The manifest-driven `dnf install` is the sole package installation mechanism. This preserves the package-management firewall: the manifest declares intent, dnf resolves, and hooks configure what was installed.
 - **Runs as root** in the build context after packages are installed. See Trust Boundary for implications.
 
 ### fragment.toml
@@ -65,7 +65,7 @@ The tool checks annotations first via `skopeo inspect --raw`. Falls back to laye
 
 ## Trust Boundary
 
-Fragments are trusted build-time code, not passive data. A fragment's `tree/` content is copied into the image with root ownership, and its `configure.sh` runs as root during the build. A malicious or compromised fragment has the same effective power as arbitrary `RUN` instructions in the Containerfile.
+Fragments are trusted build-time code, not passive data. A fragment's `tree/` content is copied into the image with root ownership, and its hooks run as root during the build. A malicious or compromised fragment has the same effective power as arbitrary `RUN` instructions in the Containerfile.
 
 For the POC, the supported trust model is: **self-authored or allowlisted fragments from controlled registries only.** Consuming arbitrary third-party fragments from public registries is out of scope until signature verification (cosign) or policy enforcement exists.
 
@@ -79,7 +79,7 @@ Fragment authors should follow bootc filesystem conventions:
 
 - **Prefer `/usr` and `/usr/lib` for immutable image payload.** Vendor defaults, configuration drop-ins, and systemd units belong in `/usr/lib/` (e.g., `/usr/lib/sysctl.d/`, `/usr/lib/systemd/system/`, `/usr/lib/tmpfiles.d/`). This content is part of the immutable image and survives upgrades cleanly.
 - **Treat `/etc` as an exceptional compatibility surface.** `/etc` is mutable state at runtime. Content placed there at build time may be overwritten by local admin changes or 3-way merge behavior on upgrade. Use `/etc` only when the software being configured requires it (e.g., `/etc/yum.repos.d/` for repo definitions, `/etc/pki/rpm-gpg/` for GPG keys). Upstream bootc is moving toward transient `/etc` on the composefs path — fragments that lean on `/etc` for vendor defaults will have increasing friction.
-- **Service enablement via presets.** Use `/usr/lib/systemd/system-preset/` files to enable services rather than running `systemctl enable` in scripts. Preset files are immutable image content and compose cleanly across fragments.
+- **Service enablement via presets.** Use `/usr/lib/systemd/system-preset/` files to enable services rather than running `systemctl enable` in hooks. Preset files are immutable image content and compose cleanly across fragments.
 
 The `lint` subcommand (future phase) will warn on `/etc` writes that have `/usr/lib` equivalents.
 
@@ -91,7 +91,7 @@ Phases control ordering in the generated Containerfile. Fragments declare one of
 |-------|--------|-------|---------|
 | `repos` | 10 | Fragment-declared | `.repo` files, GPG keys land before any `dnf install` |
 | *(packages)* | 20 | Tool-managed | `dnf install` — batched from all manifest `packages:` fields |
-| `config` | 30 | Fragment-declared | Post-install: config files, preset files, scripts, sysctl, SELinux |
+| `config` | 30 | Fragment-declared | Post-install: config files, preset files, hooks, sysctl, SELinux |
 | *(preset-apply)* | 35 | Tool-managed | `systemctl preset-all` — applies preset policy to enable/disable services |
 | *(validation)* | 90 | Tool-managed | `bootc container lint` |
 
@@ -112,7 +112,7 @@ This means a `config` fragment like Tailscale that carries both repo files and `
 
 ### Phase Consistency Validation
 
-- A `repos` fragment must contain only repo-related `tree/` content (`tree/etc/yum.repos.d/`, `tree/etc/pki/rpm-gpg/`). It must not carry `scripts/configure.sh` or non-repo `tree/` paths. If it does, the tool fails with an error suggesting the fragment's phase should be `config`.
+- A `repos` fragment must contain only repo-related `tree/` content (`tree/etc/yum.repos.d/`, `tree/etc/pki/rpm-gpg/`). It must not carry hooks or non-repo `tree/` paths. If it does, the tool fails with an error suggesting the fragment's phase should be `config`.
 - A `config` fragment may carry any `tree/` content including repo files. Repo files are still split to the repos phase automatically.
 
 ## Manifest Format
@@ -178,7 +178,7 @@ No subcommand needed — the tool name is the verb.
 
 ### `inspect`
 
-Point at a registry image or local directory. Display `fragment.toml` metadata, list `tree/` contents, list scripts.
+Point at a registry image or local directory. Display `fragment.toml` metadata, list `tree/` contents, list hooks.
 
 ```
 $ osfragment-assemble inspect quay.io/marrusl2/fragments/tailscale:1.82.0
@@ -194,7 +194,7 @@ tree/
   etc/pki/rpm-gpg/RPM-GPG-KEY-tailscale
   usr/lib/systemd/system-preset/50-tailscale.preset
 
-scripts/
+hooks/
   configure.sh (present)
 ```
 
@@ -283,13 +283,13 @@ RUN dnf install -y \
 # --- Phase: config (30) ---
 # tailscale — non-repo tree content (repo files already copied above)
 COPY --from=frag-tailscale /fragment/tree/usr/ /usr/
-COPY --from=frag-tailscale /fragment/scripts/configure.sh /tmp/frag-tailscale-configure.sh
-RUN /tmp/frag-tailscale-configure.sh && rm -f /tmp/frag-tailscale-configure.sh
+COPY --from=frag-tailscale /fragment/hooks/ /tmp/frag-tailscale-hooks/
+RUN /tmp/frag-tailscale-hooks/configure.sh && rm -rf /tmp/frag-tailscale-hooks
 
 # cis-hardening — all tree content (no repo files in this fragment)
 COPY --from=frag-cis-hardening /fragment/tree/ /
-COPY --from=frag-cis-hardening /fragment/scripts/configure.sh /tmp/frag-cis-hardening-configure.sh
-RUN /tmp/frag-cis-hardening-configure.sh && rm -f /tmp/frag-cis-hardening-configure.sh
+COPY --from=frag-cis-hardening /fragment/hooks/ /tmp/frag-cis-hardening-hooks/
+RUN /tmp/frag-cis-hardening-hooks/configure.sh && rm -rf /tmp/frag-cis-hardening-hooks
 
 # --- Phase: preset-apply (35) ---
 RUN systemctl preset-all --preset-mode=enable-only 2>/dev/null || true
@@ -304,7 +304,7 @@ RUN bootc container lint
 - All fragment images become `FROM <image>@sha256:... AS frag-<name>` stages at the top.
 - **Tree-splitting:** Repo files (`tree/etc/yum.repos.d/`, `tree/etc/pki/rpm-gpg/`) from all fragments are copied in the repos phase (weight 10), regardless of the fragment's declared phase. Remaining `tree/` content is copied in the config phase (weight 30), excluding the repo paths already copied. For fragments whose `tree/` contains only repo files, the config phase copy is a no-op.
 - All `packages:` selections across all fragments are batched into a single `dnf install` transaction with all repos enabled.
-- If a fragment has `scripts/configure.sh`, it is copied to a temp path and run: `COPY --from=frag-<name> /fragment/scripts/configure.sh /tmp/frag-<name>-configure.sh` then `RUN /tmp/frag-<name>-configure.sh && rm -f /tmp/frag-<name>-configure.sh`. Fragments without `configure.sh` skip this step.
+- If a fragment has hooks, the entire `hooks/` directory is copied to a temp path and all files are executed in alphabetical order: `COPY --from=frag-<name> /fragment/hooks/ /tmp/frag-<name>-hooks/` then `RUN /tmp/frag-<name>-hooks/configure.sh && rm -rf /tmp/frag-<name>-hooks`. Fragments without hooks skip this step.
 - **Preset application:** After all config-phase content is in place, the tool emits `RUN systemctl preset-all --preset-mode=enable-only 2>/dev/null || true` (weight 35). This applies accumulated preset policy from all fragments, creating the enablement symlinks that make services start at boot. The `--preset-mode=enable-only` flag avoids disabling services the base image already enabled. The `|| true` handles images without systemd.
 - `mirror:` rewrites `baseurl` in the copied `.repo` file via a `RUN sed` after the `COPY`.
 - Local directory fragments are prebuilt to temporary local images before codegen (see Local Directory Mode).
@@ -325,7 +325,7 @@ RUN bootc container lint
 | 7 | **node-exporter** | EPEL (self-contained) | `config` | EPEL repo + GPG (own copy) + package + systemd + scrape config | Self-contained — carries own EPEL repo, dedup demo |
 | 8 | **nginx** | `nginx.org/packages` | `config` | Repo + package + config + service enable | Relatable web server use case |
 
-Each fragment is built as an OCI image via a simple `Containerfile.fragment` that copies `fragment.toml`, `tree/`, and `scripts/` into `/fragment/`. Published to local dev registry during development, quay.io for demos.
+Each fragment is built as an OCI image via a simple `Containerfile.fragment` that copies `fragment.toml`, `tree/`, and `hooks/` into `/fragment/`. Published to local dev registry during development, quay.io for demos.
 
 ### Fragment Build Pattern
 
@@ -333,7 +333,7 @@ Fragment images must be single-layer. This simplifies layer extraction — one b
 
 ```dockerfile
 FROM scratch
-COPY fragment.toml tree/ scripts/ /fragment/
+COPY fragment.toml tree/ hooks/ /fragment/
 ```
 
 This produces one layer containing all fragment content at `/fragment/`. The tool's layer extraction assumes a single layer per fragment image and fails if multiple layers are found.

@@ -10,9 +10,9 @@ Alternative considered: a custom archive format (`.tar.gz` or `.zip`). Rejected 
 
 ## Why no fragment type taxonomy
 
-All fragments follow the same format (`fragment.toml`, `tree/`, `scripts/`). The `phase` field controls ordering, but there's no type system distinguishing "repo fragments" from "config fragments" from "service fragments". A fragment that installs a repo is structurally identical to one that drops a config file.
+All fragments follow the same format (`fragment.toml`, `tree/`, `hooks/`). The `phase` field controls ordering, but there's no type system distinguishing "repo fragments" from "config fragments" from "service fragments". A fragment that installs a repo is structurally identical to one that drops a config file.
 
-This keeps the format simple and avoids artificial constraints — a fragment can deliver repo definitions, config files, and scripts in a single unit when that's the right packaging boundary.
+This keeps the format simple and avoids artificial constraints — a fragment can deliver repo definitions, config files, and hooks in a single unit when that's the right packaging boundary.
 
 ## Why the tool generates Containerfiles instead of building directly
 
@@ -20,11 +20,11 @@ The generated Containerfile is a build artifact customers can read, edit, and ve
 
 Building directly would make the tool a required dependency in the build pipeline and hide the actual image construction steps from operators.
 
-## Why manifest-declared packages are preferred over script-installed packages
+## Why manifest-declared packages are preferred over hook-installed packages
 
 Packages declared in the manifest's `packages:` field are batched into a single `dnf install` layer and deduplicated across fragments. This gives the tool visibility into what's being installed and keeps the generated Containerfile predictable.
 
-Scripts that call `dnf` or run vendor installers (like NVIDIA's `.run` binaries) are not prevented — the tool doesn't enforce this. But packages installed by scripts bypass deduplication, won't appear in the manifest's package list, and create additional layers. When possible, prefer the manifest; when a script genuinely needs to install packages (vendor installers, complex dependency chains), that's fine.
+Hooks that call `dnf` or run vendor installers (like NVIDIA's `.run` binaries) are not prevented — the tool doesn't enforce this. But packages installed by hooks bypass deduplication, won't appear in the manifest's package list, and create additional layers. When possible, prefer the manifest; when a hook genuinely needs to install packages (vendor installers, complex dependency chains), that's fine.
 
 ## Why digest pinning is opt-in
 
@@ -59,6 +59,6 @@ During RPM installation, if a package installs a file that already exists on dis
 
 ## Trust boundary
 
-Fragments are trusted build code, not passive data. A fragment's `configure.sh` runs as root during image assembly. Pulling a fragment is equivalent to running an upstream install script — it's a supply chain trust decision. The tool does not sandbox fragment scripts or validate their behavior.
+Fragments are trusted build code, not passive data. A fragment's hooks run as root during image assembly. Pulling a fragment is equivalent to running an upstream install script — it's a supply chain trust decision. The tool does not sandbox fragment hooks or validate their behavior.
 
 Repo deduplication prevents different fragments from silently overwriting each other's repos, but it's not a security boundary — if two fragments provide the same repo with different content, the build fails rather than choosing one.

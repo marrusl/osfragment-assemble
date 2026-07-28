@@ -276,33 +276,33 @@ pub fn generate_containerfile(
         }
     }
 
-    // Scripts (must run after packages are installed)
-    let script_fragments: Vec<_> = fragments
+    // Hooks (must run after packages are installed)
+    let hook_fragments: Vec<_> = fragments
         .iter()
-        .filter(|f| !f.script_paths.is_empty())
+        .filter(|f| !f.hook_paths.is_empty())
         .collect();
-    if !script_fragments.is_empty() {
+    if !hook_fragments.is_empty() {
         if !ocp {
-            writeln!(out, "# --- Scripts ---")?;
+            writeln!(out, "# --- Hooks ---")?;
         }
-        for loaded in &script_fragments {
+        for loaded in &hook_fragments {
             let source = copy_from_source(loaded, use_named_stages);
-            let scripts_dir = format!("/tmp/frag-{}-scripts", loaded.fragment.name);
+            let hooks_dir = format!("/tmp/frag-{}-hooks", loaded.fragment.name);
             writeln!(
                 out,
-                "COPY --from={} /fragment/scripts/ {}/",
-                source, scripts_dir
+                "COPY --from={} /fragment/hooks/ {}/",
+                source, hooks_dir
             )?;
 
-            // Build chained RUN command: script1 && script2 && ... && cleanup
+            // Build chained RUN command: hook1 && hook2 && ... && cleanup
             let mut run_cmd = String::from("RUN ");
-            for (i, script_path) in loaded.script_paths.iter().enumerate() {
+            for (i, hook_path) in loaded.hook_paths.iter().enumerate() {
                 if i > 0 {
                     run_cmd.push_str(" && ");
                 }
-                run_cmd.push_str(&format!("{}/{}", scripts_dir, script_path.display()));
+                run_cmd.push_str(&format!("{}/{}", hooks_dir, hook_path.display()));
             }
-            run_cmd.push_str(&format!(" && rm -rf {}", scripts_dir));
+            run_cmd.push_str(&format!(" && rm -rf {}", hooks_dir));
             writeln!(out, "{}", run_cmd)?;
         }
         if !ocp {
@@ -360,7 +360,7 @@ mod tests {
                 PathBuf::from("tree/etc/yum.repos.d/test.repo"),
                 PathBuf::from("tree/etc/pki/rpm-gpg/RPM-GPG-KEY-test"),
             ],
-            script_paths: vec![],
+            hook_paths: vec![],
             source: FragmentSource::Registry {
                 image_ref: format!("quay.io/test/{}@sha256:{}", name, digest),
             },
@@ -389,7 +389,7 @@ mod tests {
                 conflicts: FragmentConflicts { fragments: vec![] },
             },
             tree_paths: vec![PathBuf::from("tree/usr/lib/sysctl.d/99-hardening.conf")],
-            script_paths: vec![PathBuf::from("configure.sh")],
+            hook_paths: vec![PathBuf::from("configure.sh")],
             source: FragmentSource::Registry {
                 image_ref: format!("quay.io/test/{}@sha256:{}", name, digest),
             },
@@ -451,13 +451,13 @@ mod tests {
         let repo_pos = output.find("Repo files").unwrap();
         let packages_pos = output.find("Packages").unwrap();
         let config_pos = output.find("Config files").unwrap();
-        let scripts_pos = output.find("Scripts").unwrap();
+        let hooks_pos = output.find("Hooks").unwrap();
         let preset_pos = output.find("preset-all").unwrap();
         let validation_pos = output.find("validation").unwrap();
         assert!(repo_pos < packages_pos);
         assert!(packages_pos < config_pos);
-        assert!(config_pos < scripts_pos);
-        assert!(scripts_pos < preset_pos);
+        assert!(config_pos < hooks_pos);
+        assert!(hooks_pos < preset_pos);
         assert!(preset_pos < validation_pos);
     }
 
@@ -681,7 +681,7 @@ mod tests {
                 PathBuf::from("tree/etc/yum.repos.d/test.repo"),
                 PathBuf::from("tree/etc/pki/rpm-gpg/RPM-GPG-KEY-test"),
             ],
-            script_paths: vec![],
+            hook_paths: vec![],
             source: FragmentSource::Registry {
                 image_ref: format!("quay.io/test/{}:10", name),
             },
@@ -710,7 +710,7 @@ mod tests {
                 conflicts: FragmentConflicts { fragments: vec![] },
             },
             tree_paths: vec![PathBuf::from("tree/usr/lib/sysctl.d/99-hardening.conf")],
-            script_paths: vec![PathBuf::from("configure.sh")],
+            hook_paths: vec![PathBuf::from("configure.sh")],
             source: FragmentSource::Registry {
                 image_ref: format!("quay.io/test/{}:2.1", name),
             },
@@ -756,7 +756,7 @@ mod tests {
     }
 
     #[test]
-    fn unpinned_scripts_use_inline_copy_refs() {
+    fn unpinned_hooks_use_inline_copy_refs() {
         let (mut cis, mf_cis) = make_unpinned_config_fragment("cis");
         cis.manifest_index = 0;
         let manifest = Manifest {
@@ -766,10 +766,10 @@ mod tests {
         let output =
             generate_containerfile(&manifest, &[cis], None, &empty_dedup(), false).unwrap();
         assert!(output.contains(
-            "COPY --from=quay.io/test/cis:2.1 /fragment/scripts/ /tmp/frag-cis-scripts/"
+            "COPY --from=quay.io/test/cis:2.1 /fragment/hooks/ /tmp/frag-cis-hooks/"
         ));
         assert!(output
-            .contains("RUN /tmp/frag-cis-scripts/configure.sh && rm -rf /tmp/frag-cis-scripts"));
+            .contains("RUN /tmp/frag-cis-hooks/configure.sh && rm -rf /tmp/frag-cis-hooks"));
     }
 
     #[test]
@@ -886,10 +886,10 @@ mod tests {
     }
 
     #[test]
-    fn multiple_scripts_run_in_alphabetical_order() {
+    fn multiple_hooks_run_in_alphabetical_order() {
         let mut loaded = LoadedFragment {
             fragment: Fragment {
-                name: "multi-script".to_string(),
+                name: "multi-hook".to_string(),
                 version: "1.0".into(),
                 description: "test".into(),
                 vendor: None,
@@ -899,21 +899,21 @@ mod tests {
                 conflicts: FragmentConflicts { fragments: vec![] },
             },
             tree_paths: vec![],
-            script_paths: vec![
+            hook_paths: vec![
                 PathBuf::from("03-final.sh"),
                 PathBuf::from("01-first.bash"),
                 PathBuf::from("02-second.sh"),
             ],
             source: FragmentSource::Registry {
-                image_ref: "quay.io/test/multi-script:1.0".into(),
+                image_ref: "quay.io/test/multi-hook:1.0".into(),
             },
             resolved_digest: None,
             manifest_index: 0,
             repo_file_contents: std::collections::HashMap::new(),
         };
-        loaded.script_paths.sort(); // Simulate what loader does
+        loaded.hook_paths.sort(); // Simulate what loader does
         let manifest_frag = ManifestFragment {
-            image: "quay.io/test/multi-script:1.0".into(),
+            image: "quay.io/test/multi-hook:1.0".into(),
             packages: vec![],
             mirror: None,
         };
@@ -924,20 +924,20 @@ mod tests {
         let output =
             generate_containerfile(&manifest, &[loaded], None, &empty_dedup(), false).unwrap();
 
-        // Verify all three scripts are present in the RUN command
-        assert!(output.contains("/tmp/frag-multi-script-scripts/01-first.bash"));
-        assert!(output.contains("/tmp/frag-multi-script-scripts/02-second.sh"));
-        assert!(output.contains("/tmp/frag-multi-script-scripts/03-final.sh"));
+        // Verify all three hooks are present in the RUN command
+        assert!(output.contains("/tmp/frag-multi-hook-hooks/01-first.bash"));
+        assert!(output.contains("/tmp/frag-multi-hook-hooks/02-second.sh"));
+        assert!(output.contains("/tmp/frag-multi-hook-hooks/03-final.sh"));
 
         // Verify alphabetical ordering by checking positions
         let first_pos = output
-            .find("/tmp/frag-multi-script-scripts/01-first.bash")
+            .find("/tmp/frag-multi-hook-hooks/01-first.bash")
             .unwrap();
         let second_pos = output
-            .find("/tmp/frag-multi-script-scripts/02-second.sh")
+            .find("/tmp/frag-multi-hook-hooks/02-second.sh")
             .unwrap();
         let third_pos = output
-            .find("/tmp/frag-multi-script-scripts/03-final.sh")
+            .find("/tmp/frag-multi-hook-hooks/03-final.sh")
             .unwrap();
         assert!(first_pos < second_pos);
         assert!(second_pos < third_pos);
@@ -986,7 +986,7 @@ mod tests {
             false,
         )
         .unwrap();
-        // Verify full content ordering: repo COPY -> dnf install -> config COPY -> script COPY
+        // Verify full content ordering: repo COPY -> dnf install -> config COPY -> hook COPY
         let repo_copy = output
             .find("COPY --from=frag-epel /fragment/tree/etc/yum.repos.d/")
             .expect("missing repo COPY");
@@ -994,12 +994,12 @@ mod tests {
         let config_copy = output
             .find("COPY --from=frag-cis /fragment/tree/ /")
             .expect("missing config COPY");
-        let script_copy = output
-            .find("COPY --from=frag-cis /fragment/scripts/")
-            .expect("missing script COPY");
+        let hook_copy = output
+            .find("COPY --from=frag-cis /fragment/hooks/")
+            .expect("missing hook COPY");
         assert!(repo_copy < dnf_install);
         assert!(dnf_install < config_copy);
-        assert!(config_copy < script_copy);
+        assert!(config_copy < hook_copy);
     }
 
     #[test]
@@ -1007,10 +1007,10 @@ mod tests {
         let shared_path = PathBuf::from("tree/etc/sysctl.d/99-net.conf");
         let (mut frag_a, mf_a) = make_config_fragment("net-tuning", "aaa");
         frag_a.tree_paths = vec![shared_path.clone()];
-        frag_a.script_paths = vec![];
+        frag_a.hook_paths = vec![];
         let (mut frag_b, mf_b) = make_config_fragment("perf-tuning", "bbb");
         frag_b.tree_paths = vec![shared_path];
-        frag_b.script_paths = vec![];
+        frag_b.hook_paths = vec![];
         frag_b.manifest_index = 1;
         let manifest = Manifest {
             base: "registry.redhat.io/rhel10/rhel-bootc:10.0".into(),
@@ -1034,7 +1034,7 @@ mod tests {
     }
 
     #[test]
-    fn ocp_scripts_without_section_comments() {
+    fn ocp_hooks_without_section_comments() {
         let (mut cis, mf_cis) = make_unpinned_config_fragment("cis");
         cis.manifest_index = 0;
         let manifest = Manifest {
@@ -1042,15 +1042,15 @@ mod tests {
             fragments: vec![mf_cis],
         };
         let output = generate_containerfile(&manifest, &[cis], None, &empty_dedup(), true).unwrap();
-        // Scripts should appear in OCP output
+        // Hooks should appear in OCP output
         assert!(
-            output.contains("/fragment/scripts/"),
-            "expected script COPY in OCP output:\n{}",
+            output.contains("/fragment/hooks/"),
+            "expected hook COPY in OCP output:\n{}",
             output
         );
         assert!(
             output.contains("configure.sh"),
-            "expected script execution in OCP output:\n{}",
+            "expected hook execution in OCP output:\n{}",
             output
         );
         // No section comment headers in OCP mode
