@@ -287,23 +287,21 @@ pub fn generate_containerfile(
         }
         for loaded in &hook_fragments {
             let source = copy_from_source(loaded, use_named_stages);
-            let hooks_dir = format!("/tmp/frag-{}-hooks", loaded.fragment.name);
+
+            // Build chained hook invocations
+            let hook_cmds: Vec<String> = loaded
+                .hook_paths
+                .iter()
+                .map(|h| format!("/frag-hooks/{}", h.display()))
+                .collect();
+            let chained = hook_cmds.join(" && ");
+
             writeln!(
                 out,
-                "COPY --from={} /fragment/hooks/ {}/",
-                source, hooks_dir
+                "RUN --mount=type=bind,from={},source=/fragment/hooks,target=/frag-hooks,bind-propagation=rshared,z \\",
+                source
             )?;
-
-            // Build chained RUN command: hook1 && hook2 && ... && cleanup
-            let mut run_cmd = String::from("RUN ");
-            for (i, hook_path) in loaded.hook_paths.iter().enumerate() {
-                if i > 0 {
-                    run_cmd.push_str(" && ");
-                }
-                run_cmd.push_str(&format!("{}/{}", hooks_dir, hook_path.display()));
-            }
-            run_cmd.push_str(&format!(" && rm -rf {}", hooks_dir));
-            writeln!(out, "{}", run_cmd)?;
+            writeln!(out, "    {}", chained)?;
         }
         if !ocp {
             writeln!(out)?;
