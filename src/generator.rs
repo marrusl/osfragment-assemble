@@ -1213,4 +1213,44 @@ mod tests {
             unpinned_output
         );
     }
+
+    #[test]
+    fn bind_mount_carries_mco_options() {
+        let (mut cis, mf_cis) = make_unpinned_config_fragment("cis");
+        cis.manifest_index = 0;
+        let manifest = Manifest {
+            base: "registry.redhat.io/rhel10/rhel-bootc:10.0".into(),
+            fragments: vec![mf_cis],
+        };
+
+        // Standalone
+        let standalone = generate_containerfile(
+            &manifest,
+            &[cis.clone()],
+            None,
+            &empty_dedup(),
+            false,
+        )
+        .unwrap();
+        assert!(
+            standalone.contains("bind-propagation=rshared,z"),
+            "standalone output must carry MCO mount options:\n{}",
+            standalone
+        );
+
+        // OCP
+        let ocp = generate_containerfile(
+            &manifest,
+            &[cis],
+            None,
+            &empty_dedup(),
+            true,
+        )
+        .unwrap();
+        assert!(
+            ocp.contains("bind-propagation=rshared,z"),
+            "OCP output must carry MCO mount options:\n{}",
+            ocp
+        );
+    }
 }
