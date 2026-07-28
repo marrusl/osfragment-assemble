@@ -196,7 +196,7 @@ phase = "config"
 available = ["grafana"]
 "#;
         let err = parse_fragment_toml(bad).unwrap_err();
-        let msg = err.to_string();
+        let msg = format!("{:?}", err);
         assert!(
             msg.contains("unknown field"),
             "expected 'unknown field' error, got: {}",
@@ -217,7 +217,7 @@ phase = "config"
 requred = ["grafana"]
 "#;
         let err = parse_fragment_toml(bad).unwrap_err();
-        let msg = err.to_string();
+        let msg = format!("{:?}", err);
         assert!(
             msg.contains("unknown field"),
             "expected 'unknown field' error, got: {}",
