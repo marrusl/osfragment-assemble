@@ -20,7 +20,7 @@ A fragment is a single-layer OCI image with this directory structure under `/fra
 
 ## `fragment.toml` Schema
 
-`fragment.toml` is unit metadata. Its fields describe the fragment — identity, version, publisher, ordering, and how it combines with other fragments. System configuration lives in `tree/` (files, verbatim) and `hooks/` (executables, any language), in whatever formats already exist; the tool never parses that content. See [Design Rationales](rationales.md#why-the-fragment-format-is-as-light-as-possible-and-no-simpler).
+`fragment.toml` is unit metadata. Its fields describe the fragment: identity, version, publisher, ordering, and how it combines with other fragments. System configuration lives in `tree/` (files, verbatim) and `hooks/` (executables, any language), in whatever formats already exist; the tool never parses that content. See [Design Rationales](rationales.md#why-the-fragment-format-is-as-light-as-possible-and-no-simpler).
 
 ```toml
 [fragment]
@@ -49,7 +49,7 @@ available = ["tailscale"]
   - `repos` (weight 10): Runs before packages are installed. Tree content is restricted to repo definitions and GPG keys (paths under `etc/yum.repos.d/` or `etc/pki/rpm-gpg/`). Must not contain hooks.
   - `config` (weight 30): Runs after packages are installed. No tree restrictions. May contain hooks.
 - `conflicts.fragments`: Optional array of fragment names this fragment is incompatible with. Assembly fails if any listed fragment is present in the manifest.
-- `packages.available`: Optional array of package names this fragment can install. Not enforced — used by `inspect` and for future dependency analysis.
+- `packages.available`: Optional array of package names this fragment can install. Not enforced; used by `inspect` and for future dependency analysis.
 
 ## `tree/` Directory Layout
 
@@ -88,7 +88,7 @@ RUN /tmp/frag-<name>-hooks/01-setup.sh && /tmp/frag-<name>-hooks/02-config && rm
 
 1. All files in `hooks/` are executed. Control ordering via naming (`01-`, `02-`, etc.).
 2. Hooks run as root in the target image's filesystem.
-3. Packages declared in the manifest are preferred — the tool can deduplicate and batch them. Hooks are not prevented from installing packages, but hook-installed packages bypass deduplication and won't appear in the manifest's package list.
+3. Packages declared in the manifest are preferred; the tool can deduplicate and batch them. Hooks are not prevented from installing packages, but hook-installed packages bypass deduplication and won't appear in the manifest's package list.
 4. Hooks should be idempotent where possible (though they only run once during build).
 5. Exit code 0 = success. Nonzero exits fail the build.
 
@@ -120,15 +120,15 @@ podman push quay.io/user/fragment:1.0
 For performance, fragments should include OCI annotations that mirror `fragment.toml` fields. When present, `inspect` and `list` can read metadata without pulling layers.
 
 Annotation keys:
-- `io.bootc.fragment.name` — fragment name
-- `io.bootc.fragment.version` — version string
-- `io.bootc.fragment.description` — description text
-- `io.bootc.fragment.vendor` — vendor name (optional)
-- `io.bootc.fragment.phase` — `"repos"` or `"config"`
-- `io.bootc.fragment.provides.repos` — JSON array of repo IDs (e.g., `["epel"]`)
-- `io.bootc.fragment.packages.available` — JSON array of package names
+- `io.bootc.fragment.name`: fragment name
+- `io.bootc.fragment.version`: version string
+- `io.bootc.fragment.description`: description text
+- `io.bootc.fragment.vendor`: vendor name (optional)
+- `io.bootc.fragment.phase`: `"repos"` or `"config"`
+- `io.bootc.fragment.provides.repos`: JSON array of repo IDs (e.g., `["epel"]`)
+- `io.bootc.fragment.packages.available`: JSON array of package names
 
-Annotations are **not** used during assembly — the tool always parses the in-layer `fragment.toml` for the authoritative fragment definition. Annotations are a read-only optimization.
+Annotations are **not** used during assembly; the tool always parses the in-layer `fragment.toml` for the authoritative fragment definition. Annotations are a read-only optimization.
 
 Set annotations during build:
 ```bash
@@ -166,6 +166,6 @@ fragments:
   - `packages`: Optional. Array of package names to install from this fragment's repos. Defaults to `[]`.
   - `mirror`: Optional. `sed` expression to rewrite repo baseurl/metalink in this fragment's `.repo` files (e.g., `s/cdn.redhat.com/satellite.corp/g`).
 
-Package installation is deduplicated across all fragments — if multiple fragments request the same package, it's installed once.
+Package installation is deduplicated across all fragments; if multiple fragments request the same package, it's installed once.
 
 Repo deduplication: If multiple fragments provide `.repo` files with the same filename, the tool compares their content. Identical content is silently deduplicated (first fragment wins). Different content for the same repo ID causes the build to fail.

@@ -19,7 +19,7 @@ RUN --mount=type=bind,from=<fragment>,source=/fragment/hooks,target=/frag-hooks 
 ```
 
 Applies to hooks and any future non-`tree/` payload. `tree/` content keeps being
-copied — that is the delivered payload, not a build input.
+copied; that is the delivered payload, not a build input.
 
 Retain the current `COPY` form as an explicit fallback mode (flag-selected).
 
@@ -36,7 +36,7 @@ in `/tmp`, and nothing leaks when a hook exits nonzero mid-chain.
 The fallback is retained for two reasons. `RUN --mount=type=bind,from=` is a
 BuildKit/Buildah extension rather than base Dockerfile, and hand-maintainability
 of the generated Containerfile is a stated design goal. More concretely,
-on-cluster OpenShift builds have **no build context** — the Containerfile is an
+on-cluster OpenShift builds have **no build context**; the Containerfile is an
 embedded string in a MachineOSConfig. `COPY --from=<registry-ref>` resolves
 there because the builder pulls from the registry; whether a bind mount from a
 registry image resolves in that environment is unverified. Until it is, a
@@ -84,7 +84,7 @@ against the arch-indexed model.
 - The 4096-character check is retained.
 
 **Open question for review.** If `v1alpha1` was a deliberate choice targeting an
-older cluster, this becomes a documentation change instead — state the supported
+older cluster, this becomes a documentation change instead: state the supported
 version and keep the shape.
 
 ---
@@ -122,7 +122,7 @@ Verified in the current code:
 - Parsed from `[fragment.packages] available = [...]`, and read from the
   `io.bootc.fragment.packages.available` OCI annotation.
 - **Consumed only by `inspect`, which prints it.** Nothing else reads it.
-- `validate_composition` does not use it — it takes the manifest as `_manifest`
+- `validate_composition` does not use it; it takes the manifest as `_manifest`
   and never inspects package fields at all.
 - No validation, conflict detection, dependency analysis, or docs generation
   depends on it.
@@ -131,16 +131,16 @@ So the field is inert: it advertises, and nothing acts on the advertisement.
 
 ### Specified semantics
 
-- **`required`** — flat list of package names the fragment always installs. New
+- **`required`**: flat list of package names the fragment always installs. New
   field, optional, defaults to empty.
-- **`available`** — **removed.** It has no functional consumer, and a field
+- **`available`**: **removed.** It has no functional consumer, and a field
   nothing reads does not earn its place in the schema. Removing it is a smaller
   change than defining what it means alongside `required`.
 - **Manifest selection is free.** It is not constrained to any fragment-declared
   list, and must not become so. dnf resolves names at build time; the muxer
   orders and batches installs without needing to know what a repository
   contains. Mandatory enumeration would be unworkable for a repository the size
-  of EPEL and pointless at any size. This matches current behaviour — no change,
+  of EPEL and pointless at any size. This matches current behaviour: no change,
   recorded so it is not "tightened" later by accident.
 - **Flat list only.** No maps, conditionals, `when:` keys, or per-architecture
   variants. Conditional logic belongs in a hook.
@@ -150,12 +150,12 @@ So the field is inert: it advertises, and nothing acts on the advertisement.
 Seven of eight example fragments declare `available`; `cis-hardening` does not.
 They split cleanly along the new distinction, which is a useful check on it:
 
-- **Force what they declare** — `grafana`, `nginx`, `node-exporter`,
+- **Force what they declare**: `grafana`, `nginx`, `node-exporter`,
   `tailscale`. Single-package, opinionated. `available` becomes `required`.
-- **Force nothing** — `epel` (`htop`, `tmux`, …) and `hashicorp` (`vault`,
+- **Force nothing**: `epel` (`htop`, `tmux`, …) and `hashicorp` (`vault`,
   `consul`, `nomad`, `terraform`) are catalogues of content repositories. The
   list is dropped; consumers select in the manifest, as they already do.
-- **Needs a decision** — `postgresql` lists `postgresql17-server`,
+- **Needs a decision**: `postgresql` lists `postgresql17-server`,
   `postgresql17`, and others, and is a `repos`-phase fragment. Either it forces
   the server package and becomes opinionated, or it forces nothing and stays a
   content repo. Recommend forcing nothing, to keep `repos`-phase fragments
@@ -180,15 +180,15 @@ read path in `loader.rs`, `inspect` output, the annotation key list in
 preset-all` (weight 35) only when the base is a bootc image, rather than
 unconditionally.
 
-**Why.** Everything else the generator emits — `COPY --from`, `dnf install`,
-hook execution — works on any RPM base. These two do not: `bootc container lint`
+**Why.** Everything else the generator emits (`COPY --from`, `dnf install`,
+hook execution) works on any RPM base. These two do not: `bootc container lint`
 fails on a base without bootc, and `preset-all` is meaningless without systemd.
 Making them conditional widens the tool to ordinary container images at low cost.
 
 **Design question for review.** The phase table currently hardcodes tool-managed
 steps. Making them conditional means the phase system grows a notion of which
 tool-managed steps apply to a given base. Worth designing rather than adding a
-boolean — this change is proposed, not settled.
+boolean; this change is proposed, not settled.
 
 **Acceptance.**
 - A non-bootc base produces a Containerfile with neither step.
@@ -211,7 +211,7 @@ OCI annotation key list).
 
 Deferred deliberately; not blocked by anything here.
 
-- **Kickstart and interpreter support of any kind** — fully deferred, including
+- **Kickstart and interpreter support of any kind**: fully deferred, including
   carrying config files as fragment payload and any interpreter packaging.
 - **The MachineOSConfig size ceiling.** The 4096-character limit caps on-cluster
   builds at roughly six to eight fragments. A bundle-image approach would fix it;
@@ -222,4 +222,4 @@ Deferred deliberately; not blocked by anything here.
 - **Deriving `phase` from content** rather than declaring it, given the
   path-based tree-splitting rule already sorts repo files by location.
 - **Non-RPM bases.** Supporting apt would mean a second package phase and repo
-  convention — a large change, not attempted here.
+  convention; a large change, not attempted here.

@@ -150,11 +150,11 @@ See `examples/fragments/` for ready-to-use examples.
 osfragment-assemble [OPTIONS]
 ```
 
-- `--manifest <path>` — Path to manifest file (default: `osfragment-assemble.yaml`)
-- `--output <path>` — Output Containerfile path (default: `Containerfile`)
-- `--pin-digests` — Resolve and pin all image refs to sha256 digests
-- `--ocp [<path>]` — Generate a MachineOSConfig YAML for OpenShift (default: `machineosbuild.yaml`)
-- `--pool <name>` — MachineConfigPool name for `--ocp` output (default: `worker`)
+- `--manifest <path>`: Path to manifest file (default: `osfragment-assemble.yaml`)
+- `--output <path>`: Output Containerfile path (default: `Containerfile`)
+- `--pin-digests`: Resolve and pin all image refs to sha256 digests
+- `--ocp [<path>]`: Generate a MachineOSConfig YAML for OpenShift (default: `machineosbuild.yaml`)
+- `--pool <name>`: MachineConfigPool name for `--ocp` output (default: `worker`)
 
 ### Inspect a fragment
 

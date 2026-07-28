@@ -4,7 +4,7 @@ Engineering decisions behind osfragment-assemble's fragment format and assembly 
 
 ## Why fragments are standard OCI images
 
-Fragments use the existing OCI distribution stack — no new builder, no custom registry plugins, no client-side tooling changes. Vendors can publish fragments to quay.io, GHCR, or ECR using the same workflows they use for container images. Customers can pull them with skopeo, mirror them with podman, and scan them with existing supply chain tools.
+Fragments use the existing OCI distribution stack: no new builder, no custom registry plugins, no client-side tooling changes. Vendors can publish fragments to quay.io, GHCR, or ECR using the same workflows they use for container images. Customers can pull them with skopeo, mirror them with podman, and scan them with existing supply chain tools.
 
 Alternative considered: a custom archive format (`.tar.gz` or `.zip`). Rejected because it requires a separate distribution story and doesn't benefit from existing registry infrastructure.
 
@@ -14,21 +14,21 @@ The design goal for `fragment.toml` is to be the *minimum* metadata that lets re
 
 ### As light as possible: the muxer knows what a unit is, not what it does
 
-Declarative languages for configuring Linux systems already exist and are mature — kickstart, osbuild blueprints, rpm-ostree treefiles, comps groups, cloud-init, Butane. The format defers to them completely. Configuration is their job, and they do it well.
+Declarative languages for configuring Linux systems already exist and are mature: kickstart, osbuild blueprints, rpm-ostree treefiles, comps groups, cloud-init, Butane. The format defers to them completely. Configuration is their job, and they do it well.
 
-`fragment.toml` has a different job: describing a unit so units can be combined. It carries `name`, `version`, `description`, `vendor`, `phase`, `conflicts`, and `provides`. Every one answers a question about the *unit* — what is this thing, who published it, what version is it, what can it not be combined with, when does it apply relative to other units. None answers a question about the *system* — no users, no services, no firewall rules, no partitioning, no file contents. The format has no vocabulary for expressing system state and does not need one.
+`fragment.toml` has a different job: describing a unit so units can be combined. It carries `name`, `version`, `description`, `vendor`, `phase`, `conflicts`, and `provides`. Every one answers a question about the *unit*: what is this thing, who published it, what version is it, what can it not be combined with, when does it apply relative to other units. None answers a question about the *system*: no users, no services, no firewall rules, no partitioning, no file contents. The format has no vocabulary for expressing system state and does not need one.
 
-The model is an RPM spec header or an OCI annotation set. `Name:`, `Version:`, `Provides:`, and `Conflicts:` are how a packaging system identifies a unit and reasons about combining it with other units. `fragment.toml` occupies that role, which is why its fields map cleanly onto the `io.bootc.fragment.*` OCI annotations: both describe the artifact, not the machine.
+The model is an RPM spec header or an OCI annotation set. `Name:`, `Version:`, `Provides:`, and `Conflicts:` are how a packaging system identifies a unit and reasons about combining it with other units. `fragment.toml` occupies that role, which is why its fields map cleanly onto the `io.bootc.fragment.*` OCI annotations: both describe the artifact, not the machine. The ecosystem has no shortage of formats for describing what a Linux system should be; `fragment.toml` avoids becoming another one by having no vocabulary to say it in.
 
-Actual system configuration lives in the payload, in formats that already exist. `tree/` carries config files verbatim. `hooks/` runs real binaries with their own CLIs and config files. A fragment is free to carry a kickstart file, a blueprint, or a cloud-init config and invoke the appropriate interpreter from a hook — the assembly tool never parses those files and holds no opinion about them. Whichever declarative format a shop has standardized on keeps working; a fragment is how it gets packaged, versioned, and distributed.
+Actual system configuration lives in the payload, in formats that already exist. `tree/` carries config files verbatim. `hooks/` runs real binaries with their own CLIs and config files. A fragment is free to carry a kickstart file, a blueprint, or a cloud-init config and invoke the appropriate interpreter from a hook; the assembly tool never parses those files and holds no opinion about them. Whichever declarative format a shop has standardized on keeps working; a fragment is how it gets packaged, versioned, and distributed.
 
 ### And no simpler: below this floor, the concept fails
 
 Each remaining field is load-bearing. Remove any one and reusable units stop working:
 
-- **Identity and versioning** (`name`, `version`) — without them a unit cannot be published to a registry, referenced, pinned, or upgraded. There is nothing to depend on.
-- **Ordering** (`phase`) — repo definitions must land before packages install, and configuration must land after, or RPM defaults silently overwrite fragment-supplied files. Without a declared ordering the composition is a coin flip.
-- **Conflicts and provides** (`conflicts.fragments`, `provides.repos`) — without them, two fragments that supply the same repo or occupy the same role fight silently and the failure surfaces at runtime, on the deployed system, rather than at build time.
+- **Identity and versioning** (`name`, `version`): without them a unit cannot be published to a registry, referenced, pinned, or upgraded. There is nothing to depend on.
+- **Ordering** (`phase`): repo definitions must land before packages install, and configuration must land after, or RPM defaults silently overwrite fragment-supplied files. Without a declared ordering the composition is a coin flip.
+- **Conflicts and provides** (`conflicts.fragments`, `provides.repos`): without them, two fragments that supply the same repo or occupy the same role fight silently and the failure surfaces at runtime, on the deployed system, rather than at build time.
 
 The zero-format alternative already exists and is what this tool is a response to: prose install instructions and copy-paste Containerfile snippets. That approach has no identity, no versions, no ordering guarantees, and no conflict detection. It does not compose, it cannot be updated in place, and every consumer re-derives the same integration by hand. Its failure is the reason for the format.
 
@@ -38,23 +38,23 @@ So the floor is: enough metadata to identify a unit and reason about combining i
 
 Packages are the interesting case, because a package list can be either kind of thing depending on who wrote it and why. The format splits them accordingly.
 
-**A fragment forces the packages it needs in order to be itself.** A Grafana fragment that ships a repo definition, default configuration, and service enablement but does not install `grafana` is not a Grafana fragment — it is a pile of parts with a README. Forcing the package makes the fragment a complete, canonical install: a vendor publishes one artifact, a consumer references it, and the result is a working service. That is the whole point of a reusable unit, and it is squarely "what this unit is." It belongs in `fragment.toml`.
+**A fragment forces the packages it needs in order to be itself.** A Grafana fragment that ships a repo definition, default configuration, and service enablement but does not install `grafana` is not a Grafana fragment; it is a pile of parts with a README. Forcing the package makes the fragment a complete, canonical install: a vendor publishes one artifact, a consumer references it, and the result is a working service. That is the whole point of a reusable unit, and it is squarely "what this unit is." It belongs in `fragment.toml`.
 
-**A manifest selects packages ad hoc across repos.** `packages: [htop, tmux, jq]` against a bare EPEL fragment is not describing a unit — it is cherry-picking from a repository that happens to be reachable. Those are dnf arguments, and a list of dnf arguments is not a language. They belong at the composition site, where the person doing the composing decides what this particular image needs.
+**A manifest selects packages ad hoc across repos.** `packages: [htop, tmux, jq]` against a bare EPEL fragment is not describing a unit; it is cherry-picking from a repository that happens to be reachable. Those are dnf arguments, and a list of dnf arguments is not a language. They belong at the composition site, where the person doing the composing decides what this particular image needs.
 
 The two are complementary, and the split falls out of the same test as everything else. A pure content repository like EPEL forces nothing: it provides a repo, and what you take from it is your business. An opinionated fragment forces exactly what it takes to deliver the thing it claims to deliver. Both are expressible, neither requires new syntax, and package lists that define a unit stop being copy-paste instructions in someone's documentation.
 
-Declaring forced packages is optional, and enumeration is never required. A fragment lists the packages it must install to be itself — typically a handful, often one. A fragment that exists to provide a repository lists nothing at all: enumerating a repository's contents would be impossible for anything the size of EPEL and pointless at any size, since dnf resolves names at build time. Manifest selection is likewise unconstrained by what a fragment declares; the muxer orders and batches package installs without needing to know what a repository contains.
+Declaring forced packages is optional, and enumeration is never required. A fragment lists the packages it must install to be itself: typically a handful, often one. A fragment that exists to provide a repository lists nothing at all: enumerating a repository's contents would be impossible for anything the size of EPEL and pointless at any size, since dnf resolves names at build time. Manifest selection is likewise unconstrained by what a fragment declares; the muxer orders and batches package installs without needing to know what a repository contains.
 
-Alternative considered: fragment-side *defaults* that the manifest can override, or separate "package set" fragments. Rejected because both relocate the list rather than remove it, and both add a resolution step — precedence rules, override semantics — that the flat split does not need.
+Alternative considered: fragment-side *defaults* that the manifest can override, or separate "package set" fragments. Rejected because both relocate the list rather than remove it, and both add a resolution step (precedence rules, override semantics) that the flat split does not need.
 
 ### The guardrail: forced packages stay a flat list
 
 Forced packages are a flat list of names. Not a map, not conditionals, no `when:` keys, no per-architecture or per-base-image variants.
 
-This is a hard boundary, and it is worth being precise about why. A flat list is a statement of fact about the unit: these packages are part of what this fragment is. Add conditionals — per-architecture names, per-base-image variants, install-only-if-another-fragment-is-present — and the field acquires an evaluation order and a context to evaluate against. At that point it is a small programming language, and it needs the tooling every language needs.
+This is a hard boundary, and it is worth being precise about why. A flat list is a statement of fact about the unit: these packages are part of what this fragment is. Add conditionals (per-architecture names, per-base-image variants, install-only-if-another-fragment-is-present) and the field acquires an evaluation order and a context to evaluate against. At that point it is a small programming language, and it needs the tooling every language needs.
 
-Hooks already cover this case, and cover it better. A hook is a real executable that can inspect the system and decide. Logic belongs in a language that has logic. A fragment needing different packages on different architectures is either two fragments or a hook — both are clear, and neither asks the format to grow.
+Hooks already cover this case, and cover it better. A hook is a real executable that can inspect the system and decide. Logic belongs in a language that has logic. A fragment needing different packages on different architectures is either two fragments or a hook; both are clear, and neither asks the format to grow.
 
 Keeping the list flat is what keeps `fragment.toml` readable at a glance, diffable, and mechanically checkable.
 
@@ -69,7 +69,7 @@ Two questions settle whether something belongs in `fragment.toml`:
 
 All fragments follow the same format (`fragment.toml`, `tree/`, `hooks/`). The `phase` field controls ordering, but there's no type system distinguishing "repo fragments" from "config fragments" from "service fragments". A fragment that installs a repo is structurally identical to one that drops a config file.
 
-This keeps the format simple and avoids artificial constraints — a fragment can deliver repo definitions, config files, and hooks in a single unit when that's the right packaging boundary.
+This keeps the format simple and avoids artificial constraints: a fragment can deliver repo definitions, config files, and hooks in a single unit when that's the right packaging boundary.
 
 ## Why the tool generates Containerfiles instead of building directly
 
@@ -77,17 +77,19 @@ The generated Containerfile is a build artifact customers can read, edit, and ve
 
 Building directly would make the tool a required dependency in the build pipeline and hide the actual image construction steps from operators.
 
+The composition problem could also be solved with a build DSL, a custom BuildKit frontend, or a builder daemon. Each of those is more capable than codegen, and each is a new component a build pipeline would have to adopt, trust, and debug. Generating a plain Containerfile means the fragment format is the only new thing here; everything downstream of it runs on standard build tooling.
+
 ## Why manifest-declared packages are preferred over hook-installed packages
 
 Packages declared in the manifest's `packages:` field are batched into a single `dnf install` layer and deduplicated across fragments. This gives the tool visibility into what's being installed and keeps the generated Containerfile predictable.
 
-Hooks that call `dnf` or run vendor installers (like NVIDIA's `.run` binaries) are not prevented — the tool doesn't enforce this. But packages installed by hooks bypass deduplication, won't appear in the manifest's package list, and create additional layers. When possible, prefer the manifest; when a hook genuinely needs to install packages (vendor installers, complex dependency chains), that's fine.
+Hooks that call `dnf` or run vendor installers (like NVIDIA's `.run` binaries) are not prevented; the tool doesn't enforce this. But packages installed by hooks bypass deduplication, won't appear in the manifest's package list, and create additional layers. When possible, prefer the manifest; when a hook genuinely needs to install packages (vendor installers, complex dependency chains), that's fine.
 
 ## Why digest pinning is opt-in
 
 Digest pinning guarantees reproducibility but makes the generated Containerfile harder to read and breaks registry mirrors that don't preserve digests. The default (`--pin-digests` omitted) uses tags, which are more human-friendly and work with disconnected/airgap scenarios where images are re-pushed to internal registries.
 
-When digests are pinned, the tool switches to named stages (`AS frag-<name>`) for readability — otherwise it uses inline `COPY --from=<image-ref>` to keep the Containerfile compact.
+When digests are pinned, the tool switches to named stages (`AS frag-<name>`) for readability; otherwise it uses inline `COPY --from=<image-ref>` to keep the Containerfile compact.
 
 ## Why the tool cleans up dnf artifacts in the same RUN layer
 
@@ -97,7 +99,7 @@ This is standard Containerfile practice, not specific to osfragment-assemble.
 
 ## Why `FROM configs AS final` for OCP mode
 
-OpenShift's on-cluster build system uses `FROM configs AS final` to mark the stage MCO should extract. The base image and fragment stages are build-time dependencies only — the `final` stage is what gets deployed to nodes.
+OpenShift's on-cluster build system uses `FROM configs AS final` to mark the stage MCO should extract. The base image and fragment stages are build-time dependencies only; the `final` stage is what gets deployed to nodes.
 
 Standalone mode uses `FROM <base-image>` because there's no special stage marker needed outside the MCO context.
 
@@ -112,10 +114,10 @@ Digests are long and unreadable. Named stages make pinned Containerfiles easier 
 
 Fragment config files are copied to the target image after package installation completes. This guarantees that fragment configurations always win when they overlap with RPM-installed files.
 
-During RPM installation, if a package installs a file that already exists on disk and isn't marked as `%config` in the RPM spec, the RPM will overwrite the existing file. If fragment configs were copied before packages, RPM installs could silently replace them with package defaults. Copying configs after package installation ensures fragment-supplied configurations are never overwritten — the intended state from the fragment is what lands in the final image.
+During RPM installation, if a package installs a file that already exists on disk and isn't marked as `%config` in the RPM spec, the RPM will overwrite the existing file. If fragment configs were copied before packages, RPM installs could silently replace them with package defaults. Copying configs after package installation ensures fragment-supplied configurations are never overwritten; the intended state from the fragment is what lands in the final image.
 
 ## Trust boundary
 
-Fragments are trusted build code, not passive data. A fragment's hooks run as root during image assembly. Pulling a fragment is equivalent to running an upstream install script — it's a supply chain trust decision. The tool does not sandbox fragment hooks or validate their behavior.
+Fragments are trusted build code, not passive data. A fragment's hooks run as root during image assembly. Pulling a fragment is equivalent to running an upstream install script; it's a supply chain trust decision. The tool does not sandbox fragment hooks or validate their behavior.
 
-Repo deduplication prevents different fragments from silently overwriting each other's repos, but it's not a security boundary — if two fragments provide the same repo with different content, the build fails rather than choosing one.
+Repo deduplication prevents different fragments from silently overwriting each other's repos, but it's not a security boundary; if two fragments provide the same repo with different content, the build fails rather than choosing one.
