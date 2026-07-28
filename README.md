@@ -172,6 +172,32 @@ osfragment-assemble list --manifest <path>
 
 List fragments in phase-sorted order (the order they'll appear in the generated Containerfile).
 
+## Base image classification
+
+osfragment-assemble classifies the base image to determine which build steps to include in the generated Containerfile. Bootc-compatible images get `systemctl preset-all` and `bootc container lint` steps; plain container images do not.
+
+Classification signals, checked in order:
+
+1. **Manifest `baseType` field** -- When present (`bootc` or `container`), this is authoritative. No image inspection happens.
+2. **`containers.bootc` image label** -- The tool runs `skopeo inspect` on the base image and checks for the `containers.bootc` label. If the label exists and is non-empty, the image is classified as bootc.
+3. **Default: `bootc`** -- When the label is absent or the lookup fails (network error, authentication failure), the image is classified as bootc. This preserves current behavior and fails loudly (via `bootc container lint`) rather than silently dropping steps.
+
+When `skopeo inspect` fails, a warning is printed to stderr with the base image name and the failure reason. Assembly continues with bootc classification.
+
+MachineOSConfig output (`--ocp`) always uses the full bootc step set regardless of classification, since MachineOSConfig targets bootc images by definition.
+
+Example with explicit classification:
+
+```yaml
+apiVersion: bootc.io/v1alpha1
+kind: Composition
+base: quay.io/fedora/fedora:41
+baseType: container
+fragments:
+  - image: quay.io/example/epel:10
+    packages: [htop]
+```
+
 ## Example fragments
 
 The `examples/fragments/` directory contains 8 ready-to-use fragments:

@@ -148,6 +148,7 @@ apiVersion: bootc.io/v1alpha1
 kind: Composition
 
 base: quay.io/centos-bootc/centos-bootc:stream10
+baseType: bootc  # Optional: override automatic base image classification
 
 fragments:
   - image: quay.io/example/epel:10
@@ -162,6 +163,12 @@ fragments:
 - `apiVersion`: Must be `bootc.io/v1alpha1`
 - `kind`: Must be `Composition`
 - `base`: Required. Base bootc or RHCOS image reference.
+- `baseType`: Optional. Overrides automatic base image classification. Values: `bootc` or `container`.
+  When set, skips label inspection entirely. When absent, the tool inspects the base image's
+  `containers.bootc` label to determine classification. See README for the full classification order.
+  - `bootc`: Base image is bootc-compatible. The generated Containerfile includes `systemctl preset-all`
+    and `bootc container lint` steps.
+  - `container`: Base image is a plain container. These steps are omitted.
 - `fragments`: Required. Array of at least one fragment.
   - `image`: Required. OCI image reference (`registry/repo:tag`) or digest (`registry/repo@sha256:...`).
   - `packages`: Optional. Array of package names to install from this fragment's repos. Defaults to `[]`.
