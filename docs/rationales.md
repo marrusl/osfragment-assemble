@@ -73,9 +73,13 @@ This keeps the format simple and avoids artificial constraints: a fragment can d
 
 ## Why the tool generates Containerfiles instead of building directly
 
-The generated Containerfile is a build artifact customers can read, edit, and version. No lock-in. If osfragment-assemble stops meeting their needs, they take the Containerfile and maintain it manually. The tool's job is codegen, not gatekeeping.
+The tool deliberately stays out of the builder's domain. It doesn't invoke podman, doesn't wrap buildah, doesn't manage layers, doesn't handle multi-arch, doesn't implement remote builds. All of those are problems that container build tooling already solves. Generating a Containerfile means those solutions keep working.
 
-Building directly would make the tool a required dependency in the build pipeline and hide the actual image construction steps from operators.
+This follows the same principle documented in the format section: declarative languages for configuring Linux systems already exist and are mature, so the format defers to them completely. The tool does the same with builders. It also does the same with package managers — the packages rationale already says "those are dnf arguments, and a list of dnf arguments is not a language."
+
+The pattern is: the tool occupies the composition layer and stays out of domains that have competent owners. Builder, configurator, package manager — the tool generates for all three rather than replacing any of them.
+
+The generated Containerfile is a build artifact customers can read, edit, and version. No lock-in. If osfragment-assemble stops meeting their needs, they take the Containerfile and maintain it manually. The tool's job is codegen, not gatekeeping.
 
 The composition problem could also be solved with a build DSL, a custom BuildKit frontend, or a builder daemon. Each of those is more capable than codegen, and each is a new component a build pipeline would have to adopt, trust, and debug. Generating a plain Containerfile means the fragment format is the only new thing here; everything downstream of it runs on standard build tooling.
 
@@ -115,6 +119,23 @@ Digests are long and unreadable. Named stages make pinned Containerfiles easier 
 Fragment config files are copied to the target image after package installation completes. This guarantees that fragment configurations always win when they overlap with RPM-installed files.
 
 During RPM installation, if a package installs a file that already exists on disk and isn't marked as `%config` in the RPM spec, the RPM will overwrite the existing file. If fragment configs were copied before packages, RPM installs could silently replace them with package defaults. Copying configs after package installation ensures fragment-supplied configurations are never overwritten; the intended state from the fragment is what lands in the final image.
+
+## Why build inputs stay out of the image
+
+Hooks are build inputs, not delivered payload. The tool emits `RUN --mount=type=bind` to execute hooks without copying their bytes into the image:
+
+```dockerfile
+RUN --mount=type=bind,from=<fragment>,source=/fragment/hooks,target=/frag-hooks,bind-propagation=rshared,z \
+    /frag-hooks/10-configure.sh && /frag-hooks/20-enable.sh
+```
+
+The bind mount exists only during the `RUN` instruction. Hook scripts execute, produce their effects (install packages, write config files, enable services), and disappear. Nothing from `/fragment/hooks` persists in the final image layers.
+
+`tree/` content is the opposite case: it is delivered payload and is `COPY`'d into the image, where it correctly persists in the layer history.
+
+The distinction matters for two reasons. First, hook bytes in image layers are recoverable via layer inspection tools, which is undesirable when hooks contain vendor-specific logic or security hardening implementation details. Second, at fleet scale, hook scripts that land in every node's image inflate pull size without delivering runtime value — the scripts ran once at build time and are dead weight afterward.
+
+Alternative considered: copy hooks, execute them, and remove them in the same `RUN` layer. Rejected because the remove step only writes a whiteout tombstone; the hook bytes remain in the layer and are recoverable. The bind mount avoids this entire class of problem: one instruction, one layer, nothing committed, nothing to clean up.
 
 ## Trust boundary
 
