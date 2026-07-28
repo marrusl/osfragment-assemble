@@ -224,14 +224,29 @@ pub fn generate_containerfile(
         }
     }
 
-    // Packages
+    // Packages — required (fragment-declared) first, then manifest-selected
     let mut seen = std::collections::HashSet::new();
-    let all_packages: Vec<String> = manifest
-        .fragments
-        .iter()
-        .flat_map(|f| f.packages.iter().cloned())
-        .filter(|p| seen.insert(p.clone()))
-        .collect();
+    let mut all_packages: Vec<String> = Vec::new();
+
+    // Phase 1: fragment-declared required packages, in fragment order
+    // (fragments are already sorted by phase weight then manifest order)
+    for loaded in fragments {
+        for pkg in &loaded.fragment.packages.required {
+            if seen.insert(pkg.clone()) {
+                all_packages.push(pkg.clone());
+            }
+        }
+    }
+
+    // Phase 2: manifest-selected packages, in manifest order
+    for mf in &manifest.fragments {
+        for pkg in &mf.packages {
+            if seen.insert(pkg.clone()) {
+                all_packages.push(pkg.clone());
+            }
+        }
+    }
+
     if !all_packages.is_empty() {
         if !ocp {
             writeln!(out, "# --- Packages ---")?;
@@ -1388,6 +1403,130 @@ mod tests {
             output.contains("/frag-hooks/01-first.sh && /frag-hooks/02-second.sh && /frag-hooks/03-third.sh"),
             "expected all hooks chained with && in one instruction:\n{}",
             output
+        );
+    }
+
+    #[test]
+    fn required_packages_appear_without_manifest_entry() {
+        let (mut epel, mut mf_epel) = make_repos_fragment("epel", "aaa111");
+        epel.fragment.packages.required = vec!["htop".into(), "tmux".into()];
+        mf_epel.packages = vec![]; // no manifest-selected packages
+        let manifest = Manifest {
+            base: "registry.redhat.io/rhel10/rhel-bootc:10.0".into(),
+            fragments: vec![mf_epel],
+        };
+        let output = generate_containerfile(
+            &manifest,
+            &[epel],
+            Some("sha256:base123"),
+            &empty_dedup(),
+            false,
+        )
+        .unwrap();
+        assert!(
+            output.contains("htop") && output.contains("tmux"),
+            "expected required packages in output:\n{}",
+            output
+        );
+        assert!(
+            output.contains("dnf install -y"),
+            "expected dnf install line in output:\n{}",
+            output
+        );
+    }
+
+    #[test]
+    fn required_packages_before_manifest_selected_with_dedup() {
+        let (mut epel, mut mf_epel) = make_repos_fragment("epel", "aaa111");
+        epel.fragment.packages.required = vec!["htop".into()];
+        mf_epel.packages = vec!["htop".into(), "jq".into()]; // htop duplicated
+        let manifest = Manifest {
+            base: "registry.redhat.io/rhel10/rhel-bootc:10.0".into(),
+            fragments: vec![mf_epel],
+        };
+        let output = generate_containerfile(
+            &manifest,
+            &[epel],
+            Some("sha256:base123"),
+            &empty_dedup(),
+            false,
+        )
+        .unwrap();
+        // htop should appear exactly once
+        let htop_count = output.matches("htop").count();
+        assert_eq!(
+            htop_count, 1,
+            "htop should appear exactly once (dedup), found {} in:\n{}",
+            htop_count, output
+        );
+        // Both htop and jq should be present
+        assert!(output.contains("jq"), "expected jq in output:\n{}", output);
+        // htop (required) should appear before jq (manifest-selected)
+        let htop_pos = output.find("htop").unwrap();
+        let jq_pos = output.find("jq").unwrap();
+        assert!(
+            htop_pos < jq_pos,
+            "required htop should appear before manifest-selected jq"
+        );
+    }
+
+    #[test]
+    fn cross_fragment_required_dedup_silent() {
+        let (mut epel, mf_epel) = make_repos_fragment("epel", "aaa111");
+        epel.fragment.packages.required = vec!["shared-dep".into()];
+        let (mut cis, mf_cis) = make_config_fragment("cis", "bbb222");
+        cis.fragment.packages.required = vec!["shared-dep".into()];
+        cis.manifest_index = 1;
+        let manifest = Manifest {
+            base: "registry.redhat.io/rhel10/rhel-bootc:10.0".into(),
+            fragments: vec![mf_epel, mf_cis],
+        };
+        let output = generate_containerfile(
+            &manifest,
+            &[epel, cis],
+            Some("sha256:base123"),
+            &empty_dedup(),
+            false,
+        )
+        .unwrap();
+        let dep_count = output.matches("shared-dep").count();
+        assert_eq!(
+            dep_count, 1,
+            "shared-dep should appear exactly once, found {} in:\n{}",
+            dep_count, output
+        );
+    }
+
+    #[test]
+    fn required_packages_ordered_by_phase_weight() {
+        // Config fragment listed first in manifest, repos fragment second.
+        // Required packages from repos fragment should still come first
+        // because phase weight (repos=10) < (config=30).
+        let (mut cis, mf_cis) = make_config_fragment("cis", "bbb222");
+        cis.fragment.packages.required = vec!["config-pkg".into()];
+        cis.manifest_index = 0;
+        let (mut epel, mf_epel) = make_repos_fragment("epel", "aaa111");
+        epel.fragment.packages.required = vec!["repos-pkg".into()];
+        epel.manifest_index = 1;
+        let manifest = Manifest {
+            base: "registry.redhat.io/rhel10/rhel-bootc:10.0".into(),
+            fragments: vec![mf_cis, mf_epel],
+        };
+        // fragments sorted by phase weight: epel (repos=10) before cis (config=30)
+        let sorted_fragments = vec![epel, cis];
+        let output = generate_containerfile(
+            &manifest,
+            &sorted_fragments,
+            Some("sha256:base123"),
+            &empty_dedup(),
+            false,
+        )
+        .unwrap();
+        let repos_pos = output.find("repos-pkg").unwrap();
+        let config_pos = output.find("config-pkg").unwrap();
+        assert!(
+            repos_pos < config_pos,
+            "repos-phase required should appear before config-phase required"
         );
     }
 }
