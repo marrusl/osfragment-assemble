@@ -1060,4 +1060,76 @@ mod tests {
             output
         );
     }
+
+    #[test]
+    fn hooks_never_in_copy_instruction() {
+        // Unpinned standalone
+        let (mut cis, mf_cis) = make_unpinned_config_fragment("cis");
+        cis.manifest_index = 0;
+        let manifest = Manifest {
+            base: "registry.redhat.io/rhel10/rhel-bootc:10.0".into(),
+            fragments: vec![mf_cis.clone()],
+        };
+        let standalone = generate_containerfile(
+            &manifest,
+            &[cis.clone()],
+            None,
+            &empty_dedup(),
+            false,
+        )
+        .unwrap();
+        for line in standalone.lines() {
+            if line.starts_with("COPY") {
+                assert!(
+                    !line.contains("hooks"),
+                    "hooks/ must not appear in COPY instruction (standalone):\n{}",
+                    line
+                );
+            }
+        }
+
+        // Unpinned OCP
+        let ocp_output = generate_containerfile(
+            &manifest,
+            &[cis],
+            None,
+            &empty_dedup(),
+            true,
+        )
+        .unwrap();
+        for line in ocp_output.lines() {
+            if line.starts_with("COPY") {
+                assert!(
+                    !line.contains("hooks"),
+                    "hooks/ must not appear in COPY instruction (OCP):\n{}",
+                    line
+                );
+            }
+        }
+
+        // Pinned standalone
+        let (mut pinned_cis, mf_pinned) = make_config_fragment("cis", "bbb222");
+        pinned_cis.manifest_index = 0;
+        let pinned_manifest = Manifest {
+            base: "registry.redhat.io/rhel10/rhel-bootc:10.0".into(),
+            fragments: vec![mf_pinned],
+        };
+        let pinned_output = generate_containerfile(
+            &pinned_manifest,
+            &[pinned_cis],
+            Some("sha256:base123"),
+            &empty_dedup(),
+            false,
+        )
+        .unwrap();
+        for line in pinned_output.lines() {
+            if line.starts_with("COPY") {
+                assert!(
+                    !line.contains("hooks"),
+                    "hooks/ must not appear in COPY instruction (pinned):\n{}",
+                    line
+                );
+            }
+        }
+    }
 }
