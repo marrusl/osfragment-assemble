@@ -29,6 +29,32 @@ pub fn capabilities_for_base_type(base_type: BaseType) -> CapabilitySet {
 /// Label key checked on the base image via `skopeo inspect`.
 const BOOTC_LABEL_KEY: &str = "containers.bootc";
 
+/// Testable classification: accepts probe result directly instead of running skopeo.
+pub(crate) fn classify_base_with_probe(
+    manifest_override: Option<&BaseType>,
+    probe_result: Option<bool>,
+) -> CapabilitySet {
+    // Signal 1: manifest override wins unconditionally
+    if let Some(base_type) = manifest_override {
+        return capabilities_for_base_type(base_type.clone());
+    }
+
+    // Signal 2: interpret the probe result
+    match probe_result {
+        Some(true) => capabilities_for_base_type(BaseType::Bootc),
+        Some(false) => {
+            // Label absent — default to bootc (preserves current behavior,
+            // fails loudly via bootc container lint rather than silently
+            // dropping systemctl preset-all)
+            capabilities_for_base_type(BaseType::Bootc)
+        }
+        None => {
+            // Lookup failed — already warned on stderr, default to bootc
+            capabilities_for_base_type(BaseType::Bootc)
+        }
+    }
+}
+
 /// Classify the base image and return its capability set.
 ///
 /// Classification order:
@@ -42,25 +68,12 @@ pub fn classify_base(
     base_image: &str,
     manifest_override: Option<&BaseType>,
 ) -> CapabilitySet {
-    // Signal 1: manifest override wins unconditionally
-    if let Some(base_type) = manifest_override {
-        return capabilities_for_base_type(base_type.clone());
+    if manifest_override.is_some() {
+        return classify_base_with_probe(manifest_override, None);
     }
 
-    // Signal 2: probe the containers.bootc label
-    match probe_bootc_label(base_image) {
-        Some(true) => capabilities_for_base_type(BaseType::Bootc),
-        Some(false) => {
-            // Label absent — default to bootc (preserves current behavior,
-            // fails loudly via bootc container lint rather than silently
-            // dropping systemctl preset-all)
-            capabilities_for_base_type(BaseType::Bootc)
-        }
-        None => {
-            // Lookup failed — already warned on stderr, default to bootc
-            capabilities_for_base_type(BaseType::Bootc)
-        }
-    }
+    let probe_result = probe_bootc_label(base_image);
+    classify_base_with_probe(manifest_override, probe_result)
 }
 
 /// Query the `containers.bootc` label from the base image config via skopeo.
@@ -138,5 +151,52 @@ mod tests {
     fn manifest_override_container_skips_inspection() {
         let caps = classify_base("nonexistent.invalid/image:1", Some(&BaseType::Container));
         assert!(caps.is_empty());
+    }
+
+    #[test]
+    fn probe_true_yields_bootc_caps() {
+        let caps = classify_base_with_probe(None, Some(true));
+        assert!(caps.contains(&Capability::Bootc));
+        assert!(caps.contains(&Capability::Systemd));
+    }
+
+    #[test]
+    fn probe_false_no_label_defaults_to_bootc() {
+        // Label absent — default is bootc (preserves current behavior)
+        let caps = classify_base_with_probe(None, Some(false));
+        assert!(caps.contains(&Capability::Bootc));
+        assert!(caps.contains(&Capability::Systemd));
+    }
+
+    #[test]
+    fn probe_none_lookup_failed_defaults_to_bootc() {
+        // Lookup failed — default is bootc
+        let caps = classify_base_with_probe(None, None);
+        assert!(caps.contains(&Capability::Bootc));
+        assert!(caps.contains(&Capability::Systemd));
+    }
+
+    #[test]
+    fn manifest_override_container_ignores_probe() {
+        // Even if probe says bootc, manifest override wins
+        let caps = classify_base_with_probe(Some(&BaseType::Container), Some(true));
+        assert!(caps.is_empty());
+    }
+
+    #[test]
+    fn manifest_override_bootc_ignores_probe() {
+        let caps = classify_base_with_probe(Some(&BaseType::Bootc), Some(false));
+        assert!(caps.contains(&Capability::Bootc));
+        assert!(caps.contains(&Capability::Systemd));
+    }
+
+    #[test]
+    fn failed_probe_warns_on_stderr() {
+        // classify_base with a nonexistent image triggers the warning path.
+        // We can't easily capture stderr in a unit test, but we can verify
+        // the function returns bootc capabilities and does not panic/error.
+        let caps = classify_base("nonexistent.invalid/no-such-image:1", None);
+        assert!(caps.contains(&Capability::Bootc));
+        assert!(caps.contains(&Capability::Systemd));
     }
 }
