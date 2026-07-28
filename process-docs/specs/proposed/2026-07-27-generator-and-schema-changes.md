@@ -42,11 +42,23 @@ there because the builder pulls from the registry; whether a bind mount from a
 registry image resolves in that environment is unverified. Until it is, a
 `COPY`-based path must remain available or the OpenShift output regresses.
 
+**Mode selection.** The user never chooses a mode from knowledge of builder
+internals; the target chooses. Default output emits the bind mount, which
+podman, Buildah, and current Docker all accept. `--ocp` selects the fallback
+form automatically while the MachineOSConfig verification below is open. An
+explicit opt-in flag forces the fallback for builders that reject `RUN --mount`;
+that failure is immediate and legible (the builder errors on the instruction),
+so the flag is an escape hatch discovered at the point of failure, not a
+decision required up front. Document the flag next to that error case in the
+README so the builder error leads to it.
+
 **Acceptance.**
 - Default output executes hooks via `RUN --mount`, with no `COPY` of `hooks/`.
 - A test asserts `hooks/` never appears in a `COPY` instruction in default mode.
 - Fallback mode reproduces the current form, with the `rm -rf` folded into the
   same instruction as the `COPY` so it is correct in that mode too.
+- `--ocp` output uses the fallback form with no flag required, until the
+  MachineOSConfig verification below flips it.
 - Verify whether `--mount=type=bind,from=<registry-image>` works in a
   MachineOSConfig build pod; record the result. This gates whether the fallback
   is permanent or transitional.
