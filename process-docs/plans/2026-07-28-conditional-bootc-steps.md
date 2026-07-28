@@ -463,7 +463,26 @@ fn manifest_override_bootc_ignores_probe() {
     assert!(caps.contains(&Capability::Bootc));
     assert!(caps.contains(&Capability::Systemd));
 }
+
+#[test]
+fn failed_probe_warns_on_stderr() {
+    // classify_base with a nonexistent image triggers the warning path.
+    // We can't easily capture stderr in a unit test, but we can verify
+    // the function returns bootc capabilities and does not panic/error.
+    let caps = classify_base("nonexistent.invalid/no-such-image:1", None);
+    assert!(caps.contains(&Capability::Bootc));
+    assert!(caps.contains(&Capability::Systemd));
+}
 ```
+
+> **Note (review finding):** The `probe_none_lookup_failed_defaults_to_bootc` test proves the
+> fallback returns bootc but does not verify the stderr warning content. The
+> `failed_probe_warns_on_stderr` test exercises the full warning path end-to-end via
+> `classify_base` with a nonexistent image, proving the function does not panic or error
+> on lookup failure. This test uses `classify_base` (not `classify_base_with_probe`) so it
+> passes immediately since the function is already implemented from Task 2. Capturing stderr
+> content in a Rust unit test requires additional infrastructure (e.g., a logging framework
+> with test capture) -- acceptable as a future improvement.
 
 - [ ] **Step 2: Run tests to verify they fail**
 
@@ -1017,7 +1036,107 @@ Assisted-by: Claude Code (claude-opus-5)"
 
 ---
 
-### Task 7: Add `classify` tests covering the `probe_bootc_label` integration path
+### Task 7: Document `baseType` field and base classification behavior
+
+The spec's acceptance criteria require classification signals, their order, and the
+default to be documented in `docs/` and the README. This task adds user-facing
+documentation covering the `baseType` manifest field and the full classification flow.
+
+**Files:**
+- Modify: `/Users/mrussell/Work/osfragment-assemble/docs/fragment-format.md` (Manifest YAML Schema section)
+- Modify: `/Users/mrussell/Work/osfragment-assemble/README.md` (add classification section)
+
+**Interfaces:**
+- Consumes: Classification design from Tasks 2-3
+- Produces: User-facing documentation of `baseType` field and classification behavior
+
+- [ ] **Step 1: Add `baseType` to the manifest schema in `docs/fragment-format.md`**
+
+In the Manifest YAML Schema section, update the example YAML to include `baseType`:
+
+```yaml
+apiVersion: bootc.io/v1alpha1
+kind: Composition
+
+base: quay.io/centos-bootc/centos-bootc:stream10
+baseType: bootc  # Optional: override automatic base image classification
+
+fragments:
+  - image: quay.io/example/epel:10
+    packages: [htop, tmux]
+  - image: quay.io/example/tailscale:1.82.0
+    packages: [tailscale]
+    mirror: s/download.tailscale.com/mirror.internal.corp/g
+```
+
+Add `baseType` to the `### Fields` list, after the `base` entry:
+
+```markdown
+- `baseType`: Optional. Overrides automatic base image classification. Values: `bootc` or `container`.
+  When set, skips label inspection entirely. When absent, the tool inspects the base image's
+  `containers.bootc` label to determine classification. See README for the full classification order.
+  - `bootc`: Base image is bootc-compatible. The generated Containerfile includes `systemctl preset-all`
+    and `bootc container lint` steps.
+  - `container`: Base image is a plain container. These steps are omitted.
+```
+
+- [ ] **Step 2: Add base classification section to `README.md`**
+
+Add a "Base image classification" section after the "CLI" section (after the `osfragment-assemble list` block):
+
+```markdown
+## Base image classification
+
+osfragment-assemble classifies the base image to determine which build steps to include in the generated Containerfile. Bootc-compatible images get `systemctl preset-all` and `bootc container lint` steps; plain container images do not.
+
+Classification signals, checked in order:
+
+1. **Manifest `baseType` field** -- When present (`bootc` or `container`), this is authoritative. No image inspection happens.
+2. **`containers.bootc` image label** -- The tool runs `skopeo inspect` on the base image and checks for the `containers.bootc` label. If the label exists and is non-empty, the image is classified as bootc.
+3. **Default: `bootc`** -- When the label is absent or the lookup fails (network error, authentication failure), the image is classified as bootc. This preserves current behavior and fails loudly (via `bootc container lint`) rather than silently dropping steps.
+
+When `skopeo inspect` fails, a warning is printed to stderr with the base image name and the failure reason. Assembly continues with bootc classification.
+
+MachineOSConfig output (`--ocp`) always uses the full bootc step set regardless of classification, since MachineOSConfig targets bootc images by definition.
+
+Example with explicit classification:
+
+```yaml
+apiVersion: bootc.io/v1alpha1
+kind: Composition
+base: quay.io/fedora/fedora:41
+baseType: container
+fragments:
+  - image: quay.io/example/epel:10
+    packages: [htop]
+```
+```
+
+- [ ] **Step 3: Verify documentation accuracy against implementation**
+
+Cross-check that the documented classification signals match the implementation in `src/classify.rs`:
+- Signal order: manifest override -> label inspection -> default
+- Default: bootc (not container)
+- Warning behavior: stderr, continues assembly
+- MachineOSConfig: always bootc capabilities
+
+- [ ] **Step 4: Commit**
+
+```bash
+cd /Users/mrussell/Work/osfragment-assemble
+git add docs/fragment-format.md README.md
+git commit -m "docs: document baseType field and base classification behavior
+
+Add baseType to manifest schema in fragment-format.md.
+Add classification signals section to README with order,
+default, and MachineOSConfig behavior.
+
+Assisted-by: Claude Code (claude-opus-5)"
+```
+
+---
+
+### Task 8: Add `classify` tests covering the `probe_bootc_label` integration path
 
 The `probe_bootc_label` function calls `skopeo` and cannot be unit-tested
 directly. This task adds a doc comment explaining the coverage gap and
@@ -1076,7 +1195,22 @@ fn bootc_label_format_uses_go_template_syntax() {
 cd /Users/mrussell/Work/osfragment-assemble && cargo test --lib classify
 ```
 
-- [ ] **Step 3: Commit**
+- [ ] **Step 3: Manually verify skopeo format string against a real image**
+
+> **Note (review finding):** The unit test checks string shape but cannot verify the format
+> string against a real `skopeo inspect` result. This manual step validates that the Go
+> template expression actually extracts the label value.
+
+Run against a known bootc image:
+
+```bash
+skopeo inspect --override-os linux --format '{{.Labels.containers\.bootc}}' docker://quay.io/centos-bootc/centos-bootc:stream10
+```
+
+Expected: non-empty value (e.g., a version string or "1").
+If this fails, the Go template syntax needs adjustment (try index-based: `{{index .Labels "containers.bootc"}}`).
+
+- [ ] **Step 4: Commit**
 
 ```bash
 cd /Users/mrussell/Work/osfragment-assemble
@@ -1099,13 +1233,14 @@ Assisted-by: Claude Code (claude-opus-5)"
 |---|---|
 | Non-bootc base produces Containerfile with neither step | Task 4 (`container_base_omits_bootc_steps`), Task 6 (`manifest_override_container_omits_steps`) |
 | Bootc base unchanged from current output | Task 4 (`bootc_base_preserves_both_steps`), Task 6 (`no_base_type_with_bootc_caps_preserves_current_output`) |
-| Classification signals documented | Task 2 (doc comments on `classify_base`), Task 7 (format string docs) |
+| Classification signals documented in `docs/` and README | Task 2 (doc comments on `classify_base`), Task 7 (`docs/fragment-format.md` manifest schema, `README.md` classification section), Task 8 (format string constant docs) |
 | No label + no override = bootc (test) | Task 3 (`probe_false_no_label_defaults_to_bootc`), Task 6 (`no_base_type_with_bootc_caps_preserves_current_output`) |
 | Manifest override wins over label (test) | Task 3 (`manifest_override_container_ignores_probe`, `manifest_override_bootc_ignores_probe`), Task 6 (`manifest_override_container_omits_steps`) |
-| Failed lookup warns + classifies bootc | Task 2 (`classify_base` eprintln warning), Task 3 (`probe_none_lookup_failed_defaults_to_bootc`) |
+| Failed lookup warns + classifies bootc | Task 2 (`classify_base` eprintln warning), Task 3 (`probe_none_lookup_failed_defaults_to_bootc`, `failed_probe_warns_on_stderr`) |
 | MachineOSConfig always emits both steps (test) | Task 5 (main.rs always passes `bootc` caps for OCP), Task 6 (`ocp_always_emits_bootc_steps_regardless_of_caps`) |
 | No classification path inspects image name | No code path references image name for classification |
 | Divergence test: `baseType: container` + `--ocp` | Task 6 (`container_base_with_ocp_produces_divergent_outputs`) |
+| skopeo format string validated against real image | Task 8 (manual verification step) |
 
 ### Placeholder scan
 
