@@ -9,4 +9,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- **Hooks** — Renamed fragment directory from `scripts/` to `hooks/`; all files under `fragment/hooks/` are collected as executables regardless of extension, allowing Python, Perl, or any interpreter-based hook
+- **Hooks** - Renamed fragment directory from `scripts/` to `hooks/`; all files under `fragment/hooks/` are collected as executables regardless of extension, allowing Python, Perl, or any interpreter-based hook
