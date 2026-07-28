@@ -24,7 +24,7 @@ Actual system configuration lives in the payload, in formats that already exist.
 
 ### And no simpler: below this floor, the concept fails
 
-Each remaining field is load-bearing. Remove any one and reusable units stop working:
+Each remaining field earns its place. Remove any one and reusable units stop working:
 
 - **Identity and versioning** (`name`, `version`): without them a unit cannot be published to a registry, referenced, pinned, or upgraded. There is nothing to depend on.
 - **Ordering** (`phase`): repo definitions must land before packages install, and configuration must land after, or RPM defaults silently overwrite fragment-supplied files. Without a declared ordering the composition is a coin flip.
