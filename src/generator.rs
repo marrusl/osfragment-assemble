@@ -1552,4 +1552,44 @@ mod tests {
             output
         );
     }
+
+    #[test]
+    fn postgresql_forces_packages_as_repos_phase() {
+        let (mut pg, _mf_pg) = make_repos_fragment("postgresql", "pg1234");
+        pg.fragment.packages.required =
+            vec!["postgresql17-server".into(), "postgresql17".into()];
+        pg.fragment.provides.repos = vec!["pgdg-common".into(), "pgdg17".into()];
+        // manifest selects no packages for postgresql
+        let manifest = Manifest {
+            base: "registry.redhat.io/rhel10/rhel-bootc:10.0".into(),
+            fragments: vec![ManifestFragment {
+                image: "quay.io/test/postgresql:17".into(),
+                packages: vec![],
+                mirror: None,
+            }],
+        };
+        let output = generate_containerfile(
+            &manifest,
+            &[pg],
+            Some("sha256:base123"),
+            &empty_dedup(),
+            false,
+        )
+        .unwrap();
+        assert!(
+            output.contains("postgresql17-server"),
+            "expected postgresql17-server in output:\n{}",
+            output
+        );
+        assert!(
+            output.contains("postgresql17"),
+            "expected postgresql17 in output:\n{}",
+            output
+        );
+        assert!(
+            output.contains("dnf install -y"),
+            "expected dnf install in output:\n{}",
+            output
+        );
+    }
 }

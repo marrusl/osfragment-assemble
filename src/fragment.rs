@@ -292,4 +292,26 @@ requred = ["grafana"]
             }
         }
     }
+
+    #[test]
+    fn postgresql_example_preserves_repos_phase() {
+        let toml_path = Path::new("examples/fragments/postgresql/fragment.toml");
+        let content = std::fs::read_to_string(toml_path)
+            .expect("postgresql example fragment should exist");
+        let frag = parse_fragment_toml(&content)
+            .expect("postgresql example fragment should parse");
+        assert_eq!(
+            frag.phase,
+            FragmentPhase::Repos,
+            "postgresql must stay phase=repos after migration to required packages"
+        );
+        assert!(
+            frag.packages.required.contains(&"postgresql17-server".to_string()),
+            "postgresql must declare postgresql17-server as required"
+        );
+        assert!(
+            frag.packages.required.contains(&"postgresql17".to_string()),
+            "postgresql must declare postgresql17 as required"
+        );
+    }
 }
