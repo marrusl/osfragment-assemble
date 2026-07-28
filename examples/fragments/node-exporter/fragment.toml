@@ -8,4 +8,4 @@ phase = "config"
 repos = ["epel"]
 
 [fragment.packages]
-available = ["node-exporter"]
+required = ["node-exporter"]

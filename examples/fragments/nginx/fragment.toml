@@ -9,4 +9,4 @@ phase = "config"
 repos = ["nginx-stable"]
 
 [fragment.packages]
-available = ["nginx"]
+required = ["nginx"]

@@ -9,4 +9,4 @@ phase = "config"
 repos = ["tailscale-stable"]
 
 [fragment.packages]
-available = ["tailscale"]
+required = ["tailscale"]

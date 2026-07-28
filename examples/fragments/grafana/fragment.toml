@@ -9,4 +9,4 @@ phase = "config"
 repos = ["grafana"]
 
 [fragment.packages]
-available = ["grafana"]
+required = ["grafana"]

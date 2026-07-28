@@ -9,9 +9,7 @@ phase = "repos"
 repos = ["pgdg-common", "pgdg17"]
 
 [fragment.packages]
-available = [
+required = [
     "postgresql17-server",
     "postgresql17",
-    "postgresql16-server",
-    "postgresql16",
 ]

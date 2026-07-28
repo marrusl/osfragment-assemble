@@ -7,14 +7,3 @@ phase = "repos"
 
 [fragment.provides]
 repos = ["epel"]
-
-[fragment.packages]
-available = [
-    "htop",
-    "tmux",
-    "jq",
-    "fzf",
-    "ripgrep",
-    "bat",
-    "fd-find",
-]

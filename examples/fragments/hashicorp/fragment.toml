@@ -7,6 +7,3 @@ phase = "config"
 
 [fragment.provides]
 repos = ["hashicorp"]
-
-[fragment.packages]
-available = ["vault", "consul", "nomad", "terraform"]
