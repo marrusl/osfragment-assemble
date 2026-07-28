@@ -429,6 +429,7 @@ mod tests {
         let (epel, mf_epel) = make_repos_fragment("epel", "aaa111");
         let manifest = Manifest {
             base: "registry.redhat.io/rhel10/rhel-bootc:10.0".into(),
+            base_type: None,
             fragments: vec![mf_epel],
         };
         let output = generate_containerfile(
@@ -451,6 +452,7 @@ mod tests {
         cis.manifest_index = 1;
         let manifest = Manifest {
             base: "registry.redhat.io/rhel10/rhel-bootc:10.0".into(),
+            base_type: None,
             fragments: vec![mf_epel, mf_cis],
         };
         let output = generate_containerfile(
@@ -479,6 +481,7 @@ mod tests {
         let (epel, mf_epel) = make_repos_fragment("epel", "aaa111");
         let manifest = Manifest {
             base: "registry.redhat.io/rhel10/rhel-bootc:10.0".into(),
+            base_type: None,
             fragments: vec![mf_epel],
         };
         let output = generate_containerfile(
@@ -499,6 +502,7 @@ mod tests {
         cis.manifest_index = 0;
         let manifest = Manifest {
             base: "registry.redhat.io/rhel10/rhel-bootc:10.0".into(),
+            base_type: None,
             fragments: vec![mf_cis],
         };
         let output = generate_containerfile(
@@ -518,6 +522,7 @@ mod tests {
         cis.manifest_index = 0;
         let manifest = Manifest {
             base: "registry.redhat.io/rhel10/rhel-bootc:10.0".into(),
+            base_type: None,
             fragments: vec![mf_cis],
         };
         let output = generate_containerfile(
@@ -537,6 +542,7 @@ mod tests {
         cis.manifest_index = 0;
         let manifest = Manifest {
             base: "registry.redhat.io/rhel10/rhel-bootc:10.0".into(),
+            base_type: None,
             fragments: vec![mf_cis],
         };
         let output = generate_containerfile(
@@ -556,6 +562,7 @@ mod tests {
         mf_epel.mirror = Some("https://mirror.corp/epel/".into());
         let manifest = Manifest {
             base: "registry.redhat.io/rhel10/rhel-bootc:10.0".into(),
+            base_type: None,
             fragments: vec![mf_epel],
         };
         let output = generate_containerfile(
@@ -577,6 +584,7 @@ mod tests {
         node_exp.manifest_index = 1;
         let manifest = Manifest {
             base: "registry.redhat.io/rhel10/rhel-bootc:10.0".into(),
+            base_type: None,
             fragments: vec![mf_epel, mf_node],
         };
         let mut dedup = empty_dedup();
@@ -660,6 +668,7 @@ mod tests {
         let (epel, mf_epel) = make_repos_fragment("epel", "aaa111");
         let manifest = Manifest {
             base: "localhost:5000/rhel-bootc:10.0".into(),
+            base_type: None,
             fragments: vec![mf_epel],
         };
         let output = generate_containerfile(
@@ -746,6 +755,7 @@ mod tests {
         let (epel, mf_epel) = make_unpinned_repos_fragment("epel");
         let manifest = Manifest {
             base: "registry.redhat.io/rhel10/rhel-bootc:10.0".into(),
+            base_type: None,
             fragments: vec![mf_epel],
         };
         let output =
@@ -760,6 +770,7 @@ mod tests {
         let (epel, mf_epel) = make_unpinned_repos_fragment("epel");
         let manifest = Manifest {
             base: "registry.redhat.io/rhel10/rhel-bootc:10.0".into(),
+            base_type: None,
             fragments: vec![mf_epel],
         };
         let output =
@@ -774,6 +785,7 @@ mod tests {
         cis.manifest_index = 0;
         let manifest = Manifest {
             base: "registry.redhat.io/rhel10/rhel-bootc:10.0".into(),
+            base_type: None,
             fragments: vec![mf_cis],
         };
         let output =
@@ -806,6 +818,7 @@ mod tests {
         let (epel, mf_epel) = make_repos_fragment("epel", "aaa111");
         let manifest = Manifest {
             base: "registry.redhat.io/rhel10/rhel-bootc:10.0".into(),
+            base_type: None,
             fragments: vec![mf_epel],
         };
         let output = generate_containerfile(
@@ -828,6 +841,7 @@ mod tests {
         let (epel, mf_epel) = make_unpinned_repos_fragment("epel");
         let manifest = Manifest {
             base: "registry.redhat.io/rhel10/rhel-bootc:10.0".into(),
+            base_type: None,
             fragments: vec![mf_epel],
         };
         let output =
@@ -842,6 +856,7 @@ mod tests {
         let (epel, mf_epel) = make_unpinned_repos_fragment("epel");
         let manifest = Manifest {
             base: "registry.redhat.io/rhel10/rhel-bootc:10.0".into(),
+            base_type: None,
             fragments: vec![mf_epel],
         };
         let output =
@@ -856,6 +871,7 @@ mod tests {
         let (epel, mf_epel) = make_unpinned_repos_fragment("epel");
         let manifest = Manifest {
             base: "registry.redhat.io/rhel10/rhel-bootc:10.0".into(),
+            base_type: None,
             fragments: vec![mf_epel],
         };
         let output =
@@ -868,6 +884,7 @@ mod tests {
         let (epel, mf_epel) = make_unpinned_repos_fragment("epel");
         let manifest = Manifest {
             base: "registry.redhat.io/rhel10/rhel-bootc:10.0".into(),
+            base_type: None,
             fragments: vec![mf_epel],
         };
         let output =
@@ -881,6 +898,7 @@ mod tests {
         let (epel, mf_epel) = make_repos_fragment("epel", "aaa111");
         let manifest = Manifest {
             base: "registry.redhat.io/rhel10/rhel-bootc:10.0".into(),
+            base_type: None,
             fragments: vec![mf_epel],
         };
         let output = generate_containerfile(
@@ -906,6 +924,7 @@ mod tests {
         let (epel, mf_epel) = make_unpinned_repos_fragment("epel");
         let manifest = Manifest {
             base: "registry.redhat.io/rhel10/rhel-bootc:10.0".into(),
+            base_type: None,
             fragments: vec![mf_epel],
         };
         let output =
@@ -948,6 +967,7 @@ mod tests {
         };
         let manifest = Manifest {
             base: "registry.redhat.io/rhel10/rhel-bootc:10.0".into(),
+            base_type: None,
             fragments: vec![manifest_frag],
         };
         let output =
@@ -989,6 +1009,7 @@ mod tests {
         ));
         let manifest = Manifest {
             base: "registry.redhat.io/rhel10/rhel-bootc:10.0".into(),
+            base_type: None,
             fragments: vec![mf_cis],
         };
         let output = generate_containerfile(
@@ -1013,6 +1034,7 @@ mod tests {
         cis.manifest_index = 1;
         let manifest = Manifest {
             base: "registry.redhat.io/rhel10/rhel-bootc:10.0".into(),
+            base_type: None,
             fragments: vec![mf_epel, mf_cis],
         };
         let output = generate_containerfile(
@@ -1051,6 +1073,7 @@ mod tests {
         frag_b.manifest_index = 1;
         let manifest = Manifest {
             base: "registry.redhat.io/rhel10/rhel-bootc:10.0".into(),
+            base_type: None,
             fragments: vec![mf_a, mf_b],
         };
         let output = generate_containerfile(
@@ -1076,6 +1099,7 @@ mod tests {
         cis.manifest_index = 0;
         let manifest = Manifest {
             base: "registry.redhat.io/rhel10/rhel-bootc:10.0".into(),
+            base_type: None,
             fragments: vec![mf_cis],
         };
         let output = generate_containerfile(&manifest, &[cis], None, &empty_dedup(), true).unwrap();
@@ -1105,6 +1129,7 @@ mod tests {
         cis.manifest_index = 0;
         let manifest = Manifest {
             base: "registry.redhat.io/rhel10/rhel-bootc:10.0".into(),
+            base_type: None,
             fragments: vec![mf_cis.clone()],
         };
         let standalone = generate_containerfile(
@@ -1149,6 +1174,7 @@ mod tests {
         pinned_cis.manifest_index = 0;
         let pinned_manifest = Manifest {
             base: "registry.redhat.io/rhel10/rhel-bootc:10.0".into(),
+            base_type: None,
             fragments: vec![mf_pinned],
         };
         let pinned_output = generate_containerfile(
@@ -1177,6 +1203,7 @@ mod tests {
         cis.manifest_index = 0;
         let manifest = Manifest {
             base: "registry.redhat.io/rhel10/rhel-bootc:10.0".into(),
+            base_type: None,
             fragments: vec![mf_cis],
         };
         let output = generate_containerfile(
@@ -1207,6 +1234,7 @@ mod tests {
             .push(PathBuf::from("tree/usr/lib/sysctl.d/99-hardening.conf"));
         let unpinned_manifest = Manifest {
             base: "registry.redhat.io/rhel10/rhel-bootc:10.0".into(),
+            base_type: None,
             fragments: vec![mf_unpinned],
         };
         let unpinned_output = generate_containerfile(
@@ -1235,6 +1263,7 @@ mod tests {
         cis.manifest_index = 0;
         let manifest = Manifest {
             base: "registry.redhat.io/rhel10/rhel-bootc:10.0".into(),
+            base_type: None,
             fragments: vec![mf_cis],
         };
 
@@ -1279,6 +1308,7 @@ mod tests {
         ];
         let manifest = Manifest {
             base: "registry.redhat.io/rhel10/rhel-bootc:10.0".into(),
+            base_type: None,
             fragments: vec![mf_cis],
         };
 
@@ -1379,6 +1409,7 @@ mod tests {
 
         let manifest = Manifest {
             base: "registry.redhat.io/rhel10/rhel-bootc:10.0".into(),
+            base_type: None,
             fragments: vec![manifest_frag, manifest_frag2],
         };
         let output = generate_containerfile(
@@ -1413,6 +1444,7 @@ mod tests {
         mf_epel.packages = vec![]; // no manifest-selected packages
         let manifest = Manifest {
             base: "registry.redhat.io/rhel10/rhel-bootc:10.0".into(),
+            base_type: None,
             fragments: vec![mf_epel],
         };
         let output = generate_containerfile(
@@ -1442,6 +1474,7 @@ mod tests {
         mf_epel.packages = vec!["htop".into(), "jq".into()]; // htop duplicated
         let manifest = Manifest {
             base: "registry.redhat.io/rhel10/rhel-bootc:10.0".into(),
+            base_type: None,
             fragments: vec![mf_epel],
         };
         let output = generate_containerfile(
@@ -1479,6 +1512,7 @@ mod tests {
         cis.manifest_index = 1;
         let manifest = Manifest {
             base: "registry.redhat.io/rhel10/rhel-bootc:10.0".into(),
+            base_type: None,
             fragments: vec![mf_epel, mf_cis],
         };
         let output = generate_containerfile(
@@ -1510,6 +1544,7 @@ mod tests {
         epel.manifest_index = 1;
         let manifest = Manifest {
             base: "registry.redhat.io/rhel10/rhel-bootc:10.0".into(),
+            base_type: None,
             fragments: vec![mf_cis, mf_epel],
         };
         // fragments sorted by phase weight: epel (repos=10) before cis (config=30)
@@ -1536,6 +1571,7 @@ mod tests {
         mf_epel.packages = vec!["unrelated-tool".into()];
         let manifest = Manifest {
             base: "registry.redhat.io/rhel10/rhel-bootc:10.0".into(),
+            base_type: None,
             fragments: vec![mf_epel],
         };
         let output = generate_containerfile(
@@ -1562,6 +1598,7 @@ mod tests {
         // manifest selects no packages for postgresql
         let manifest = Manifest {
             base: "registry.redhat.io/rhel10/rhel-bootc:10.0".into(),
+            base_type: None,
             fragments: vec![ManifestFragment {
                 image: "quay.io/test/postgresql:17".into(),
                 packages: vec![],

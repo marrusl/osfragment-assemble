@@ -1,6 +1,13 @@
 use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BaseType {
+    Bootc,
+    Container,
+}
+
 #[derive(Debug, Clone)]
 pub enum FragmentSource {
     Registry { image_ref: String },
@@ -16,6 +23,8 @@ struct ManifestYaml {
     api_version: String,
     kind: String,
     base: Option<String>,
+    #[serde(default, rename = "baseType")]
+    base_type: Option<BaseType>,
     #[serde(default)]
     fragments: Vec<ManifestFragmentYaml>,
 }
@@ -31,6 +40,7 @@ struct ManifestFragmentYaml {
 #[derive(Debug, Clone)]
 pub struct Manifest {
     pub base: String,
+    pub base_type: Option<BaseType>,
     pub fragments: Vec<ManifestFragment>,
 }
 
@@ -74,7 +84,11 @@ pub fn parse_manifest(content: &str) -> Result<Manifest> {
         })
         .collect();
 
-    Ok(Manifest { base, fragments })
+    Ok(Manifest {
+        base,
+        base_type: raw.base_type,
+        fragments,
+    })
 }
 
 #[cfg(test)]
@@ -167,5 +181,52 @@ fragments: []
 "#;
         let result = parse_manifest(bad);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_base_type_bootc() {
+        let yaml = r#"
+apiVersion: bootc.io/v1alpha1
+kind: Composition
+base: registry.redhat.io/rhel10/rhel-bootc:10.0
+baseType: bootc
+fragments:
+  - image: quay.io/test/epel:10
+"#;
+        let manifest = parse_manifest(yaml).unwrap();
+        assert_eq!(manifest.base_type, Some(BaseType::Bootc));
+    }
+
+    #[test]
+    fn parse_base_type_container() {
+        let yaml = r#"
+apiVersion: bootc.io/v1alpha1
+kind: Composition
+base: quay.io/fedora/fedora:41
+baseType: container
+fragments:
+  - image: quay.io/test/epel:10
+"#;
+        let manifest = parse_manifest(yaml).unwrap();
+        assert_eq!(manifest.base_type, Some(BaseType::Container));
+    }
+
+    #[test]
+    fn parse_base_type_absent() {
+        let manifest = parse_manifest(MINIMAL_YAML).unwrap();
+        assert_eq!(manifest.base_type, None);
+    }
+
+    #[test]
+    fn parse_base_type_invalid_rejected() {
+        let yaml = r#"
+apiVersion: bootc.io/v1alpha1
+kind: Composition
+base: quay.io/fedora/fedora:41
+baseType: something-else
+fragments:
+  - image: quay.io/test/epel:10
+"#;
+        assert!(parse_manifest(yaml).is_err());
     }
 }
