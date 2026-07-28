@@ -14,15 +14,13 @@ The design goal for `fragment.toml` is to be the *minimum* metadata that lets re
 
 ### As light as possible: the muxer knows what a unit is, not what it does
 
-The RPM ecosystem already has more than enough ways to declare how a system should be configured — kickstart, osbuild blueprints, rpm-ostree treefiles, Kiwi XML, comps groups, cloud-init, Butane. Adding another one would be a mistake, and `fragment.toml` deliberately isn't one.
+Declarative languages for configuring Linux systems already exist and are mature — kickstart, osbuild blueprints, rpm-ostree treefiles, comps groups, cloud-init, Butane. The format defers to them completely. Configuration is their job, and they do it well.
 
-`fragment.toml` carries `name`, `version`, `description`, `vendor`, `phase`, `conflicts`, and `provides`. Every one of those answers a question about the *unit* — what is this thing, who published it, what version is it, what can it not be combined with, when does it apply relative to other units. None of them answers a question about the *system* — no users, no services, no firewall rules, no partitioning, no file contents. The format has no vocabulary for expressing system state and is not intended to grow one.
+`fragment.toml` has a different job: describing a unit so units can be combined. It carries `name`, `version`, `description`, `vendor`, `phase`, `conflicts`, and `provides`. Every one answers a question about the *unit* — what is this thing, who published it, what version is it, what can it not be combined with, when does it apply relative to other units. None answers a question about the *system* — no users, no services, no firewall rules, no partitioning, no file contents. The format has no vocabulary for expressing system state and does not need one.
 
-The right comparison is an RPM spec header or an OCI annotation set, not a blueprint. `Name:`, `Version:`, `Provides:`, and `Conflicts:` in an RPM spec are not a configuration language either — they are how the packaging system identifies a unit and reasons about combining it with other units. `fragment.toml` occupies exactly that role, which is why its fields map cleanly onto the `io.bootc.fragment.*` OCI annotations: both describe the artifact, not the machine.
+The model is an RPM spec header or an OCI annotation set. `Name:`, `Version:`, `Provides:`, and `Conflicts:` are how a packaging system identifies a unit and reasons about combining it with other units. `fragment.toml` occupies that role, which is why its fields map cleanly onto the `io.bootc.fragment.*` OCI annotations: both describe the artifact, not the machine.
 
 Actual system configuration lives in the payload, in formats that already exist. `tree/` carries config files verbatim. `hooks/` runs real binaries with their own CLIs and config files. A fragment is free to carry a kickstart file, a blueprint, or a cloud-init config and invoke the appropriate interpreter from a hook — the assembly tool never parses those files and holds no opinion about them. Whichever declarative format a shop has standardized on keeps working; a fragment is how it gets packaged, versioned, and distributed.
-
-The practical test for any proposed addition to `fragment.toml`: does it describe the fragment, or does it describe the system the fragment configures? The first belongs here. The second belongs in `tree/` or `hooks/`.
 
 ### And no simpler: below this floor, the concept fails
 
@@ -35,6 +33,37 @@ Each remaining field is load-bearing. Remove any one and reusable units stop wor
 The zero-format alternative already exists and is what this tool is a response to: prose install instructions and copy-paste Containerfile snippets. That approach has no identity, no versions, no ordering guarantees, and no conflict detection. It does not compose, it cannot be updated in place, and every consumer re-derives the same integration by hand. Its failure is the reason for the format.
 
 So the floor is: enough metadata to identify a unit and reason about combining it with other units. Everything above that floor belongs to formats that already exist.
+
+### Packages: what a unit *is* versus what a build *selects*
+
+Packages are the interesting case, because a package list can be either kind of thing depending on who wrote it and why. The format splits them accordingly.
+
+**A fragment forces the packages it needs in order to be itself.** A Grafana fragment that ships a repo definition, default configuration, and service enablement but does not install `grafana` is not a Grafana fragment — it is a pile of parts with a README. Forcing the package makes the fragment a complete, canonical install: a vendor publishes one artifact, a consumer references it, and the result is a working service. That is the whole point of a reusable unit, and it is squarely "what this unit is." It belongs in `fragment.toml`.
+
+**A manifest selects packages ad hoc across repos.** `packages: [htop, tmux, jq]` against a bare EPEL fragment is not describing a unit — it is cherry-picking from a repository that happens to be reachable. Those are dnf arguments, and a list of dnf arguments is not a language. They belong at the composition site, where the person doing the composing decides what this particular image needs.
+
+The two are complementary, and the split falls out of the same test as everything else. A pure content repository like EPEL forces nothing: it provides a repo, and what you take from it is your business. An opinionated fragment forces exactly what it takes to deliver the thing it claims to deliver. Both are expressible, neither requires new syntax, and package lists that define a unit stop being copy-paste instructions in someone's documentation.
+
+Declaring forced packages is optional, and enumeration is never required. A fragment lists the packages it must install to be itself — typically a handful, often one. A fragment that exists to provide a repository lists nothing at all: enumerating a repository's contents would be impossible for anything the size of EPEL and pointless at any size, since dnf resolves names at build time. Manifest selection is likewise unconstrained by what a fragment declares; the muxer orders and batches package installs without needing to know what a repository contains.
+
+Alternative considered: fragment-side *defaults* that the manifest can override, or separate "package set" fragments. Rejected because both relocate the list rather than remove it, and both add a resolution step — precedence rules, override semantics — that the flat split does not need.
+
+### The guardrail: forced packages stay a flat list
+
+Forced packages are a flat list of names. Not a map, not conditionals, no `when:` keys, no per-architecture or per-base-image variants.
+
+This is a hard boundary, and it is worth being precise about why. A flat list is a statement of fact about the unit: these packages are part of what this fragment is. Add conditionals — per-architecture names, per-base-image variants, install-only-if-another-fragment-is-present — and the field acquires an evaluation order and a context to evaluate against. At that point it is a small programming language, and it needs the tooling every language needs.
+
+Hooks already cover this case, and cover it better. A hook is a real executable that can inspect the system and decide. Logic belongs in a language that has logic. A fragment needing different packages on different architectures is either two fragments or a hook — both are clear, and neither asks the format to grow.
+
+Keeping the list flat is what keeps `fragment.toml` readable at a glance, diffable, and mechanically checkable.
+
+### The decision test
+
+Two questions settle whether something belongs in `fragment.toml`:
+
+1. **Does it describe the fragment, or the system the fragment configures?** The first belongs in `fragment.toml`. The second belongs in `tree/` or `hooks/`.
+2. **If it describes the fragment, is it a flat statement of fact, or does it need to be evaluated?** Facts belong in `fragment.toml`. Anything requiring conditions, precedence, or context belongs in a hook.
 
 ## Why no fragment type taxonomy
 

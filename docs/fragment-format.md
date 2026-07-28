@@ -20,7 +20,7 @@ A fragment is a single-layer OCI image with this directory structure under `/fra
 
 ## `fragment.toml` Schema
 
-`fragment.toml` is unit metadata, not a configuration language. Its fields describe the fragment — identity, version, publisher, ordering, and how it combines with other fragments. None of them describe the system the fragment configures. System configuration lives in `tree/` (files, verbatim) and `hooks/` (executables, any language), in whatever formats already exist; the tool never parses that content. See [Design Rationales](rationales.md#why-the-fragment-format-is-as-light-as-possible-and-no-simpler).
+`fragment.toml` is unit metadata. Its fields describe the fragment — identity, version, publisher, ordering, and how it combines with other fragments. System configuration lives in `tree/` (files, verbatim) and `hooks/` (executables, any language), in whatever formats already exist; the tool never parses that content. See [Design Rationales](rationales.md#why-the-fragment-format-is-as-light-as-possible-and-no-simpler).
 
 ```toml
 [fragment]
