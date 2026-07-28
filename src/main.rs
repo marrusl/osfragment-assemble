@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
-use osfragment_assemble::classify::capabilities_for_base_type;
+use osfragment_assemble::classify::{classify_base, capabilities_for_base_type};
 use osfragment_assemble::generator::generate_containerfile;
 use osfragment_assemble::inspect::run_inspect;
 use osfragment_assemble::list::run_list;
@@ -117,8 +117,11 @@ fn main() -> Result<()> {
             eprintln!("Validating composition...");
             let dedup = validate_composition(&manifest, &fragments)?;
 
-            let capabilities = capabilities_for_base_type(
-                manifest.base_type.clone().unwrap_or(BaseType::Bootc),
+            // Classify the base image
+            eprintln!("Classifying base image...");
+            let capabilities = classify_base(
+                &manifest.base,
+                manifest.base_type.as_ref(),
             );
 
             let containerfile = generate_containerfile(
@@ -139,15 +142,16 @@ fn main() -> Result<()> {
                 fragments.len()
             );
 
-            // OCP MachineOSConfig generation
+            // OCP MachineOSConfig generation — always uses bootc capabilities
             if let Some(ocp_path) = &cli.ocp {
+                let ocp_capabilities = capabilities_for_base_type(BaseType::Bootc);
                 let ocp_containerfile = generate_containerfile(
                     &manifest,
                     &fragments,
                     base_digest.as_deref(),
                     &dedup,
                     true,
-                    &capabilities,
+                    &ocp_capabilities,
                 )?;
                 let mosc = generate_machine_os_config(&ocp_containerfile, &cli.pool)?;
                 std::fs::write(ocp_path, &mosc)
