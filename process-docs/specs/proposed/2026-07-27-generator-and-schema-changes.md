@@ -1,11 +1,16 @@
 # Generator and Schema Changes
 
-**Status:** Proposed
+**Status:** Proposed (revised after round 1 review)
 **Date:** 2026-07-27
 
 Consolidates five changes to the generator, the OpenShift emitter, and the
 fragment schema. Each is independent and can land separately. Change 1 fixes a
 defect; the rest are design changes.
+
+One item in change 1 is **open**, not resolved: the `COPY` fallback leaks hook
+bytes into the image and no fix is adopted here. Its scope narrowed during this
+revision, because the verification that gated it returned. See "The `COPY`
+fallback leaks hook bytes" below.
 
 ---
 
@@ -14,9 +19,24 @@ defect; the rest are design changes.
 **What.** Execute hooks via a bind mount instead of copying them in:
 
 ```dockerfile
-RUN --mount=type=bind,from=<fragment>,source=/fragment/hooks,target=/frag-hooks \
-    /frag-hooks/configure.sh
+RUN --mount=type=bind,from=<fragment>,source=/fragment/hooks,target=/frag-hooks,bind-propagation=rshared,z \
+    /frag-hooks/10-configure.sh && /frag-hooks/20-enable.sh
 ```
+
+`bind-propagation=rshared,z` is part of the emitted form, not decoration on the
+example. It mirrors MCO's own on-cluster-build template; see "Two details to
+carry into implementation" below for why, and the acceptance criteria for the
+test that holds it in place.
+
+All hooks belonging to one fragment run in a **single** `RUN --mount`
+instruction, chained with `&&`, which is the chaining the current code already
+produces. One instruction per fragment, not one per hook: the mount lifetime is
+scoped to the instruction, so a per-hook instruction would remount for each hook
+and add instructions to a Containerfile that is character-capped in OCP mode.
+
+Each fragment's mount references its own image, so mount sources are never
+shared across fragments and there is nothing to consolidate. A future
+implementer should not try to collapse them into one mount.
 
 Applies to hooks and any future non-`tree/` payload. `tree/` content keeps being
 copied; that is the delivered payload, not a build input.
@@ -33,35 +53,155 @@ The bind mount is one instruction and one layer, so nothing persists and no
 cleanup is needed. It also removes a failure class: hooks can no longer collide
 in `/tmp`, and nothing leaks when a hook exits nonzero mid-chain.
 
-The fallback is retained for two reasons. `RUN --mount=type=bind,from=` is a
-BuildKit/Buildah extension rather than base Dockerfile, and hand-maintainability
-of the generated Containerfile is a stated design goal. More concretely,
-on-cluster OpenShift builds have **no build context**; the Containerfile is an
-embedded string in a MachineOSConfig. `COPY --from=<registry-ref>` resolves
-there because the builder pulls from the registry; whether a bind mount from a
-registry image resolves in that environment is unverified. Until it is, a
-`COPY`-based path must remain available or the OpenShift output regresses.
+**Why the fallback is retained.** One reason survives, and a second that used to
+be given does not. Both are set out here because the second was load bearing in
+the previous draft and its removal is what changes the design.
 
-**Mode selection.** The user never chooses a mode from knowledge of builder
-internals; the target chooses. Default output emits the bind mount, which
-podman, Buildah, and current Docker all accept. `--ocp` selects the fallback
-form automatically while the MachineOSConfig verification below is open. An
-explicit opt-in flag forces the fallback for builders that reject `RUN --mount`;
-that failure is immediate and legible (the builder errors on the instruction),
-so the flag is an escape hatch discovered at the point of failure, not a
-decision required up front. Document the flag next to that error case in the
-README so the builder error leads to it.
+The surviving reason: `RUN --mount=type=bind,from=` is a BuildKit/Buildah
+extension rather than base Dockerfile, and hand-maintainability of the generated
+Containerfile is a stated design goal. A user building with arbitrary tooling
+may hit a builder that rejects the instruction.
+
+The reason that does not survive is on-cluster OpenShift builds, and it needs
+stating precisely because it is easy to overstate. `RUN --mount=type=bind` takes a `from=`
+with three distinct sources:
+
+- `from=context`, which requires a build context holding the user's files.
+- `from=<registry image ref>`, which the builder pulls.
+- `from=<named build stage>`, which resolves inside the Containerfile.
+
+This tool generates only the second and third forms. It never generates
+`from=context`.
+
+That distinction matters because the usual objection to on-cluster builds does
+not apply to the forms emitted here. An on-cluster build does have a build
+context: MCO hands the builder the Containerfile from the MachineOSConfig along
+with a context directory. What it lacks is a build context **the user
+controls**, so there is nowhere to place files for `from=context` to reach.
+
+Registry resolution inside the build pod is likewise not the open part. The OCP
+output already depends on it: `COPY --from=<registry ref>` is emitted for every
+fragment carrying content, and with `--pin-digests` the output additionally
+emits `FROM <fragment ref> AS frag-<name>` stages ahead of `FROM configs AS
+final`. If registry pulls did not resolve in the build pod, the OCP path would
+not work at all today.
+
+What was genuinely unverified was narrower: whether the builder MCO runs accepts
+the `RUN --mount` instruction at all, and whether the mount succeeds inside that
+pod given its security context, mount permissions, and builder invocation.
+
+**That question has now been answered: it works.** MCO's own on-cluster-build
+Containerfile template already contains this exact instruction form, with
+`from=` pointing at a registry image pullspec:
+
+```dockerfile
+RUN --mount=type=bind,from={{.ExtensionsImage}},source=/,target=/tmp/mco-extensions/os-extensions-content,bind-propagation=rshared,z \
+    bash <<'EOF'
+```
+
+(`openshift/machine-config-operator`,
+`pkg/controller/build/buildrequest/assets/Containerfile.on-cluster-build-template`.)
+It is rendered into the same Containerfile that carries the user's
+`containerFile` content, passed through the same validator, and executed by the
+same `buildah bud` invocation in the same pod, on every extensions-enabled OCL
+build. Buildah routes `COPY --from=<image>` and `RUN --mount=type=bind,from=<image>`
+through the same image-rootfs resolution and the same `--authfile`, so the mount
+form requires strictly nothing that the `COPY` form this tool already emits does
+not already require.
+
+**Consequence: the OCP path takes the bind mount like every other path, and the
+fallback is not needed there.** The fallback survives only as a flag-selected
+escape hatch for the generic path, where the builder is unknown and
+`RUN --mount=type=bind,from=` is a BuildKit/Buildah extension rather than base
+Dockerfile. That first reason is the only one left standing.
+
+This reverses the rule that round 1 review asked for (MachineOSConfig output
+implies the fallback). That recommendation was correct given what was known at
+the time; the verification removed its premise. The OCP path is in fact the one
+path where the builder is *known* to be a buildah past the required version,
+which makes it the safest target for `RUN --mount`, not the riskiest.
+
+Two details to carry into implementation:
+
+- **Mirror MCO's mount options** (`bind-propagation=rshared,z`) rather than
+  emitting the bare form. MCO presumably added them for a reason and matching a
+  production template costs nothing.
+- MCO's production evidence covers `source=/`. This tool mounts a subdirectory
+  (`source=/fragment/hooks`). Subdirectory sources are standard buildah with no
+  special-casing, but the evidence is one step less direct there.
+
+**Mode selection.** All output, standalone and MachineOSConfig alike, emits the
+bind mount by default. An explicit opt-in flag forces the fallback for builders
+that reject `RUN --mount`; that failure is immediate and legible (the builder
+errors on the instruction), so the flag is an escape hatch discovered at the
+point of failure, not a decision required up front. Document the flag next to
+that error case in the README so the builder error leads to it.
+
+The MachineOSConfig output does **not** select the fallback and has no
+target-driven mode of its own. Note that `--ocp <path>` adds a second output
+artifact rather than switching modes; the standalone Containerfile is still
+written by the same invocation, and both now carry the same hook emission.
+
+**Open decision: the `COPY` fallback leaks hook bytes.**
+
+The fallback is **size-correct but not layer-correct**. The `rm -rf` writes a
+whiteout, so the files are absent from the mounted filesystem and absent from
+what a deployed bootc node sees. The bytes themselves remain in the `COPY`
+layer and are extractable with `podman save` or `skopeo copy`.
+
+No single-instruction fix exists. `COPY` is a build directive, not a shell
+command; it cannot be combined with `rm -rf` in one instruction, and it always
+produces its own layer. An earlier draft of this spec claimed the fallback could
+fold the `rm -rf` into the `COPY` and become correct. That claim is withdrawn;
+the operation it describes does not exist.
+
+The options considered and their status:
+
+- **Multi-stage variant.** Copy hooks into a disposable stage, then
+  `RUN --mount=type=bind,from=<stage>` in the final stage. This does eliminate
+  the leak, but it depends on `RUN --mount`, which is the exact instruction the
+  fallback exists to avoid. A builder that rejects the instruction rejects this
+  too, so it cannot fix the one path the fallback still serves. (It could not
+  have rescued the OCP path either, back when the fallback was mandatory there.)
+- **`--squash`.** Lossy, non-standard, and contrary to the hand-maintainable
+  Containerfile goal. Rejected.
+- **Accept the leak as a documented limitation of the fallback path.** Hooks are
+  operational scripts, not secrets, so the impact is pull size at fleet scale
+  plus disclosure of a fragment's implementation logic (relevant for
+  security-oriented fragments such as `cis-hardening`). This remains a
+  candidate. It is **not adopted here.**
+
+**What the verification changed.** This question was gated on whether
+`RUN --mount=type=bind,from=<registry image>` works inside an on-cluster
+MachineOSConfig build. It does (see "Why the fallback is retained" above), so
+the fallback is no longer emitted on the OCP path and the leak disappears from
+every path the tool selects on its own.
+
+**What remains open.** The leak is now confined to the opt-in fallback flag, on
+the generic path, where the user has explicitly asked for it because their
+builder rejects `RUN --mount`. Whether to accept it there as a documented
+limitation, the last surviving candidate above, is a decision that has not been
+made and is not made here. It is a materially smaller decision than it was: it
+no longer affects any default output, and it no longer silently ships hook bytes
+in every OCL-built image.
 
 **Acceptance.**
 - Default output executes hooks via `RUN --mount`, with no `COPY` of `hooks/`.
-- A test asserts `hooks/` never appears in a `COPY` instruction in default mode.
-- Fallback mode reproduces the current form, with the `rm -rf` folded into the
-  same instruction as the `COPY` so it is correct in that mode too.
-- `--ocp` output uses the fallback form with no flag required, until the
-  MachineOSConfig verification below flips it.
-- Verify whether `--mount=type=bind,from=<registry-image>` works in a
-  MachineOSConfig build pod; record the result. This gates whether the fallback
-  is permanent or transitional.
+- **MachineOSConfig output does the same.** A test asserts `hooks/` never appears
+  in a `COPY` instruction in either standalone or `--ocp` output, and that the
+  two paths do not diverge in hook emission.
+- All hooks belonging to one fragment execute in a single `RUN --mount`
+  instruction, preserving the current `&&` chaining.
+- Emitted mounts carry `bind-propagation=rshared,z`, matching MCO's own
+  on-cluster-build template.
+- The fallback is reachable only through the explicit opt-in flag. No target,
+  mode, or output artifact selects it automatically.
+- Fallback mode emits the current two-instruction form unchanged: `COPY` of the
+  hooks directory, then a chained `RUN` ending in `rm -rf`.
+- Neither this spec, the generated Containerfile, nor the docs claim that the
+  fallback eliminates the leaked bytes. Documentation states the tradeoff
+  explicitly: filesystem-correct, not layer-correct, and scoped to a flag the
+  user opted into.
 
 ---
 
@@ -75,8 +215,10 @@ to `v1`:
 | `.../v1alpha1` | `.../v1` |
 | `spec.buildInputs.{...}` / `spec.buildOutputs.{...}` | flat: `spec.containerFile`, `spec.imageBuilder`, `spec.renderedImagePushSpec` |
 | `imageBuilderType: PodImageBuilder` | `Job` (the only enum value) |
-| `spec.buildInputs.renderedImagePushspec` | `spec.renderedImagePushSpec` |
+| `spec.buildInputs.renderedImagePushspec` | `spec.renderedImagePushSpec` (casing change, `s` to `S`) |
+| `spec.buildInputs.renderedImagePushSecret` | `spec.renderedImagePushSecret` (required field, path change only) |
 | `spec.buildOutputs.currentImagePullSecret` | removed from spec |
+| `containerfileArch: noarch` | `containerfileArch: NoArch` (casing change, see below) |
 
 **Why.** The emitted YAML is rejected by current clusters. The `v1alpha1` type no
 longer exists upstream, and `PodImageBuilder` is not a valid builder type.
@@ -86,18 +228,55 @@ limit on `containerFile.content` is real and enforced, and setting
 `metadata.name == spec.machineConfigPool.name` satisfies a CEL validation rule
 that would otherwise reject the object.
 
-`containerFile` in v1 is a list indexed by architecture with a maximum of 4
-entries. The emitter currently hardcodes a single `noarch` entry; revisit
-against the arch-indexed model.
+### `containerFile` shape and the `NoArch` casing
+
+`containerFile` in v1 is a list keyed by architecture:
+
+```yaml
+spec:
+  containerFile:
+    - containerfileArch: NoArch
+      content: |
+        ...
+```
+
+Constraints on the field: `MaxItems=4`, `MinItems=0` (the field is optional, so
+a MachineOSConfig without container file content is valid; this tool always has
+content and always emits it), `listType=map` keyed on `containerfileArch`, and
+`MaxLength=4096` on `content`.
+
+The `containerfileArch` enum values are **PascalCase**: `ARM64`, `AMD64`,
+`PPC64LE`, `S390X`, `NoArch`, defaulting to `NoArch`. The current emitter writes
+lowercase `noarch`, which the v1 API rejects. This is a silent-looking casing
+change that breaks validation, so it gets its own acceptance criterion.
+
+The single-entry approach is correct and does not change. This tool generates
+one architecture-agnostic Containerfile, and `NoArch` is exactly that meaning.
+Per-architecture container files are out of scope.
+
+### `baseImagePullSecret`
+
+v1 adds `spec.baseImagePullSecret` (optional; defaults to the cluster-wide pull
+secret). It is **not emitted**. The generated MachineOSConfig is a template the
+user customizes, and the cluster-wide default is the right behaviour for one.
+Recorded here so it is not rediscovered mid-implementation and mistaken for a
+gap.
 
 **Acceptance.**
 - Output validates against the v1 schema.
 - Tests assert v1 field names, the `Job` builder type, and the name-matching rule.
+- A test asserts `containerfileArch: NoArch` exactly, in PascalCase.
+- `renderedImagePushSecret` is emitted at `spec.renderedImagePushSecret`.
+- `baseImagePullSecret` is not emitted.
 - The 4096-character check is retained.
 
-**Open question for review.** If `v1alpha1` was a deliberate choice targeting an
-older cluster, this becomes a documentation change instead: state the supported
-version and keep the shape.
+**Size ceiling cross-reference.** Round 1 flagged that the `COPY` fallback costs
+more characters per fragment than the bind-mount form, tightening the practical
+fragment ceiling under the 4096-character limit. Since the OCP path now emits
+the bind mount (change 1), this moves from a cost to a modest gain: replacing a
+per-fragment `COPY` plus `RUN` pair with a single `RUN --mount` should buy some
+headroom against the cap. Worth measuring during implementation, not worth
+assuming. See "The MachineOSConfig size ceiling" under Out of scope.
 
 ---
 
@@ -157,21 +336,93 @@ So the field is inert: it advertises, and nothing acts on the advertisement.
 - **Flat list only.** No maps, conditionals, `when:` keys, or per-architecture
   variants. Conditional logic belongs in a hook.
 
+### Collection order and deduplication
+
+The current code builds one list by iterating `manifest.fragments`, flattening
+each entry's `packages`, and filtering through a `HashSet`, so the effective
+rule today is first-seen wins in manifest order. The merged version keeps that
+shape:
+
+- **Order.** All fragment-declared `required` packages first, in the resolved
+  fragment order (phase weight, then manifest order), followed by all
+  manifest-selected `packages` in manifest order.
+- **Dedup key.** Exact string match, the current `HashSet` behaviour. No
+  normalization, no version or glob awareness. `postgresql17` and
+  `postgresql17-server` are distinct names, as dnf sees them.
+- **First-seen wins.** A package declared `required` by a fragment and also
+  selected in the manifest appears once, in the required position.
+- **Cross-fragment duplicates dedup silently.** Two fragments both requiring the
+  same package is normal (a shared dependency), dnf treats a repeated name as
+  one install, and a warning here would fire on correct configurations. Not a
+  validation error, not a warning.
+- Output remains a single batched `dnf install`.
+
+### OCI annotation
+
+The annotation key `io.bootc.fragment.packages.available` is **renamed** to
+`io.bootc.fragment.packages.required`. Format is unchanged: a JSON array of
+package name strings. The annotation key list in `docs/fragment-format.md` and
+the `podman build --annotation` example there both change.
+
+The old key is **not** read, and no alias is kept. `available` and `required`
+mean different things, so silently reading one as the other would turn a
+catalogue listing into a forced install.
+
+Consequence, stated so it is not a surprise: a fragment image built before the
+rename, carrying only the old annotation, shows an empty package list under
+`inspect` and `list`. That is acceptable because the annotation fast path is
+metadata-only and used exclusively for those display commands. Assembly always
+parses the in-layer `fragment.toml` for the authoritative fragment, so a stale
+annotation can never affect a generated Containerfile.
+
+### Migration hazard: `available` must not parse silently
+
+`FragmentPackages` derives `Deserialize` without `#[serde(deny_unknown_fields)]`.
+If `available` is simply deleted and `required` added, an existing
+`fragment.toml` that still declares `available = ["grafana"]` parses
+successfully into an empty `required` list. The fragment stops installing
+anything and its author gets no error and no warning.
+
+**Resolution:** keep `available` in the deserialization struct as a rejected
+key. Parse it into an `Option<Vec<String>>` and fail at
+`parse_fragment_toml` with a message naming the rename, for example:
+
+```
+fragment.toml: field `available` has been renamed to `required`
+```
+
+Chosen over `#[serde(deny_unknown_fields)]` because serde's error names the
+offending field but cannot mention the rename, and the rename is the thing the
+author needs to be told. `deny_unknown_fields` also changes behaviour for every
+other unknown key in the same struct, which is a wider change than this
+migration needs.
+
 ### Migration
 
 Seven of eight example fragments declare `available`; `cis-hardening` does not.
-They split cleanly along the new distinction, which is a useful check on it:
 
-- **Force what they declare**: `grafana`, `nginx`, `node-exporter`,
-  `tailscale`. Single-package, opinionated. `available` becomes `required`.
-- **Force nothing**: `epel` (`htop`, `tmux`, …) and `hashicorp` (`vault`,
+- **Force what they declare**: `grafana`, `nginx`, `node-exporter`, `tailscale`,
+  and `postgresql`. `available` becomes `required`.
+  - `postgresql` forces `postgresql17-server` and `postgresql17`. It is an
+    opinionated fragment that installs PostgreSQL, not a bare content repo. The
+    `postgresql16-server` and `postgresql16` entries in its current `available`
+    list are dropped; a consumer wanting 16 selects it in the manifest.
+- **Force nothing**: `epel` (`htop`, `tmux`, ...) and `hashicorp` (`vault`,
   `consul`, `nomad`, `terraform`) are catalogues of content repositories. The
   list is dropped; consumers select in the manifest, as they already do.
-- **Needs a decision**: `postgresql` lists `postgresql17-server`,
-  `postgresql17`, and others, and is a `repos`-phase fragment. Either it forces
-  the server package and becomes opinionated, or it forces nothing and stays a
-  content repo. Recommend forcing nothing, to keep `repos`-phase fragments
-  uniformly bare.
+
+There is no rule that `repos`-phase fragments are uniformly bare. `postgresql`
+is a `repos`-phase fragment that forces packages, and an earlier draft's
+generalization to the contrary is withdrawn.
+
+**`postgresql` keeps `phase = "repos"`.** Phase governs the ordering and the
+permitted content of a fragment's own `tree/` payload: a `repos` fragment must
+carry only repo files and no hooks, which `validate_phase_consistency` enforces.
+Forced packages are not fragment payload. They feed the shared batched
+`dnf install` that runs after every fragment's repo files have landed, so
+declaring `required` says nothing about what the fragment carries and does not
+require a phase change. A phase change would only be warranted if `postgresql`
+gained configuration files or hooks.
 
 Also update: `fragment.toml` parsing and the `Fragment` struct, the annotation
 read path in `loader.rs`, `inspect` output, the annotation key list in
@@ -180,9 +431,18 @@ read path in `loader.rs`, `inspect` output, the annotation key list in
 **Acceptance.**
 - A fragment declaring `required` produces those packages in the batched install
   with no manifest entry.
-- Forced and selected packages deduplicate against each other.
+- Forced and selected packages deduplicate against each other, exact-string,
+  first-seen wins, required before selected.
+- Two fragments requiring the same package produce one entry and no warning.
 - A manifest may select a package no fragment declares, and this is not an error.
-- `available` no longer parses; example fragments and docs updated.
+- `postgresql` emits `postgresql17-server` and `postgresql17` with no manifest
+  entry, and keeps `phase = "repos"`.
+- `available` in a `fragment.toml` is a hard parse error whose message names the
+  rename to `required`.
+- The OCI annotation is emitted and read as
+  `io.bootc.fragment.packages.required`; the old key is not read anywhere.
+- Example fragments and docs updated, including the annotation key list and the
+  `podman build --annotation` example.
 
 ---
 
@@ -197,25 +457,92 @@ hook execution) works on any RPM base. These two do not: `bootc container lint`
 fails on a base without bootc, and `preset-all` is meaningless without systemd.
 Making them conditional widens the tool to ordinary container images at low cost.
 
-**Design question for review.** The phase table currently hardcodes tool-managed
-steps. Making them conditional means the phase system grows a notion of which
-tool-managed steps apply to a given base. Worth designing rather than adding a
-boolean; this change is proposed, not settled.
+### How the base is classified
+
+Two signals, checked in this order:
+
+1. **Manifest override.** An optional manifest-level field, `baseType: bootc |
+   container`. When present it decides, and no image inspection happens. This
+   covers unlabeled custom bases, air-gapped or unauthenticated environments,
+   and testing.
+2. **The `containers.bootc` image label.** Read from the base image's config
+   labels via `skopeo inspect`, which reads metadata only and pulls no layers.
+   Upstream bootc base images (CentOS Stream, Fedora, RHEL) carry it. Any
+   non-empty value classifies the base as bootc; the value itself is not
+   interpreted.
+
+Image name matching is explicitly **not** a signal.
+
+**When the label is absent, the default is `bootc`.** Two reasons:
+
+- It preserves current output for every existing manifest. Both steps are
+  emitted unconditionally today, so any other default would change behaviour for
+  users who have changed nothing.
+- It is the safer of the two failure directions. Misclassifying a plain
+  container base as bootc fails loudly and immediately at build time, when
+  `bootc container lint` runs on an image without bootc. Misclassifying a bootc
+  base as a plain container fails silently: `systemctl preset-all` is dropped,
+  the image builds clean, and the fragment-shipped units are simply not enabled.
+  That failure surfaces on the deployed node. A loud build-time failure with a
+  one-field fix beats a silent runtime one.
+
+**When the label lookup fails** (registry unreachable, authentication missing,
+`skopeo` error), classify as `bootc`, warn on stderr naming the base image and
+the reason, and continue. Classification is not worth turning into a hard
+network dependency, and the manifest override is the deterministic path for
+anyone who needs one.
+
+**OCP output is always bootc.** MachineOSConfig exists only to build OpenShift
+node OS images, and those are bootc by definition. The OCP output emits both
+steps unconditionally and performs no base inspection or classification. The
+conditional logic applies to the standalone Containerfile only. This keeps the
+OCP code path free of a branch that has exactly one possible outcome.
+
+### Phase table direction
+
+Rather than a `is_bootc` boolean threaded through the generator, tool-managed
+steps in the phase table carry a `requires` capability: `systemctl preset-all`
+requires `systemd`, `bootc container lint` requires `bootc`. Classification
+produces a capability set, and a step is emitted when its requirement is in the
+set.
+
+Only one detector exists today, so the mapping is small and deliberately so: a
+bootc base yields `{bootc, systemd}`, a plain container base yields the empty
+set. Systemd presence on a non-bootc base is not detected and is not assumed;
+the empty set is the conservative answer, and `preset-all` is a no-op worth
+skipping rather than a step worth guessing at. The `requires` field is the
+extension point for the day a second real detector exists (selinux, podman), not
+an abstraction to build out now.
 
 **Acceptance.**
-- A non-bootc base produces a Containerfile with neither step.
-- A bootc base is unchanged from current output.
-- How the base is classified is explicit and documented, not inferred from the
-  image name.
+- A base classified as non-bootc produces a Containerfile with neither step.
+- A base classified as bootc is unchanged from current output.
+- The classification signals, their order, and the default are documented in
+  `docs/` and the README.
+- A base image with no `containers.bootc` label and no manifest override is
+  classified bootc. Covered by a test.
+- The manifest `baseType` override wins over the label. Covered by a test.
+- A failed label lookup warns and classifies bootc, and does not fail assembly.
+- OCP output emits both steps regardless of classification, with no inspection
+  performed. Covered by a test.
+- No classification path inspects the image name.
 
 ---
 
 ## 5. Documentation
 
 Rationale for the packages split and the flat-list guardrail is already in
-`docs/rationales.md`. Schema changes in change 3 require corresponding updates
-to `docs/fragment-format.md` (`fragment.toml` schema, field constraints, and the
-OCI annotation key list).
+`docs/rationales.md`. The following need updating alongside the code:
+
+- `docs/fragment-format.md`: the `fragment.toml` schema (`required` replaces
+  `available`), field constraints, the OCI annotation key list, and the
+  `podman build --annotation` example.
+- Manifest documentation: the new `baseType` field, its values, and its default.
+- Base classification: which signals are checked, in what order, and what
+  happens when the label is absent or the lookup fails.
+- Hook execution: the bind-mount default, the fallback flag documented next to
+  the builder error that leads a user to it, and an explicit statement that the
+  fallback is filesystem-correct but not layer-correct.
 
 ---
 
@@ -226,8 +553,18 @@ Deferred deliberately; not blocked by anything here.
 - **Kickstart and interpreter support of any kind**: fully deferred, including
   carrying config files as fragment payload and any interpreter packaging.
 - **The MachineOSConfig size ceiling.** The 4096-character limit caps on-cluster
-  builds at roughly six to eight fragments. A bundle-image approach would fix it;
-  it needs its own design.
+  builds at roughly six to eight fragments. A bundle-image approach would fix
+  it; it needs its own design.
+- **Parameterizing the MachineOSConfig placeholders.** The emitter hardcodes
+  `REPLACE_WITH_SECRET_NAME` and an internal registry URL for
+  `renderedImagePushSpec`. Turning these into CLI parameters is a CLI surface
+  change with its own design; the generated object is a template the user edits
+  today, and v1 migration does not change that.
+- **Per-architecture `containerFile` entries.** `NoArch` is correct while the
+  tool generates one architecture-agnostic Containerfile.
+- **A second capability detector** for the change 4 phase table (selinux,
+  podman, systemd on non-bootc bases). The `requires` field is the extension
+  point; no second detector is proposed until a step needs one.
 - **Build-time-only repo files.** Repo definitions currently always persist into
   the image, with no way to mark one as needed only during the build.
 - **TOML/YAML unification** across `fragment.toml` and the manifest.
