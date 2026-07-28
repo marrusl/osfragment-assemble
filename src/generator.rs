@@ -1154,4 +1154,63 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn bind_mount_uses_same_resolution_as_tree_copy() {
+        // Pinned: both tree COPY and hook mount should use named stage
+        let (mut cis, mf_cis) = make_config_fragment("cis", "bbb222");
+        cis.manifest_index = 0;
+        let manifest = Manifest {
+            base: "registry.redhat.io/rhel10/rhel-bootc:10.0".into(),
+            fragments: vec![mf_cis],
+        };
+        let output = generate_containerfile(
+            &manifest,
+            &[cis],
+            Some("sha256:base123"),
+            &empty_dedup(),
+            false,
+        )
+        .unwrap();
+        assert!(
+            output.contains("COPY --from=frag-cis /fragment/tree/ /"),
+            "expected named stage in tree COPY:\n{}",
+            output
+        );
+        assert!(
+            output.contains("RUN --mount=type=bind,from=frag-cis,"),
+            "expected named stage in hook mount:\n{}",
+            output
+        );
+
+        // Unpinned: both tree COPY and hook mount should use inline image ref
+        let (mut unpinned_cis, mf_unpinned) = make_unpinned_config_fragment("cis");
+        unpinned_cis.manifest_index = 0;
+        // Give it a tree path so it generates a tree COPY
+        unpinned_cis
+            .tree_paths
+            .push(PathBuf::from("tree/usr/lib/sysctl.d/99-hardening.conf"));
+        let unpinned_manifest = Manifest {
+            base: "registry.redhat.io/rhel10/rhel-bootc:10.0".into(),
+            fragments: vec![mf_unpinned],
+        };
+        let unpinned_output = generate_containerfile(
+            &unpinned_manifest,
+            &[unpinned_cis],
+            None,
+            &empty_dedup(),
+            false,
+        )
+        .unwrap();
+        assert!(
+            unpinned_output.contains("COPY --from=quay.io/test/cis:2.1 /fragment/tree/ /"),
+            "expected inline ref in tree COPY:\n{}",
+            unpinned_output
+        );
+        assert!(
+            unpinned_output.contains("RUN --mount=type=bind,from=quay.io/test/cis:2.1,"),
+            "expected inline ref in hook mount:\n{}",
+            unpinned_output
+        );
+    }
 }
