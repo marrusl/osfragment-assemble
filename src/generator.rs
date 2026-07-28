@@ -754,7 +754,7 @@ mod tests {
     }
 
     #[test]
-    fn unpinned_hooks_use_inline_copy_refs() {
+    fn unpinned_hooks_use_bind_mount() {
         let (mut cis, mf_cis) = make_unpinned_config_fragment("cis");
         cis.manifest_index = 0;
         let manifest = Manifest {
@@ -763,11 +763,27 @@ mod tests {
         };
         let output =
             generate_containerfile(&manifest, &[cis], None, &empty_dedup(), false).unwrap();
-        assert!(output.contains(
-            "COPY --from=quay.io/test/cis:2.1 /fragment/hooks/ /tmp/frag-cis-hooks/"
-        ));
-        assert!(output
-            .contains("RUN /tmp/frag-cis-hooks/configure.sh && rm -rf /tmp/frag-cis-hooks"));
+        assert!(
+            output.contains("RUN --mount=type=bind,from=quay.io/test/cis:2.1,source=/fragment/hooks,target=/frag-hooks,bind-propagation=rshared,z"),
+            "expected bind mount with inline image ref:\n{}",
+            output
+        );
+        assert!(
+            output.contains("/frag-hooks/configure.sh"),
+            "expected hook execution via mount target:\n{}",
+            output
+        );
+        // No COPY of hooks, no rm -rf cleanup
+        assert!(
+            !output.contains("COPY --from=quay.io/test/cis:2.1 /fragment/hooks/"),
+            "COPY of hooks must not appear:\n{}",
+            output
+        );
+        assert!(
+            !output.contains("rm -rf"),
+            "rm -rf cleanup must not appear:\n{}",
+            output
+        );
     }
 
     #[test]
@@ -922,23 +938,31 @@ mod tests {
         let output =
             generate_containerfile(&manifest, &[loaded], None, &empty_dedup(), false).unwrap();
 
-        // Verify all three hooks are present in the RUN command
-        assert!(output.contains("/tmp/frag-multi-hook-hooks/01-first.bash"));
-        assert!(output.contains("/tmp/frag-multi-hook-hooks/02-second.sh"));
-        assert!(output.contains("/tmp/frag-multi-hook-hooks/03-final.sh"));
+        // Verify all three hooks are present via the mount target path
+        assert!(output.contains("/frag-hooks/01-first.bash"));
+        assert!(output.contains("/frag-hooks/02-second.sh"));
+        assert!(output.contains("/frag-hooks/03-final.sh"));
 
         // Verify alphabetical ordering by checking positions
         let first_pos = output
-            .find("/tmp/frag-multi-hook-hooks/01-first.bash")
+            .find("/frag-hooks/01-first.bash")
             .unwrap();
         let second_pos = output
-            .find("/tmp/frag-multi-hook-hooks/02-second.sh")
+            .find("/frag-hooks/02-second.sh")
             .unwrap();
         let third_pos = output
-            .find("/tmp/frag-multi-hook-hooks/03-final.sh")
+            .find("/frag-hooks/03-final.sh")
             .unwrap();
         assert!(first_pos < second_pos);
         assert!(second_pos < third_pos);
+
+        // Verify single RUN --mount instruction (not per-hook)
+        let mount_count = output.matches("RUN --mount=type=bind").count();
+        assert_eq!(
+            mount_count, 1,
+            "expected exactly one RUN --mount instruction:\n{}",
+            output
+        );
     }
 
     #[test]
@@ -984,7 +1008,7 @@ mod tests {
             false,
         )
         .unwrap();
-        // Verify full content ordering: repo COPY -> dnf install -> config COPY -> hook COPY
+        // Verify full content ordering: repo COPY -> dnf install -> config COPY -> hook RUN --mount
         let repo_copy = output
             .find("COPY --from=frag-epel /fragment/tree/etc/yum.repos.d/")
             .expect("missing repo COPY");
@@ -992,12 +1016,12 @@ mod tests {
         let config_copy = output
             .find("COPY --from=frag-cis /fragment/tree/ /")
             .expect("missing config COPY");
-        let hook_copy = output
-            .find("COPY --from=frag-cis /fragment/hooks/")
-            .expect("missing hook COPY");
+        let hook_mount = output
+            .find("RUN --mount=type=bind,from=frag-cis")
+            .expect("missing hook RUN --mount");
         assert!(repo_copy < dnf_install);
         assert!(dnf_install < config_copy);
-        assert!(config_copy < hook_copy);
+        assert!(config_copy < hook_mount);
     }
 
     #[test]
@@ -1032,7 +1056,7 @@ mod tests {
     }
 
     #[test]
-    fn ocp_hooks_without_section_comments() {
+    fn ocp_hooks_use_bind_mount() {
         let (mut cis, mf_cis) = make_unpinned_config_fragment("cis");
         cis.manifest_index = 0;
         let manifest = Manifest {
@@ -1040,14 +1064,14 @@ mod tests {
             fragments: vec![mf_cis],
         };
         let output = generate_containerfile(&manifest, &[cis], None, &empty_dedup(), true).unwrap();
-        // Hooks should appear in OCP output
+        // Hooks should use bind mount in OCP output
         assert!(
-            output.contains("/fragment/hooks/"),
-            "expected hook COPY in OCP output:\n{}",
+            output.contains("RUN --mount=type=bind"),
+            "expected RUN --mount in OCP output:\n{}",
             output
         );
         assert!(
-            output.contains("configure.sh"),
+            output.contains("/frag-hooks/configure.sh"),
             "expected hook execution in OCP output:\n{}",
             output
         );
