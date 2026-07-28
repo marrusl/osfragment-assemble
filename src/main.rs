@@ -2,13 +2,14 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
+use osfragment_assemble::classify::capabilities_for_base_type;
 use osfragment_assemble::generator::generate_containerfile;
 use osfragment_assemble::inspect::run_inspect;
 use osfragment_assemble::list::run_list;
 use osfragment_assemble::loader::{
     load_registry_fragment, load_registry_fragment_metadata_only, resolve_digest,
 };
-use osfragment_assemble::manifest::parse_manifest;
+use osfragment_assemble::manifest::{parse_manifest, BaseType};
 use osfragment_assemble::ocp::generate_machine_os_config;
 use osfragment_assemble::validate::validate_composition;
 
@@ -116,12 +117,17 @@ fn main() -> Result<()> {
             eprintln!("Validating composition...");
             let dedup = validate_composition(&manifest, &fragments)?;
 
+            let capabilities = capabilities_for_base_type(
+                manifest.base_type.clone().unwrap_or(BaseType::Bootc),
+            );
+
             let containerfile = generate_containerfile(
                 &manifest,
                 &fragments,
                 base_digest.as_deref(),
                 &dedup,
                 false,
+                &capabilities,
             )?;
 
             std::fs::write(&cli.output, &containerfile)
@@ -141,6 +147,7 @@ fn main() -> Result<()> {
                     base_digest.as_deref(),
                     &dedup,
                     true,
+                    &capabilities,
                 )?;
                 let mosc = generate_machine_os_config(&ocp_containerfile, &cli.pool)?;
                 std::fs::write(ocp_path, &mosc)

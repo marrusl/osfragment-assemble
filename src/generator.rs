@@ -1,6 +1,7 @@
 use anyhow::Result;
 use std::fmt::Write;
 
+use crate::classify::{Capability, CapabilitySet};
 use crate::fragment::is_repo_path;
 use crate::loader::LoadedFragment;
 use crate::manifest::{FragmentSource, Manifest};
@@ -46,6 +47,7 @@ pub fn generate_containerfile(
     base_digest: Option<&str>,
     _dedup: &DeduplicationResult,
     ocp: bool,
+    capabilities: &CapabilitySet,
 ) -> Result<String> {
     let mut out = String::new();
     let use_named_stages = fragments.iter().any(|f| f.resolved_digest.is_some());
@@ -323,23 +325,27 @@ pub fn generate_containerfile(
         }
     }
 
-    // Phase: preset-apply (35)
-    if !ocp {
-        writeln!(out, "# Apply systemd presets from fragments")?;
-    }
-    writeln!(
-        out,
-        "RUN systemctl preset-all --preset-mode=enable-only 2>/dev/null || true"
-    )?;
-    if !ocp {
-        writeln!(out)?;
+    // Phase: preset-apply (35) — requires systemd capability
+    if capabilities.contains(&Capability::Systemd) {
+        if !ocp {
+            writeln!(out, "# Apply systemd presets from fragments")?;
+        }
+        writeln!(
+            out,
+            "RUN systemctl preset-all --preset-mode=enable-only 2>/dev/null || true"
+        )?;
+        if !ocp {
+            writeln!(out)?;
+        }
     }
 
-    // Phase: validation (90)
-    if !ocp {
-        writeln!(out, "# --- Phase: validation (90) ---")?;
+    // Phase: validation (90) — requires bootc capability
+    if capabilities.contains(&Capability::Bootc) {
+        if !ocp {
+            writeln!(out, "# --- Phase: validation (90) ---")?;
+        }
+        writeln!(out, "RUN bootc container lint")?;
     }
-    writeln!(out, "RUN bootc container lint")?;
 
     Ok(out)
 }
@@ -347,13 +353,26 @@ pub fn generate_containerfile(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashSet;
     use std::path::PathBuf;
 
+    use crate::classify::{Capability, CapabilitySet};
     use crate::fragment::{
         Fragment, FragmentConflicts, FragmentPackages, FragmentPhase, FragmentProvides,
     };
     use crate::loader::LoadedFragment;
     use crate::manifest::{FragmentSource, Manifest, ManifestFragment};
+
+    fn bootc_caps() -> CapabilitySet {
+        let mut set = HashSet::new();
+        set.insert(Capability::Bootc);
+        set.insert(Capability::Systemd);
+        set
+    }
+
+    fn empty_caps() -> CapabilitySet {
+        HashSet::new()
+    }
 
     fn make_repos_fragment(name: &str, digest: &str) -> (LoadedFragment, ManifestFragment) {
         let loaded = LoadedFragment {
@@ -438,6 +457,7 @@ mod tests {
             Some("sha256:base123"),
             &empty_dedup(),
             false,
+            &bootc_caps(),
         )
         .unwrap();
         assert!(output.contains("@sha256:aaa111"));
@@ -461,6 +481,7 @@ mod tests {
             Some("sha256:base123"),
             &empty_dedup(),
             false,
+            &bootc_caps(),
         )
         .unwrap();
         let repo_pos = output.find("Repo files").unwrap();
@@ -490,6 +511,7 @@ mod tests {
             Some("sha256:base123"),
             &empty_dedup(),
             false,
+            &bootc_caps(),
         )
         .unwrap();
         assert!(output.contains("dnf install -y"));
@@ -511,6 +533,7 @@ mod tests {
             Some("sha256:base123"),
             &empty_dedup(),
             false,
+            &bootc_caps(),
         )
         .unwrap();
         assert!(output.contains("systemctl preset-all --preset-mode=enable-only"));
@@ -531,6 +554,7 @@ mod tests {
             Some("sha256:base123"),
             &empty_dedup(),
             false,
+            &bootc_caps(),
         )
         .unwrap();
         assert!(output.contains("bootc container lint"));
@@ -551,6 +575,7 @@ mod tests {
             Some("sha256:base123"),
             &empty_dedup(),
             false,
+            &bootc_caps(),
         )
         .unwrap();
         assert!(!output.contains("dnf install"));
@@ -571,6 +596,7 @@ mod tests {
             Some("sha256:base123"),
             &empty_dedup(),
             false,
+            &bootc_caps(),
         )
         .unwrap();
         assert!(output.contains("sed"));
@@ -600,6 +626,7 @@ mod tests {
             Some("sha256:base123"),
             &dedup,
             false,
+            &bootc_caps(),
         )
         .unwrap();
         // epel is canonical for its own repo — its COPY should appear
@@ -677,6 +704,7 @@ mod tests {
             Some("sha256:base123"),
             &empty_dedup(),
             false,
+            &bootc_caps(),
         )
         .unwrap();
         // Must preserve the port in the pinned ref
@@ -759,7 +787,8 @@ mod tests {
             fragments: vec![mf_epel],
         };
         let output =
-            generate_containerfile(&manifest, &[epel], None, &empty_dedup(), false).unwrap();
+            generate_containerfile(&manifest, &[epel], None, &empty_dedup(), false, &bootc_caps())
+                .unwrap();
         // Inline image ref in COPY for repo files, no named FROM stage
         assert!(output.contains("COPY --from=quay.io/test/epel:10 /fragment/tree/etc/yum.repos.d/"));
         assert!(!output.contains("AS frag-epel"));
@@ -774,7 +803,8 @@ mod tests {
             fragments: vec![mf_epel],
         };
         let output =
-            generate_containerfile(&manifest, &[epel], None, &empty_dedup(), false).unwrap();
+            generate_containerfile(&manifest, &[epel], None, &empty_dedup(), false, &bootc_caps())
+                .unwrap();
         assert!(output.contains("FROM registry.redhat.io/rhel10/rhel-bootc:10.0"));
         assert!(!output.contains("@sha256:"));
     }
@@ -789,7 +819,8 @@ mod tests {
             fragments: vec![mf_cis],
         };
         let output =
-            generate_containerfile(&manifest, &[cis], None, &empty_dedup(), false).unwrap();
+            generate_containerfile(&manifest, &[cis], None, &empty_dedup(), false, &bootc_caps())
+                .unwrap();
         assert!(
             output.contains("RUN --mount=type=bind,from=quay.io/test/cis:2.1,source=/fragment/hooks,target=/frag-hooks,bind-propagation=rshared,z"),
             "expected bind mount with inline image ref:\n{}",
@@ -827,6 +858,7 @@ mod tests {
             Some("sha256:base123"),
             &empty_dedup(),
             false,
+            &bootc_caps(),
         )
         .unwrap();
         // Named FROM stage and named COPY ref for repo files
@@ -845,7 +877,8 @@ mod tests {
             fragments: vec![mf_epel],
         };
         let output =
-            generate_containerfile(&manifest, &[epel], None, &empty_dedup(), true).unwrap();
+            generate_containerfile(&manifest, &[epel], None, &empty_dedup(), true, &bootc_caps())
+                .unwrap();
         assert!(output.contains("FROM configs AS final"));
         // Must not contain the standalone base image
         assert!(!output.contains("FROM registry.redhat.io"));
@@ -860,7 +893,8 @@ mod tests {
             fragments: vec![mf_epel],
         };
         let output =
-            generate_containerfile(&manifest, &[epel], None, &empty_dedup(), true).unwrap();
+            generate_containerfile(&manifest, &[epel], None, &empty_dedup(), true, &bootc_caps())
+                .unwrap();
         assert!(!output.contains("# Generated by"));
         assert!(!output.contains("# Fragments:"));
         assert!(!output.contains("# Override summary"));
@@ -875,7 +909,8 @@ mod tests {
             fragments: vec![mf_epel],
         };
         let output =
-            generate_containerfile(&manifest, &[epel], None, &empty_dedup(), true).unwrap();
+            generate_containerfile(&manifest, &[epel], None, &empty_dedup(), true, &bootc_caps())
+                .unwrap();
         assert!(!output.contains("# ---"));
     }
 
@@ -888,7 +923,8 @@ mod tests {
             fragments: vec![mf_epel],
         };
         let output =
-            generate_containerfile(&manifest, &[epel], None, &empty_dedup(), true).unwrap();
+            generate_containerfile(&manifest, &[epel], None, &empty_dedup(), true, &bootc_caps())
+                .unwrap();
         assert!(output.contains("COPY --from=quay.io/test/epel:10 /fragment/tree/etc/yum.repos.d/"));
         assert!(!output.contains("AS frag-"));
     }
@@ -907,6 +943,7 @@ mod tests {
             Some("sha256:base123"),
             &empty_dedup(),
             true,
+            &bootc_caps(),
         )
         .unwrap();
         // Named stages before FROM configs AS final
@@ -928,7 +965,8 @@ mod tests {
             fragments: vec![mf_epel],
         };
         let output =
-            generate_containerfile(&manifest, &[epel], None, &empty_dedup(), true).unwrap();
+            generate_containerfile(&manifest, &[epel], None, &empty_dedup(), true, &bootc_caps())
+                .unwrap();
         assert!(output.contains("systemctl preset-all"));
         assert!(output.contains("bootc container lint"));
     }
@@ -971,7 +1009,8 @@ mod tests {
             fragments: vec![manifest_frag],
         };
         let output =
-            generate_containerfile(&manifest, &[loaded], None, &empty_dedup(), false).unwrap();
+            generate_containerfile(&manifest, &[loaded], None, &empty_dedup(), false, &bootc_caps())
+                .unwrap();
 
         // Verify all three hooks are present via the mount target path
         assert!(output.contains("/frag-hooks/01-first.bash"));
@@ -1018,6 +1057,7 @@ mod tests {
             Some("sha256:base123"),
             &empty_dedup(),
             false,
+            &bootc_caps(),
         )
         .unwrap();
         assert!(
@@ -1043,6 +1083,7 @@ mod tests {
             Some("sha256:base123"),
             &empty_dedup(),
             false,
+            &bootc_caps(),
         )
         .unwrap();
         // Verify full content ordering: repo COPY -> dnf install -> config COPY -> hook RUN --mount
@@ -1082,6 +1123,7 @@ mod tests {
             Some("sha256:base123"),
             &empty_dedup(),
             false,
+            &bootc_caps(),
         )
         .unwrap();
         assert!(
@@ -1102,7 +1144,9 @@ mod tests {
             base_type: None,
             fragments: vec![mf_cis],
         };
-        let output = generate_containerfile(&manifest, &[cis], None, &empty_dedup(), true).unwrap();
+        let output =
+            generate_containerfile(&manifest, &[cis], None, &empty_dedup(), true, &bootc_caps())
+                .unwrap();
         // Hooks should use bind mount in OCP output
         assert!(
             output.contains("RUN --mount=type=bind"),
@@ -1138,6 +1182,7 @@ mod tests {
             None,
             &empty_dedup(),
             false,
+            &bootc_caps(),
         )
         .unwrap();
         for line in standalone.lines() {
@@ -1157,6 +1202,7 @@ mod tests {
             None,
             &empty_dedup(),
             true,
+            &bootc_caps(),
         )
         .unwrap();
         for line in ocp_output.lines() {
@@ -1183,6 +1229,7 @@ mod tests {
             Some("sha256:base123"),
             &empty_dedup(),
             false,
+            &bootc_caps(),
         )
         .unwrap();
         for line in pinned_output.lines() {
@@ -1212,6 +1259,7 @@ mod tests {
             Some("sha256:base123"),
             &empty_dedup(),
             false,
+            &bootc_caps(),
         )
         .unwrap();
         assert!(
@@ -1243,6 +1291,7 @@ mod tests {
             None,
             &empty_dedup(),
             false,
+            &bootc_caps(),
         )
         .unwrap();
         assert!(
@@ -1274,6 +1323,7 @@ mod tests {
             None,
             &empty_dedup(),
             false,
+            &bootc_caps(),
         )
         .unwrap();
         assert!(
@@ -1289,6 +1339,7 @@ mod tests {
             None,
             &empty_dedup(),
             true,
+            &bootc_caps(),
         )
         .unwrap();
         assert!(
@@ -1318,6 +1369,7 @@ mod tests {
             None,
             &empty_dedup(),
             false,
+            &bootc_caps(),
         )
         .unwrap();
         let ocp = generate_containerfile(
@@ -1326,6 +1378,7 @@ mod tests {
             None,
             &empty_dedup(),
             true,
+            &bootc_caps(),
         )
         .unwrap();
 
@@ -1418,6 +1471,7 @@ mod tests {
             None,
             &empty_dedup(),
             false,
+            &bootc_caps(),
         )
         .unwrap();
 
@@ -1453,6 +1507,7 @@ mod tests {
             Some("sha256:base123"),
             &empty_dedup(),
             false,
+            &bootc_caps(),
         )
         .unwrap();
         assert!(
@@ -1483,6 +1538,7 @@ mod tests {
             Some("sha256:base123"),
             &empty_dedup(),
             false,
+            &bootc_caps(),
         )
         .unwrap();
         // htop should appear exactly once
@@ -1521,6 +1577,7 @@ mod tests {
             Some("sha256:base123"),
             &empty_dedup(),
             false,
+            &bootc_caps(),
         )
         .unwrap();
         let dep_count = output.matches("shared-dep").count();
@@ -1555,6 +1612,7 @@ mod tests {
             Some("sha256:base123"),
             &empty_dedup(),
             false,
+            &bootc_caps(),
         )
         .unwrap();
         let repos_pos = output.find("repos-pkg").unwrap();
@@ -1580,6 +1638,7 @@ mod tests {
             Some("sha256:base123"),
             &empty_dedup(),
             false,
+            &bootc_caps(),
         )
         .unwrap();
         assert!(
@@ -1611,6 +1670,7 @@ mod tests {
             Some("sha256:base123"),
             &empty_dedup(),
             false,
+            &bootc_caps(),
         )
         .unwrap();
         assert!(
@@ -1628,5 +1688,72 @@ mod tests {
             "expected dnf install in output:\n{}",
             output
         );
+    }
+
+    #[test]
+    fn container_base_omits_bootc_steps() {
+        let (epel, mf_epel) = make_unpinned_repos_fragment("epel");
+        let manifest = Manifest {
+            base: "quay.io/fedora/fedora:41".into(),
+            base_type: None,
+            fragments: vec![mf_epel],
+        };
+        let output = generate_containerfile(
+            &manifest,
+            &[epel],
+            None,
+            &empty_dedup(),
+            false,
+            &empty_caps(),
+        )
+        .unwrap();
+        assert!(!output.contains("systemctl preset-all"));
+        assert!(!output.contains("bootc container lint"));
+        // Other content still present
+        assert!(output.contains("COPY --from="));
+    }
+
+    #[test]
+    fn bootc_base_preserves_both_steps() {
+        let (epel, mf_epel) = make_unpinned_repos_fragment("epel");
+        let manifest = Manifest {
+            base: "registry.redhat.io/rhel10/rhel-bootc:10.0".into(),
+            base_type: None,
+            fragments: vec![mf_epel],
+        };
+        let output = generate_containerfile(
+            &manifest,
+            &[epel],
+            None,
+            &empty_dedup(),
+            false,
+            &bootc_caps(),
+        )
+        .unwrap();
+        assert!(output.contains("systemctl preset-all"));
+        assert!(output.contains("bootc container lint"));
+    }
+
+    #[test]
+    fn systemd_only_emits_preset_but_not_lint() {
+        let mut caps = HashSet::new();
+        caps.insert(Capability::Systemd);
+        let (epel, mf_epel) = make_unpinned_repos_fragment("epel");
+        let manifest = Manifest {
+            base: "quay.io/some/image:1".into(),
+            base_type: None,
+            fragments: vec![mf_epel],
+        };
+        let output = generate_containerfile(
+            &manifest,
+            &[epel],
+            None,
+            &empty_dedup(),
+            false,
+            &caps,
+        )
+        .unwrap();
+        assert!(output.contains("systemctl preset-all"));
+        assert!(!output.contains("bootc container lint"));
     }
 }
