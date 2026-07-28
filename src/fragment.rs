@@ -25,9 +25,10 @@ pub struct FragmentProvides {
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct FragmentPackages {
     #[serde(default)]
-    pub available: Vec<String>,
+    pub required: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -144,7 +145,7 @@ phase = "config"
 repos = ["tailscale-stable"]
 
 [fragment.packages]
-available = ["tailscale"]
+required = ["tailscale"]
 
 [fragment.conflicts]
 fragments = []
@@ -158,7 +159,7 @@ fragments = []
         assert_eq!(frag.phase, FragmentPhase::Repos);
         assert_eq!(frag.provides.repos, vec!["epel"]);
         assert!(frag.vendor.is_none());
-        assert!(frag.packages.available.is_empty());
+        assert!(frag.packages.required.is_empty());
     }
 
     #[test]
@@ -167,7 +168,7 @@ fragments = []
         assert_eq!(frag.name, "tailscale");
         assert_eq!(frag.phase, FragmentPhase::Config);
         assert_eq!(frag.vendor.as_deref(), Some("Tailscale Inc."));
-        assert_eq!(frag.packages.available, vec!["tailscale"]);
+        assert_eq!(frag.packages.required, vec!["tailscale"]);
     }
 
     #[test]
@@ -180,6 +181,48 @@ description = "bad phase"
 phase = "install"
 "#;
         assert!(parse_fragment_toml(bad).is_err());
+    }
+
+    #[test]
+    fn reject_unknown_packages_field() {
+        let bad = r#"
+[fragment]
+name = "bad"
+version = "1"
+description = "unknown field test"
+phase = "config"
+
+[fragment.packages]
+available = ["grafana"]
+"#;
+        let err = parse_fragment_toml(bad).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("unknown field"),
+            "expected 'unknown field' error, got: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn reject_typo_in_packages_field() {
+        let bad = r#"
+[fragment]
+name = "bad"
+version = "1"
+description = "typo field test"
+phase = "config"
+
+[fragment.packages]
+requred = ["grafana"]
+"#;
+        let err = parse_fragment_toml(bad).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("unknown field"),
+            "expected 'unknown field' error, got: {}",
+            msg
+        );
     }
 
     #[test]
