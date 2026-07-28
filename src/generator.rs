@@ -1253,4 +1253,51 @@ mod tests {
             ocp
         );
     }
+
+    #[test]
+    fn standalone_and_ocp_emit_same_hook_instruction() {
+        let (mut cis, mf_cis) = make_unpinned_config_fragment("cis");
+        cis.manifest_index = 0;
+        cis.hook_paths = vec![
+            PathBuf::from("10-configure.sh"),
+            PathBuf::from("20-enable.sh"),
+        ];
+        let manifest = Manifest {
+            base: "registry.redhat.io/rhel10/rhel-bootc:10.0".into(),
+            fragments: vec![mf_cis],
+        };
+
+        let standalone = generate_containerfile(
+            &manifest,
+            &[cis.clone()],
+            None,
+            &empty_dedup(),
+            false,
+        )
+        .unwrap();
+        let ocp = generate_containerfile(
+            &manifest,
+            &[cis],
+            None,
+            &empty_dedup(),
+            true,
+        )
+        .unwrap();
+
+        // Extract the RUN --mount lines from each
+        let standalone_mount: Vec<&str> = standalone
+            .lines()
+            .filter(|l| l.contains("--mount=type=bind") || l.trim_start().starts_with("/frag-hooks/"))
+            .collect();
+        let ocp_mount: Vec<&str> = ocp
+            .lines()
+            .filter(|l| l.contains("--mount=type=bind") || l.trim_start().starts_with("/frag-hooks/"))
+            .collect();
+
+        assert_eq!(
+            standalone_mount, ocp_mount,
+            "standalone and OCP hook emission must not diverge\nstandalone: {:?}\nocp: {:?}",
+            standalone_mount, ocp_mount
+        );
+    }
 }
