@@ -75,11 +75,11 @@ This keeps the format simple and avoids artificial constraints: a fragment can d
 
 The tool deliberately stays out of the builder's domain. It doesn't invoke podman, doesn't wrap buildah, doesn't manage layers, doesn't handle multi-arch, doesn't implement remote builds. All of those are problems that container build tooling already solves. Generating a Containerfile means those solutions keep working.
 
-This follows the same principle documented in the format section: declarative languages for configuring Linux systems already exist and are mature, so the format defers to them completely. The tool does the same with builders. It also does the same with package managers — the packages rationale already says "those are dnf arguments, and a list of dnf arguments is not a language."
+This follows the same principle documented in the format section: declarative languages for configuring Linux systems already exist and are mature, so the format defers to them completely. The tool applies the same principle to builders. It applies it to package managers too. The packages rationale already says "those are dnf arguments, and a list of dnf arguments is not a language."
 
-The pattern is: the tool occupies the composition layer and stays out of domains that have competent owners. Builder, configurator, package manager — the tool generates for all three rather than replacing any of them.
+The pattern is: the tool occupies the composition layer and stays out of domains that have competent owners. Builder, configurator, package manager. The tool generates for all three rather than replacing any of them.
 
-The generated Containerfile is a build artifact customers can read, edit, and version. No lock-in. If osfragment-assemble stops meeting their needs, they take the Containerfile and maintain it manually. The tool's job is codegen, not gatekeeping.
+The generated Containerfile is a build artifact operators can read, edit, and version. If osfragment-assemble stops meeting their needs, they take the Containerfile and maintain it manually. The tool's job is codegen, not gatekeeping.
 
 The composition problem could also be solved with a build DSL, a custom BuildKit frontend, or a builder daemon. Each of those is more capable than codegen, and each is a new component a build pipeline would have to adopt, trust, and debug. Generating a plain Containerfile means the fragment format is the only new thing here; everything downstream of it runs on standard build tooling.
 
@@ -133,7 +133,7 @@ The bind mount exists only during the `RUN` instruction. Hook scripts execute, p
 
 `tree/` content is the opposite case: it is delivered payload and is `COPY`'d into the image, where it correctly persists in the layer history.
 
-The distinction matters for two reasons. First, hook bytes in image layers are recoverable via layer inspection tools, which is undesirable when hooks contain vendor-specific logic or security hardening implementation details. Second, at fleet scale, hook scripts that land in every node's image inflate pull size without delivering runtime value — the scripts ran once at build time and are dead weight afterward.
+The distinction matters for two reasons. First, build inputs are not runtime artifacts. Hook bytes in image layers are recoverable via layer inspection tools, and shipping build tooling in a production image is the container equivalent of shipping your Makefile in a binary release. Second, at fleet scale, hook scripts that land in every node's image inflate pull size without delivering runtime value. The scripts ran once at build time and are dead weight afterward.
 
 Alternative considered: copy hooks, execute them, and remove them in the same `RUN` layer. Rejected because the remove step only writes a whiteout tombstone; the hook bytes remain in the layer and are recoverable. The bind mount avoids this entire class of problem: one instruction, one layer, nothing committed, nothing to clean up.
 
