@@ -35,8 +35,8 @@ phase = "config"                      # Required: "repos" or "config"
 fragments = ["wireguard", "zerotier"]
 
 [fragment.packages]
-# Optional: packages this fragment can install (informational only)
-available = ["tailscale"]
+# Optional: packages this fragment forces during assembly
+required = ["tailscale"]
 ```
 
 ### Field Constraints
@@ -49,7 +49,7 @@ available = ["tailscale"]
   - `repos` (weight 10): Runs before packages are installed. Tree content is restricted to repo definitions and GPG keys (paths under `etc/yum.repos.d/` or `etc/pki/rpm-gpg/`). Must not contain hooks.
   - `config` (weight 30): Runs after packages are installed. No tree restrictions. May contain hooks.
 - `conflicts.fragments`: Optional array of fragment names this fragment is incompatible with. Assembly fails if any listed fragment is present in the manifest.
-- `packages.available`: Optional array of package names this fragment can install. Not enforced; used by `inspect` and for future dependency analysis.
+- `packages.required`: Optional array of package names this fragment forces during assembly. These packages are always installed, even without a manifest entry. Unknown keys in `[fragment.packages]` are rejected as parse errors.
 
 ## `tree/` Directory Layout
 
@@ -126,7 +126,7 @@ Annotation keys:
 - `io.bootc.fragment.vendor`: vendor name (optional)
 - `io.bootc.fragment.phase`: `"repos"` or `"config"`
 - `io.bootc.fragment.provides.repos`: JSON array of repo IDs (e.g., `["epel"]`)
-- `io.bootc.fragment.packages.available`: JSON array of package names
+- `io.bootc.fragment.packages.required`: JSON array of required package names
 
 Annotations are **not** used during assembly; the tool always parses the in-layer `fragment.toml` for the authoritative fragment definition. Annotations are a read-only optimization.
 
@@ -135,6 +135,7 @@ Set annotations during build:
 podman build --annotation io.bootc.fragment.name=tailscale \
              --annotation io.bootc.fragment.version=1.82.0 \
              --annotation io.bootc.fragment.phase=config \
+             --annotation 'io.bootc.fragment.packages.required=["tailscale"]' \
              -f Containerfile.fragment -t quay.io/user/tailscale:1.82.0 .
 ```
 
