@@ -341,7 +341,7 @@ Assisted-by: Claude Code (claude-opus-5)"
 
 **Interfaces:**
 - Produces: private `fn pull_layer_bytes(image_ref: &str) -> Result<Vec<Vec<u8>>>`, used by `load_registry_fragment` (this task) and `materialize_fragment` (Task 4).
-- No behavior change: `load_registry_fragment`'s external behavior (return value, error cases) is identical before and after.
+- No behavior change to `load_registry_fragment`'s return value or the conditions under which it errors. One message changes cosmetically: the `bail!("skopeo copy failed for {}", image_ref)` inside `pull_layer_bytes` reports whatever ref it was called with, which for `load_registry_fragment` is the already-digest-pinned `image_with_digest`, not the original tag-form `image_ref` the outer function received. Same failure condition, marginally more specific message, not a behavior change worth a dedicated test.
 
 - [ ] **Step 1: Run the baseline test suite**
 
@@ -525,7 +525,7 @@ Assisted-by: Claude Code (claude-opus-5)"
 
 **Interfaces:**
 - Consumes: `pull_layer_bytes` (Task 3), `validate_tar_entry` (existing).
-- Produces: `pub fn materialize_fragment(image_ref: &str, dest_dir: &Path) -> Result<()>`, used by `src/self_contained.rs` (Task 5).
+- Produces: `pub fn materialize_fragment(image_ref: &str, dest_dir: &Path) -> Result<()>`, used by `src/self_contained.rs` (Task 5). Also produces `pub(crate) fn extract_fragment_payload_to_disk(compressed: &[u8], dest_dir: &Path) -> Result<()>`, consumed directly by Task 6's composed materialize-then-archive test.
 
 - [ ] **Step 1: Write the failing test for payload extraction**
 
@@ -577,7 +577,13 @@ Add to `src/loader.rs`, after `extract_repo_file_contents_from_bytes`:
 /// Write a layer's `fragment/tree/` and `fragment/hooks/` payload to disk
 /// under `dest_dir/tree` and `dest_dir/hooks`. Shares the same tar-entry
 /// security validation as the metadata-only extractors above.
-fn extract_fragment_payload_to_disk(compressed: &[u8], dest_dir: &Path) -> Result<()> {
+///
+/// `pub(crate)` rather than private: `src/self_contained.rs`'s tests
+/// compose this directly with `create_archive` over a fixture layer to
+/// exercise the spec's materialize-then-archive acceptance test without a
+/// registry (Task 6). `materialize_fragment` below is still the production
+/// entry point.
+pub(crate) fn extract_fragment_payload_to_disk(compressed: &[u8], dest_dir: &Path) -> Result<()> {
     let decoder = GzDecoder::new(compressed);
     let mut archive = tar::Archive::new(decoder);
 
@@ -704,9 +710,13 @@ Then add these tests inside `mod tests`:
         fs::write(&manifest_path, "base: example\n").unwrap();
 
         let fragments = vec![test_loaded_fragment("epel"), test_loaded_fragment("cis")];
-        write_output_with(&dir, &manifest_path, "FROM example\n", &fragments, |_r, d| {
-            fs::create_dir_all(d).map_err(Into::into)
-        })
+        write_output_with(
+            &dir,
+            &manifest_path,
+            "FROM example\n",
+            &fragments,
+            |_r, d| fs::create_dir_all(d).map_err(Into::into),
+        )
         .unwrap();
 
         assert_eq!(
@@ -732,9 +742,13 @@ Then add these tests inside `mod tests`:
         fs::write(&manifest_path, "base: example\n").unwrap();
 
         let fragments: Vec<LoadedFragment> = vec![];
-        write_output_with(&dir, &manifest_path, "NEW CONTENT\n", &fragments, |_r, d| {
-            fs::create_dir_all(d).map_err(Into::into)
-        })
+        write_output_with(
+            &dir,
+            &manifest_path,
+            "NEW CONTENT\n",
+            &fragments,
+            |_r, d| fs::create_dir_all(d).map_err(Into::into),
+        )
         .unwrap();
 
         assert_eq!(
@@ -780,12 +794,18 @@ Then add these tests inside `mod tests`:
             test_loaded_fragment("good-frag"),
             test_loaded_fragment("bad-frag"),
         ];
-        let result = write_output_with(&dir, &manifest_path, "NEW\n", &fragments, |image_ref, dest| {
-            if image_ref.contains("bad-frag") {
-                bail!("simulated registry failure");
-            }
-            fs::create_dir_all(dest).map_err(Into::into)
-        });
+        let result = write_output_with(
+            &dir,
+            &manifest_path,
+            "NEW\n",
+            &fragments,
+            |image_ref, dest| {
+                if image_ref.contains("bad-frag") {
+                    bail!("simulated registry failure");
+                }
+                fs::create_dir_all(dest).map_err(Into::into)
+            },
+        );
 
         assert!(result.is_err());
         assert_eq!(
@@ -795,16 +815,59 @@ Then add these tests inside `mod tests`:
         assert!(dir.join("fragments/prior-run").exists());
         assert!(!dir.join("fragments/good-frag").exists());
     }
+
+    #[test]
+    fn write_output_normalizes_directory_permissions() {
+        // Regression test: the staging tempdir is created at 0700; without
+        // an explicit fix that mode survives the rename into <dir> and
+        // then into every tar header create_archive writes, which is wrong
+        // for a handoff artifact meant to be committed and shared.
+        let workdir = tempfile::tempdir().unwrap();
+        let dir = workdir.path().join("ctx");
+        let manifest_path = workdir.path().join("osfragment-assemble.yaml");
+        fs::write(&manifest_path, "base: example\n").unwrap();
+
+        let fragments: Vec<LoadedFragment> = vec![];
+        write_output_with(
+            &dir,
+            &manifest_path,
+            "FROM example\n",
+            &fragments,
+            |_r, d| fs::create_dir_all(d).map_err(Into::into),
+        )
+        .unwrap();
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
+            assert_eq!(
+                mode, OUTPUT_DIR_MODE,
+                "output directory must not carry the staging tempdir's 0700"
+            );
+        }
+    }
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
 
 Run: `cargo test --lib self_contained:: -- --nocapture`
-Expected: FAIL with "cannot find function `write_output_with`".
+Expected: FAIL with "cannot find function `write_output_with`" (and "cannot find value `OUTPUT_DIR_MODE`" for the new permissions test).
 
 - [ ] **Step 3: Implement `write_output_with` and `write_output`**
 
-Add to `src/self_contained.rs`, after `check_target_dir_safe`:
+First add this constant to `src/self_contained.rs`, directly below the existing `TOOL_GENERATED_ENTRIES` constant:
+
+```rust
+/// Permission mode applied to the output directory after the staging swap,
+/// overriding the 0700 the staging tempdir was created with. `<dir>` is a
+/// handoff artifact (committed to git, packaged into a tarball for other
+/// pipelines), not a private scratch directory, so it and the resulting
+/// tar entries should be normally readable.
+const OUTPUT_DIR_MODE: u32 = 0o755;
+```
+
+Then add the following to `src/self_contained.rs`, after `check_target_dir_safe`:
 
 ```rust
 /// Materialize the self-contained output: fragment tree/hooks payload,
@@ -859,9 +922,24 @@ fn write_output_with(
     if dir.exists() {
         fs::remove_dir_all(dir).with_context(|| format!("removing existing {}", dir.display()))?;
     }
-    let staging_path = staging.into_path();
+    // TempDir::into_path() is deprecated in favor of keep() as of tempfile
+    // 3.14; both disarm the automatic cleanup so the directory survives the
+    // rename below. keep() is the non-deprecated spelling.
+    let staging_path = staging.keep();
     fs::rename(&staging_path, dir)
         .with_context(|| format!("moving staged output into {}", dir.display()))?;
+
+    // The staging tempdir was created at 0700. Normalize the swapped-in
+    // directory to a normal, world-readable mode: it is a handoff artifact
+    // (committed to git, packaged into the tarball below), not a private
+    // scratch directory, and a 0700 top-level entry would carry into every
+    // tar header create_archive writes.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(dir, fs::Permissions::from_mode(OUTPUT_DIR_MODE))
+            .with_context(|| format!("normalizing permissions on {}", dir.display()))?;
+    }
 
     Ok(())
 }
@@ -887,12 +965,12 @@ pub fn write_output(
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `cargo test --lib self_contained:: -- --nocapture`
-Expected: all tests PASS.
+Expected: all tests PASS, including `write_output_normalizes_directory_permissions`.
 
 - [ ] **Step 5: Run the full test suite and clippy**
 
 Run: `cargo test -- --nocapture 2>&1 && cargo clippy -- -D clippy::all`
-Expected: all tests PASS, zero clippy warnings.
+Expected: all tests PASS, zero clippy warnings. (`staging.keep()` is the non-deprecated call, so no deprecation warning appears here or in later full-suite runs.)
 
 - [ ] **Step 6: Commit**
 
@@ -906,7 +984,9 @@ swaps it into place after every fragment succeeds. A materialization
 failure partway through leaves the original directory (if any)
 untouched, and the CLI's public entry point always uses the real
 registry pull path; tests inject a stub to exercise the atomicity
-guarantee without network access.
+guarantee without network access. The swapped-in directory is
+normalized to 0755, overriding the staging tempdir's 0700, since it is
+a handoff artifact rather than a private scratch directory.
 
 Assisted-by: Claude Code (claude-opus-5)"
 ```
@@ -919,7 +999,10 @@ Assisted-by: Claude Code (claude-opus-5)"
 - Modify: `src/self_contained.rs`
 
 **Interfaces:**
+- Consumes: `write_output_with` (Task 5, same-module private function; the composed test below calls it directly), `crate::loader::extract_fragment_payload_to_disk` (Task 4).
 - Produces: `pub fn create_archive(dir: &Path) -> Result<PathBuf>`, used by `src/main.rs` (Task 10).
+
+This task carries two fixes found in plan review, both folded into the steps below rather than left as follow-ups: `archive_path_for`'s naive `OsStr` append breaks on a trailing separator (`--self-contained out/`, what shell completion produces for an existing directory, must still yield `out.tar.gz`, not a hidden `.tar.gz` file inside `out/`), and the spec's acceptance test 2 ("materialize from local fixture fragments, then assert the archive matches the tree byte for byte") needs one test that actually composes materialization with archiving over the same tree. Tasks 4 and 6's other tests each exercise half of that pipeline but never together, and until this step nothing calls `extract_fragment_payload_to_disk` outside its own unit test.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -929,9 +1012,103 @@ Add to `src/self_contained.rs`'s top-level `use` block:
 use std::path::PathBuf;
 ```
 
-Add to `mod tests`:
+Add to `mod tests`, after `test_loaded_fragment`:
 
 ```rust
+    /// Builds a minimal fragment layer tarball for tests that need to
+    /// exercise the real `extract_fragment_payload_to_disk` extractor
+    /// without a registry. Mirrors the real layer shape
+    /// (`fragment/tree/...`, `fragment/hooks/...`).
+    fn build_fixture_layer(entries: &[(&str, &[u8])]) -> Vec<u8> {
+        let mut buf = Vec::new();
+        {
+            let enc = flate2::write::GzEncoder::new(&mut buf, flate2::Compression::default());
+            let mut tar = tar::Builder::new(enc);
+            for (path, data) in entries {
+                let mut header = tar::Header::new_gnu();
+                header.set_path(path).unwrap();
+                header.set_size(data.len() as u64);
+                header.set_mode(0o755);
+                header.set_cksum();
+                tar.append(&header, &data[..]).unwrap();
+            }
+            tar.into_inner().unwrap().finish().unwrap();
+        }
+        buf
+    }
+```
+
+Then add these tests to `mod tests`:
+
+```rust
+    #[test]
+    fn materialize_and_archive_round_trip_byte_for_byte() {
+        // Composes write_output_with (real extract_fragment_payload_to_disk,
+        // stubbing only the skopeo pull) with create_archive over the same
+        // tree: the spec's single acceptance test 2 (materialize from
+        // fixture fragments, then diff the archive against the tree byte
+        // for byte), with no network access.
+        let epel_layer = build_fixture_layer(&[(
+            "fragment/tree/etc/yum.repos.d/epel.repo",
+            b"[epel]\nbaseurl=https://example.com/epel/\n",
+        )]);
+        let cis_layer = build_fixture_layer(&[
+            (
+                "fragment/tree/usr/lib/sysctl.d/99-hardening.conf",
+                b"kernel.randomize_va_space=2\n",
+            ),
+            ("fragment/hooks/configure.sh", b"#!/bin/sh\necho hi\n"),
+        ]);
+
+        let workdir = tempfile::tempdir().unwrap();
+        let dir = workdir.path().join("ctx");
+        let manifest_path = workdir.path().join("osfragment-assemble.yaml");
+        fs::write(&manifest_path, "base: example\n").unwrap();
+
+        let fragments = vec![test_loaded_fragment("epel"), test_loaded_fragment("cis")];
+        write_output_with(
+            &dir,
+            &manifest_path,
+            "FROM example\n",
+            &fragments,
+            |image_ref, dest| {
+                let layer: &[u8] = match image_ref {
+                    "quay.io/test/epel:1" => &epel_layer,
+                    "quay.io/test/cis:1" => &cis_layer,
+                    other => panic!("unexpected image_ref in test: {other}"),
+                };
+                crate::loader::extract_fragment_payload_to_disk(layer, dest)
+            },
+        )
+        .unwrap();
+
+        let archive_path = create_archive(&dir).unwrap();
+
+        let extract_dir = workdir.path().join("extracted");
+        fs::create_dir_all(&extract_dir).unwrap();
+        let file = fs::File::open(&archive_path).unwrap();
+        let decoder = flate2::read::GzDecoder::new(file);
+        let mut archive = tar::Archive::new(decoder);
+        archive.unpack(&extract_dir).unwrap();
+        let extracted_root = extract_dir.join("ctx");
+
+        for rel in [
+            "Containerfile",
+            "manifest.yaml",
+            "fragments/epel/tree/etc/yum.repos.d/epel.repo",
+            "fragments/cis/tree/usr/lib/sysctl.d/99-hardening.conf",
+            "fragments/cis/hooks/configure.sh",
+        ] {
+            let original = fs::read(dir.join(rel)).unwrap();
+            let extracted = fs::read(extracted_root.join(rel)).unwrap();
+            assert_eq!(
+                original, extracted,
+                "{} did not round-trip byte for byte",
+                rel
+            );
+        }
+    }
+
     #[test]
     fn archive_path_appends_suffix_without_touching_dots() {
         assert_eq!(
@@ -941,6 +1118,23 @@ Add to `mod tests`:
         assert_eq!(
             archive_path_for(Path::new("out.v2")),
             PathBuf::from("out.v2.tar.gz")
+        );
+    }
+
+    #[test]
+    fn archive_path_normalizes_trailing_separator() {
+        // Regression test: --self-contained out/ (what shell completion
+        // produces for an existing directory) must still yield the
+        // sibling out.tar.gz, not a hidden .tar.gz file inside out/ that
+        // the next run's check_target_dir_safe would then refuse as
+        // foreign.
+        assert_eq!(
+            archive_path_for(Path::new("out/")),
+            PathBuf::from("out.tar.gz")
+        );
+        assert_eq!(
+            archive_path_for(Path::new("build/context/")),
+            PathBuf::from("build/context.tar.gz")
         );
     }
 
@@ -957,7 +1151,11 @@ Add to `mod tests`:
             "[epel]\nbaseurl=https://example.com/epel/\n",
         )
         .unwrap();
-        fs::write(dir.join("fragments/cis/hooks/configure.sh"), "#!/bin/sh\necho hi\n").unwrap();
+        fs::write(
+            dir.join("fragments/cis/hooks/configure.sh"),
+            "#!/bin/sh\necho hi\n",
+        )
+        .unwrap();
 
         let archive_path = create_archive(&dir).unwrap();
         assert_eq!(
@@ -981,7 +1179,11 @@ Add to `mod tests`:
         ] {
             let original = fs::read(dir.join(rel)).unwrap();
             let extracted = fs::read(extracted_root.join(rel)).unwrap();
-            assert_eq!(original, extracted, "{} did not round-trip byte for byte", rel);
+            assert_eq!(
+                original, extracted,
+                "{} did not round-trip byte for byte",
+                rel
+            );
         }
     }
 ```
@@ -997,13 +1199,20 @@ Add to `src/self_contained.rs`, after `write_output`:
 
 ```rust
 /// Sibling archive path for a self-contained output directory: `<dir>`
-/// with `.tar.gz` appended, e.g. `build/context` -> `build/context.tar.gz`.
-/// Appends as a suffix rather than using `Path::with_extension`, so a
-/// directory name containing a `.` (e.g. `out.v2`) is not corrupted.
+/// with `.tar.gz` appended to its final component, e.g. `build/context` ->
+/// `build/context.tar.gz`. Derives the name from `Path::file_name()`
+/// rather than raw `OsStr` concatenation, so a trailing separator (e.g.
+/// `--self-contained out/`, what shell completion produces for an existing
+/// directory) still yields the sibling `out.tar.gz` rather than a hidden
+/// `.tar.gz` file inside `out/`.
 fn archive_path_for(dir: &Path) -> PathBuf {
-    let mut s = dir.as_os_str().to_os_string();
-    s.push(".tar.gz");
-    PathBuf::from(s)
+    let file_name = dir.file_name().unwrap_or(dir.as_os_str());
+    let mut archive_name = file_name.to_os_string();
+    archive_name.push(".tar.gz");
+    match dir.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent.join(archive_name),
+        _ => PathBuf::from(archive_name),
+    }
 }
 
 /// Package `dir` as a sibling `.tar.gz`, with a single top-level directory
@@ -1021,9 +1230,13 @@ pub fn create_archive(dir: &Path) -> Result<PathBuf> {
         .with_context(|| format!("creating {}", archive_path.display()))?;
     let encoder = flate2::write::GzEncoder::new(file, flate2::Compression::default());
     let mut builder = tar::Builder::new(encoder);
-    builder
-        .append_dir_all(&base_name, dir)
-        .with_context(|| format!("archiving {} into {}", dir.display(), archive_path.display()))?;
+    builder.append_dir_all(&base_name, dir).with_context(|| {
+        format!(
+            "archiving {} into {}",
+            dir.display(),
+            archive_path.display()
+        )
+    })?;
     builder
         .into_inner()
         .context("finishing tar stream")?
@@ -1034,10 +1247,12 @@ pub fn create_archive(dir: &Path) -> Result<PathBuf> {
 }
 ```
 
+Note on `archive_path_for`: `dir.file_name()` and `dir.parent()` both normalize a trailing separator away as part of Rust's path-component parsing (`Path::new("out/").file_name() == Some("out")`, same as `Path::new("out")`), so deriving the archive name from components rather than the raw `OsStr` fixes the trailing-slash case for free.
+
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `cargo test --lib self_contained:: -- --nocapture`
-Expected: all tests PASS.
+Expected: all tests PASS, including `materialize_and_archive_round_trip_byte_for_byte` and `archive_path_normalizes_trailing_separator`.
 
 - [ ] **Step 5: Run the full test suite and clippy**
 
@@ -1052,7 +1267,12 @@ git commit -m "feat: package self-contained output as a sibling tar.gz
 
 create_archive wraps dir in a single top-level directory named after
 its basename, so extraction is predictable regardless of where the
-archive is unpacked. Verified byte-for-byte against the source tree.
+archive is unpacked. archive_path_for derives the sibling name from
+Path components rather than raw OsStr concatenation, so a trailing
+separator (out/) still yields the sibling out.tar.gz instead of a
+hidden .tar.gz file inside the output directory. Verified byte-for-
+byte against a tree produced by the real materialize-then-archive
+pipeline, not just a hand-built directory.
 
 Assisted-by: Claude Code (claude-opus-5)"
 ```
@@ -1321,9 +1541,8 @@ Add to `src/generator.rs`'s `mod tests`:
         assert!(output.contains("COPY fragments/epel/tree/etc/yum.repos.d/ /etc/yum.repos.d/"));
         assert!(output.contains("COPY fragments/epel/tree/etc/pki/rpm-gpg/ /etc/pki/rpm-gpg/"));
         assert!(output.contains("COPY fragments/cis/tree/ /"));
-        assert!(output.contains(
-            "RUN --mount=type=bind,source=fragments/cis/hooks,target=/frag-hooks,z \\"
-        ));
+        assert!(output
+            .contains("RUN --mount=type=bind,source=fragments/cis/hooks,target=/frag-hooks,z \\"));
         assert!(output.contains("/frag-hooks/configure.sh"));
 
         // The mode's defining invariant: no fragment registry reference
@@ -1929,17 +2148,17 @@ Assisted-by: Claude Code (claude-opus-5)"
 ### Task 11: Final verification
 
 **Files:**
-- None (verification only).
+- None (verification only), except Step 6 which may touch `process-docs/skills/containerfile-layer-semantics.md`, `CHANGELOG.md`, and `README.md` per Task 12.
 
 - [ ] **Step 1: Run clippy with the project's exact bar**
 
-Run: `cargo clippy -- -D clippy::all`
-Expected: zero warnings.
+Run: `cargo clippy --all-targets -- -D clippy::all`
+Expected: zero warnings from this feature's code. If `src/generator.rs`'s `container_base_with_ocp_produces_divergent_outputs` test fails clippy on an unrelated `epel.clone()` (`clippy::cloned_ref_to_slice_refs`, `&[epel.clone()]` should be `std::slice::from_ref(&epel)`), that is a pre-existing issue on `main` predating this plan (confirmed by running the same command against an unmodified checkout), not something Tasks 1-10 introduced. Report it to Mark rather than folding an unrelated fix into this feature's commits; do not let it block this task.
 
 - [ ] **Step 2: Run `cargo fmt --check`**
 
 Run: `cargo fmt --check`
-Expected: no diff.
+Expected: no diff from anything Tasks 1-10 touched. If it reports diffs in files or lines this plan never modifies (`src/classify.rs`, `src/fragment.rs`'s `postgresql_example_preserves_repos_phase` test, or pre-existing compact `generate_containerfile` calls untouched by Task 7), that is pre-existing drift on `main` (confirmed the same way as Step 1), not a regression from this feature. Report it alongside the clippy finding; do not fix it here.
 
 - [ ] **Step 3: Run the full test suite**
 
@@ -1951,9 +2170,106 @@ Expected: all tests PASS, including every test added in Tasks 1-10.
 Grep for anything that would indicate scope creep: `grep -rn "lockfile\|provenance\|signature" src/self_contained.rs src/loader.rs src/generator.rs src/main.rs`
 Expected: no matches (or only matches in comments explicitly citing the non-goal, e.g. Task 1's doc comments referencing "Resolved Open Item"). If real lockfile/provenance/partial-update code is found, remove it before proceeding; it does not belong in this feature per the spec's Non-goals.
 
-- [ ] **Step 5: If any failures, fix and commit individually**
+- [ ] **Step 5: Manual build verification of the emitted context-relative bind mount**
 
-Fix any issues found with focused commits, each describing the specific fix.
+Every test in this plan is a string assertion against `generate_containerfile`'s output; nothing in the automated suite actually invokes buildah against the emitted Containerfile, and the context-relative hook mount (`RUN --mount=type=bind,source=fragments/<name>/hooks,target=/frag-hooks,z`, no `from=`) is the first build-context bind mount this tool has ever emitted. Before merge, run `--self-contained` against a manifest with at least one hook-bearing fragment, then `podman build` the resulting `<dir>` directly:
+
+```bash
+cargo run -- --self-contained /tmp/osfa-verify --manifest examples/manifests/full.yaml
+podman build -f /tmp/osfa-verify/Containerfile /tmp/osfa-verify
+```
+
+Expected: the build succeeds and the hook actually executes (check build output for the hook's own echo/log lines, or add a temporary one if the example fragment is silent). This is a one-time manual check, not something to automate as part of this plan; report the result (pass/fail, and the podman version used) alongside the rest of Task 11's findings.
+
+- [ ] **Step 6: Skill file, CHANGELOG, and README (see Task 12)**
+
+Task 12 covers these; do not skip it as part of "final verification only touches nothing."
+
+- [ ] **Step 7: If any failures, fix and commit individually**
+
+Fix any issues found with focused commits, each describing the specific fix. Do not fix the pre-existing clippy/fmt findings from Steps 1-2 as part of this feature's commits (see those steps); raise them to Mark as a separate, unrelated cleanup instead.
+
+---
+
+### Task 12: Skill file, CHANGELOG, and README updates
+
+**Files:**
+- Modify: `process-docs/skills/containerfile-layer-semantics.md`
+- Modify: `CHANGELOG.md`
+- Modify: `README.md`
+
+**Interfaces:**
+- Consumes: nothing new; documents behavior already implemented in Tasks 1-10.
+
+This task exists because `--self-contained` is user-visible and the repo's own conventions (CLAUDE.md's skill-maintenance rule, `CHANGELOG.md`'s live `[Unreleased]` section, `README.md`'s flag list) require it, not because the spec asks for it directly.
+
+- [ ] **Step 1: Scope the skill file's `bind-propagation` guidance to the case it actually covers**
+
+`process-docs/skills/containerfile-layer-semantics.md`'s "`RUN --mount=type=bind,from=<image>` works in an on-cluster OpenShift build" section currently says, unconditionally: "Mirror MCO's options, `bind-propagation=rshared,z`, rather than the bare form." After Task 8, that is no longer true for every mount this tool emits: the self-contained hook mount deliberately omits `bind-propagation` (Resolved Open Item 2, Global Constraints). Add a note immediately after that line:
+
+```markdown
+This guidance covers `from=<image>` mounts (the on-cluster and
+default-mode standalone paths). `--self-contained` mode's hook mount
+uses `from=context` (no `from=` at all) and deliberately drops
+`bind-propagation=rshared`: propagation only matters for a live,
+host-tied mount source, and a build-context source is a static copy
+with no submounts to propagate. `z` still applies there: SELinux
+relabeling is orthogonal to propagation. See
+`process-docs/specs/proposed/2026-07-29-self-contained-mode.md` for
+the full reasoning.
+```
+
+- [ ] **Step 2: Add a CHANGELOG entry**
+
+`CHANGELOG.md`'s `## [Unreleased]` section currently has only a `### Changed` subsection (no `### Added` yet). Add a new `### Added` subsection directly above it:
+
+```markdown
+## [Unreleased]
+
+### Added
+
+- **`--self-contained <dir>`**: materializes fragment tree/hooks payload into a local build context next to the generated Containerfile, then packages the result as a sibling `.tar.gz`. The emitted Containerfile references no registry image except the base. Mutually exclusive with `--ocp`.
+
+### Changed
+```
+
+- [ ] **Step 3: Document the flag in the README**
+
+`README.md:155-157` reads:
+
+```markdown
+- `--pin-digests`: Resolve and pin all image refs to sha256 digests
+- `--ocp [<path>]`: Generate a MachineOSConfig YAML for OpenShift (default: `machineosbuild.yaml`)
+- `--pool <name>`: MachineConfigPool name for `--ocp` output (default: `worker`)
+```
+
+Insert a new line between the `--pin-digests` and `--ocp` entries (alphabetical is not the existing order, so match by flag grouping: pinning-related first, then output-mode flags):
+
+```markdown
+- `--pin-digests`: Resolve and pin all image refs to sha256 digests
+- `--self-contained <dir>`: Materialize fragment tree/hooks payload into `<dir>` next to the generated Containerfile, and package `<dir>` as a sibling `<dir>.tar.gz`. The emitted Containerfile references no registry image except the base. Mutually exclusive with `--ocp`.
+- `--ocp [<path>]`: Generate a MachineOSConfig YAML for OpenShift (default: `machineosbuild.yaml`)
+- `--pool <name>`: MachineConfigPool name for `--ocp` output (default: `worker`)
+```
+
+- [ ] **Step 4: Run the test suite once more (docs-only change, but confirms nothing broke)**
+
+Run: `cargo test -- --nocapture 2>&1`
+Expected: all tests PASS (unchanged from Task 11).
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add process-docs/skills/containerfile-layer-semantics.md CHANGELOG.md README.md
+git commit -m "docs: document --self-contained mode
+
+Scopes the layer-semantics skill's bind-propagation guidance to the
+from=<image> mounts it actually covers, now that self-contained mode's
+context-source hook mount deliberately omits it. Adds the flag to the
+CHANGELOG and README per repo convention.
+
+Assisted-by: Claude Code (claude-opus-5)"
+```
 
 ---
 
@@ -1966,11 +2282,41 @@ Fix any issues found with focused commits, each describing the specific fix.
 - Emission changes (context-relative COPY, hook mount drops `from=`) -> Task 8.
 - Update model (regenerate, never mutate; delete-and-recreate in full) -> Tasks 1, 5.
 - Errors (`--self-contained` + `--ocp`; unsafe target dir; registry failure leaves no partial tree) -> Tasks 1, 2, 5.
-- Acceptance: golden-file test -> Task 9. Integration test (materialize + archive byte-for-byte) -> Tasks 4, 6. No-registry-reference test -> Task 8. Foreign-dir-refused test -> Tasks 1, 2. `--self-contained` + `--ocp` errors test -> Task 2.
+- Acceptance: golden-file test -> Task 9. **Integration test (materialize from fixture fragments, archive matches tree byte for byte) -> Task 6's `materialize_and_archive_round_trip_byte_for_byte`.** This is the spec's single acceptance test 2, satisfied by one test that composes `write_output_with` (calling the real `crate::loader::extract_fragment_payload_to_disk` against fixture layer bytes, stubbing only the skopeo pull, since `FragmentSource` has no non-registry variant to source a literal local fixture from) with `create_archive` over the same tree, then diffs every file. Task 4's `payload_extracted_to_disk_matches_source_bytes` additionally unit-tests the extractor in isolation, and Task 6's `archive_contents_match_tree_byte_for_byte` additionally unit-tests archiving a hand-built tree in isolation; both are supplementary coverage, not substitutes for the composed test. No-registry-reference test -> Task 8. Foreign-dir-refused test -> Tasks 1, 2. `--self-contained` + `--ocp` errors test -> Task 2.
 - Non-goals (no lockfile, no provenance, no partial update, no archive-suppression flag, no OCP interaction) -> verified absent in Task 11, Step 4.
 - Open item 1 (`--pin-digests` interaction) -> resolved in Global Constraints, implemented in Task 10.
-- Open item 2 (`bind-propagation` meaningfulness) -> resolved in Global Constraints, implemented in Task 8, asserted in Tasks 8-9.
+- Open item 2 (`bind-propagation` meaningfulness) -> resolved in Global Constraints, implemented in Task 8, asserted in Tasks 8-9, skill file scoped to match in Task 12.
 
 **Placeholder scan:** no "TBD"/"TODO"/"handle edge cases" markers; every step has runnable code or an exact command.
 
 **Type consistency:** `generate_containerfile`'s new parameter is `self_contained: bool` in every task that touches it (7, 8, 9, 10). `write_output`/`write_output_with`/`materialize_fragment`/`extract_fragment_payload_to_disk`/`check_target_dir_safe`/`create_archive`/`archive_path_for`/`pull_layer_bytes`/`should_keep_fragment_digests` are named and typed identically everywhere they are consumed across tasks.
+
+**Verification:** every code block in Tasks 1-10 was assembled into a scratch copy of the real repo and run through `cargo build --tests`, `cargo test` (123 tests pass; the one pre-existing unrelated failure, `fragment::tests::postgresql_example_preserves_repos_phase`, is a missing-fixture artifact of the scratch copy, not a regression), `cargo clippy --all-targets -- -D clippy::all`, and `cargo fmt --check`, before this revision was written up. This is how the two mandatory fixes and the formatting advisory were confirmed correct rather than merely reasoned about, and how the pre-existing `main`-branch clippy/fmt drift noted in Task 11 was distinguished from anything this plan introduces.
+
+## Advisory dispositions
+
+Every advisory from both reviews, fixed in the plan or accepted with a rationale. "Fixed" means the corresponding task above now reflects it; nothing here is deferred to implementation time.
+
+**From the correctness/TDD-lane review:**
+
+1. **`staging.into_path()` is deprecated in tempfile 3.27.0.** Fixed: Task 5 now uses `staging.keep()`.
+2. **Output directory inherits the staging tempdir's 0700, carried into the tarball.** Fixed: Task 5 normalizes `<dir>` to `0o755` (named constant `OUTPUT_DIR_MODE`) immediately after the rename, with a regression test (`write_output_normalizes_directory_permissions`).
+3. **`cargo fmt --check` fails on several pasted snippets.** Fixed: Task 5's failure-injection closure, Task 6's `fs::write` call, and Task 8's invariant-test assertion are now reformatted to match actual `cargo fmt` output (verified by running it, not by hand-formatting).
+4. **Task 3's "error cases identical" claim is very slightly off.** Fixed: Task 3's Interfaces block now states the one cosmetic difference (the `bail!` message reports the digest-pinned ref, not the original tag-form ref) instead of claiming exact equivalence.
+5. **No task amends the skill file the plan's own resolution now contradicts.** Fixed: new Task 12 scopes `containerfile-layer-semantics.md`'s `bind-propagation` guidance to `from=<image>` mounts and records the context-source exception.
+6. **No CHANGELOG task.** Fixed: Task 12 adds an `### Added` entry under `## [Unreleased]`.
+7. **No README task.** Fixed: Task 12 documents `--self-contained` in `README.md`'s flag list.
+8. **`TOOL_GENERATED_ENTRIES` declared before use, causing an expected `dead_code` warning during Task 1's failing-test run.** Accepted, no change: the plan already discloses this in Task 1's note, and it resolves itself one step later in the same task; adding a `#[allow]` for one step's transient state would be more code than the warning is worth.
+
+**From the architecture/contract-lane review:**
+
+1. **No README or CHANGELOG task.** Fixed: same fix as items 6-7 above (Task 12); listed here separately because both reviews flagged it independently.
+2. **Doubled registry traffic (metadata pull, then materialization pull).** Accepted, no change: this is the direct, disclosed consequence of "materialization reuses the loader's existing pull mechanism, no new fetch machinery" (Global Constraints) combined with Resolved Open Item 1 (materialization must pull by digest for correctness, independent of `--pin-digests`). Avoiding the second pull would mean threading raw layer bytes through the whole pipeline just for the self-contained path, which is exactly the kind of parallel machinery the spec's non-goals and this plan's "reuse over invention" instruction argue against. Performance is not a stated acceptance criterion.
+3. **A fragment with only `fragment.toml` (no tree/hooks content) produces no `fragments/<name>/` directory.** Accepted, no change: harmless by the reviewer's own analysis (no COPY or mount instruction ever references a fragment with no tree/hooks paths, since the generator's `has_repo`/`has_non_repo`/`hook_paths.is_empty()` checks all gate on content actually being present), and not a case any current example fragment exercises. Adding directory-creation-only logic for a degenerate case with no functional consequence would be speculative generality the codebase's "no abstractions for single-use code" standard argues against.
+4. **A stray staging directory is left behind if `fs::rename` itself fails.** Accepted, no change: cosmetic per the reviewer's own note (it sits outside `<dir>`, so it cannot confuse `check_target_dir_safe` on the next run), and `fs::rename` within the same filesystem (guaranteed by `tempdir_in(parent)`) failing is not a case the spec asks this plan to harden against.
+5. **`<dir>.tar.gz` is overwritten by `create_archive` without a safety check.** Accepted, no change: the reviewer frames this as noted, not requested, and the spec's Non-goals explicitly rule out an archive-suppression flag; adding a guard around the archive specifically (with no corresponding spec requirement) risks growing into exactly that kind of unrequested machinery.
+6. **Task ordering executes as written; no advisory here escalates to verdict-driving.** Accepted, confirmed: no plan change needed; this is the reviewer's own positive verification of Task 1 -> 2, 3 -> 4 -> 5, 5/6 -> 10, 7 -> 8 -> 9 -> 10, 11 last.
+
+**Tally:** 14 advisories, 7 fixed (1 counted once despite being raised by both reviewers), 7 accepted with rationale.
+
+**Separately actioned (not part of the 14-advisory count):** the architecture-lane review's suggestion of one manual `podman build` before merge, since no test in the plan executes the emitted context-relative bind mount against a real builder. Folded into Task 11 as Step 5.
