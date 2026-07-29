@@ -4,47 +4,52 @@
 
 **Goal:** Add `--self-contained <DIR>` to the existing command: it materializes fragment tree/hooks payload into a local build context next to a generated Containerfile that references no registry image except the base, then packages the directory as a sibling `.tar.gz`.
 
-**Architecture:** A new module, `src/self_contained.rs`, owns three things: a target-directory safety check (regenerate-never-mutate model), a staged-then-atomically-swapped writer for the output tree, and a tar.gz packager. `src/loader.rs` gains a shared internal pull helper so the existing registry pull (used for metadata/validation) and the new materialization pull share one code path, plus a thin function that writes a fragment's `tree/`/`hooks/` payload to disk instead of collecting a path list. `src/generator.rs` gains a `self_contained: bool` parameter (mirroring the existing `ocp: bool`) that swaps `COPY --from=<ref>` / `RUN --mount=...,from=<ref>` for context-relative `COPY fragments/<name>/tree/...` / `RUN --mount=...,source=fragments/<name>/hooks` forms and suppresses every fragment registry reference, including in comments. `src/main.rs` wires the new CLI flag (`conflicts_with = "ocp"`), calls the directory check before any network access, and branches the assembly pipeline's tail between the existing default/OCP output and the new self-contained writer.
+**Architecture:** A new module, `src/self_contained.rs`, owns four things: a target-directory safety check keyed on a sentinel marker file (regenerate-never-mutate model), a staged-then-atomically-swapped writer for the output tree, a tar.gz packager, and the sentinel's filename/contents. `src/loader.rs` gains a shared internal pull helper so the existing registry pull (used for metadata/validation) and the new materialization pull share one code path, plus a thin function that writes a fragment's `tree/`/`hooks/` payload to disk instead of collecting a path list. `src/generator.rs` gains a `self_contained: bool` parameter (mirroring the existing `ocp: bool`) that swaps `COPY --from=<ref>` / `RUN --mount=...,from=<ref>` for context-relative `COPY fragments/<name>/tree/...` / `RUN --mount=...,source=fragments/<name>/hooks` forms and suppresses every fragment registry reference, including in comments. `src/main.rs` wires the new CLI flag (`conflicts_with_all = ["ocp", "output"]`), calls the directory check before any network access, and branches the assembly pipeline's tail between the existing default/OCP output and the new self-contained writer.
 
 **Tech Stack:** Rust, `clap` derive, `tar` + `flate2`, `tempfile`, `anyhow`, `cargo test`
 
 ## Global Constraints
 
-- `--self-contained <DIR>` is mutually exclusive with `--ocp`; the CLI itself must refuse both (`clap`'s `conflicts_with`, not a manual check).
+- `--self-contained <DIR>` is mutually exclusive with `--ocp` and with `--output`; the CLI itself must refuse both combinations (`clap`'s `conflicts_with_all`, not a manual check). `--output`'s default value must not trigger the conflict, only an explicit `--output` alongside `--self-contained` does.
 - Output tree, exactly:
   ```
   <dir>/
+    .osfragment-assemble   sentinel: tool name + version, proves ownership
     Containerfile
     manifest.yaml
     fragments/
       <name>/
-        tree/
-        hooks/            (only when the fragment has hooks)
-  <dir>.tar.gz
+        tree/              (omitted when the fragment has no tree/ content)
+        hooks/             (only when the fragment has hooks)
+  <dir>.tar.gz              includes the sentinel; rebuilt from the same
+                            staged tree, unconditionally overwritten
   ```
 - Materialization reuses the loader's existing pull mechanism; no new fetch machinery. Both the metadata/validation pull and the materialization pull go through one shared helper in `src/loader.rs`.
-- Regenerate, never mutate: `<dir>` may be absent, empty, or exactly tool-generated (`Containerfile` + `fragments/`, optionally `manifest.yaml`) and nothing else. Anything else is refused. A refused or failed run must never delete or partially overwrite an existing directory.
-- Any registry failure during materialization fails the whole run with no partial tree left at `<dir>`. This plan achieves that by staging into a temp directory next to `<dir>` and only renaming it into place after every fragment succeeds.
-- `FROM <base>` is the only registry reference anywhere in the self-contained Containerfile, including comments.
+- Regenerate, never mutate: `<dir>` may be absent, empty, or exactly tool-generated. Tool-generated means the sentinel file (`.osfragment-assemble`) is present and no entry outside the tool-generated set (`Containerfile`, `manifest.yaml`, `fragments/`, the sentinel) exists. The sentinel, not the old `Containerfile` + `fragments/` content heuristic, is what proves ownership; `Containerfile` and `fragments/` are common enough names that a user's own directory could coincidentally contain both, but not this exact dotfile. Anything else is refused. A refused or failed run must never delete or partially overwrite an existing directory.
+- Any registry failure during materialization fails the whole run with no partial tree left at `<dir>` and no partial or stale `<dir>.tar.gz`. This plan achieves that by staging into a temp directory next to `<dir>` and only renaming it into place, and only building the archive from that swapped-in directory, after every fragment succeeds.
+- Regeneration is idempotent: running the command twice against unchanged manifest and registry state produces byte-identical output both times, and the second run's directory check passes against the first run's own output (because the sentinel is part of what gets staged and swapped in).
+- `FROM <base>` is the only registry reference anywhere in the self-contained Containerfile, including comments. It is also the only thing `--pin-digests` still affects in this mode: fragment digests are always resolved internally (materialization needs them regardless of the flag) but never exposed in the output, comments included; the base `FROM` is pinned only when `--pin-digests` is actually passed, unchanged from default mode.
 - `cargo clippy -- -D clippy::all` must report zero warnings. `cargo fmt --check` must pass. (Exact command per `osfragment-assemble/CLAUDE.md`.)
 - Non-goals, hard boundary: no lockfile, no provenance/signature recording, no partial update, no in-place mutation, no archive-suppression flag, no OCP interaction. No task in this plan may build toward any of these; if you find yourself doing so, stop and drop the task.
 - Every `LoadedFragment` still has exactly one `FragmentSource` variant (`Registry`), so `let FragmentSource::Registry { ref image_ref } = loaded.source;` remains an irrefutable, valid pattern everywhere it's used.
 
-**Resolved open items (decided in this plan, not reopened by implementers):**
+**Resolved open items (decided in this plan; the round-2 spec revision states both directly in the spec body, so "resolved" here means "implemented," not "only decided here"):**
 
-1. **`--pin-digests` does not gate self-contained materialization pulls.** Reading `src/loader.rs::load_registry_fragment` and `src/main.rs::load_all_fragments`: the actual `skopeo copy` for a fragment already always resolves and pulls by digest internally, regardless of `--pin-digests`. That flag only controls whether the *caller* keeps the digest-pinned `FragmentSource`/`resolved_digest` exposed afterward (which drives named-stage emission and digest comments in default mode). Self-contained mode needs the digest-pinned ref to survive past `load_all_fragments` so materialization pulls exactly what was validated, regardless of whether the user asked for digest pinning. So: when `--self-contained` is set, fragment digests are kept (as if `--pin-digests` were set) purely for materialization; the base image's `FROM` line is still pinned only when the user actually passes `--pin-digests`, unchanged from today. Task 10 implements this via `should_keep_fragment_digests(pin_digests, self_contained) -> bool`.
-2. **`bind-propagation=rshared` is dropped for the self-contained hook mount; `z` is kept.** Per `process-docs/skills/containerfile-layer-semantics.md`, `bind-propagation` controls how mount events propagate between mount namespaces, which only matters for a live, host-tied mount (MCO's production case mounts `source=/`, a whole image rootfs where nested mounts can appear). A `from=context` source is a static copy of build-context files baked in before the build starts; there is no live mount namespace to propagate events from, so the option is inert there. `z` (SELinux relabel) is unrelated to propagation and still applies to a context-relative bind mount under SELinux enforcement, so it stays. Emitted form: `RUN --mount=type=bind,source=fragments/<name>/hooks,target=/frag-hooks,z \`. Task 8's golden assertions and Task 9's golden file encode this exact string.
+1. **`--pin-digests` does not gate self-contained materialization pulls.** Reading `src/loader.rs::load_registry_fragment` and `src/main.rs::load_all_fragments`: the actual `skopeo copy` for a fragment already always resolves and pulls by digest internally, regardless of `--pin-digests`. That flag only controls whether the *caller* keeps the digest-pinned `FragmentSource`/`resolved_digest` exposed afterward (which drives named-stage emission and digest comments in default mode). Self-contained mode needs the digest-pinned ref to survive past `load_all_fragments` so materialization pulls exactly what was validated, regardless of whether the user asked for digest pinning. So: when `--self-contained` is set, fragment digests are kept (as if `--pin-digests` were set) purely for materialization; the base image's `FROM` line is still pinned only when the user actually passes `--pin-digests`, unchanged from today. Task 10 implements this via `should_keep_fragment_digests(pin_digests, self_contained) -> bool`. The spec's Emission changes section now states this outcome directly (must-fix, round 2).
+2. **`bind-propagation=rshared` is dropped for the self-contained hook mount; `z` is kept.** Per `process-docs/skills/containerfile-layer-semantics.md`, `bind-propagation` controls how mount events propagate between mount namespaces, which only matters for a live, host-tied mount (MCO's production case mounts `source=/`, a whole image rootfs where nested mounts can appear). A `from=context` source is a static copy of build-context files baked in before the build starts; there is no live mount namespace to propagate events from, so the option is inert there. `z` (SELinux relabel) is unrelated to propagation and still applies to a context-relative bind mount under SELinux enforcement, so it stays. Emitted form: `RUN --mount=type=bind,source=fragments/<name>/hooks,target=/frag-hooks,z \`. Task 8's golden assertions and Task 9's golden file encode this exact string. The spec's Emission changes section states this exact instruction directly (this was already committed in the spec's prior draft; round 2 keeps it).
 
 ---
 
-### Task 1: Target-directory safety check
+### Task 1: Target-directory safety check with a sentinel marker
 
 **Files:**
 - Create: `src/self_contained.rs`
 - Modify: `src/lib.rs`
 
 **Interfaces:**
-- Produces: `pub fn check_target_dir_safe(dir: &Path) -> Result<()>`, used by Task 2 (CLI wiring) and Task 5 (writer).
+- Produces: `pub fn check_target_dir_safe(dir: &Path) -> Result<()>`, used by Task 2 (CLI wiring) and Task 5 (writer). Also produces `const SENTINEL_FILENAME: &str` and `fn sentinel_contents() -> String`, consumed by Task 5 (the writer writes the sentinel into every staged output) and Task 6 (fixtures that hand-build a tree need to include it too).
+
+This task replaces the round-1 plan's content-only heuristic (`Containerfile` + `fragments/` present, nothing else) with a sentinel file, per spec revision: that heuristic could false-positive on a user's own directory that happens to contain both names for unrelated reasons, and the tool deletes before writing, so a false positive is unrecoverable data loss. The sentinel, `.osfragment-assemble`, is a regular file inside `<dir>` containing the tool name and version; its **presence** is the ownership proof, not its exact contents, and being a normal file in the tree it is committed to git and packaged into the archive along with everything else.
 
 - [ ] **Step 1: Register the new module**
 
@@ -77,16 +82,42 @@ use anyhow::{bail, Context, Result};
 use std::fs;
 use std::path::Path;
 
+/// Filename of the sentinel marker written into every self-contained output
+/// directory. Its presence, not directory contents, is the ownership proof
+/// `check_target_dir_safe` relies on: a directory containing a `Containerfile`
+/// and `fragments/` for reasons of its own (a false positive under a
+/// content-only heuristic) will not coincidentally contain this exact
+/// dotfile. The sentinel is a regular file within `<dir>`, so it is part of
+/// the committed tree and the packaged archive like everything else the tool
+/// writes; a directory checked out from git with the sentinel intact is
+/// exactly as regenerable as the one that produced it.
+const SENTINEL_FILENAME: &str = ".osfragment-assemble";
+
+/// Contents written to the sentinel file: tool name and version, nothing
+/// else. Presence is what `check_target_dir_safe` checks, not this exact
+/// text, so the format has no compatibility contract to keep.
+fn sentinel_contents() -> String {
+    format!("osfragment-assemble v{}\n", env!("CARGO_PKG_VERSION"))
+}
+
 /// Entries the tool itself may have written to a self-contained output
 /// directory in a prior run. A directory is safe to regenerate only if
 /// every entry it contains is one of these.
-const TOOL_GENERATED_ENTRIES: &[&str] = &["Containerfile", "manifest.yaml", "fragments"];
+const TOOL_GENERATED_ENTRIES: &[&str] = &[
+    "Containerfile",
+    "manifest.yaml",
+    "fragments",
+    SENTINEL_FILENAME,
+];
 
 /// Refuse to regenerate into a directory that holds anything the tool did
 /// not write itself. Absent and empty directories are always safe; a
-/// directory containing `Containerfile` and `fragments/` (optionally
-/// `manifest.yaml`), and nothing else, is recognized as tool-generated
-/// from a prior run and is safe to delete and recreate.
+/// directory containing the sentinel file (`.osfragment-assemble`) and no
+/// entries outside the tool-generated set is recognized as tool-generated
+/// from a prior run and is safe to delete and recreate. The sentinel, not
+/// the presence of `Containerfile`/`fragments/` alone, is what proves
+/// ownership: those names are common enough that a user's own directory
+/// could coincidentally match them, but not this exact dotfile.
 pub fn check_target_dir_safe(dir: &Path) -> Result<()> {
     if !dir.exists() {
         return Ok(());
@@ -109,9 +140,10 @@ pub fn check_target_dir_safe(dir: &Path) -> Result<()> {
 
     bail!(
         "--self-contained target {} already exists and was not generated by this tool \
-         (expected only Containerfile, manifest.yaml, fragments/); point --self-contained \
-         at a new or empty directory",
-        dir.display()
+         (expected the {} sentinel plus Containerfile, manifest.yaml, fragments/, and \
+         nothing else); point --self-contained at a new or empty directory",
+        dir.display(),
+        SENTINEL_FILENAME
     );
 }
 
@@ -141,6 +173,7 @@ mod tests {
         fs::create_dir_all(dir.join("fragments/epel")).unwrap();
         fs::write(dir.join("Containerfile"), "FROM x\n").unwrap();
         fs::write(dir.join("manifest.yaml"), "base: x\n").unwrap();
+        fs::write(dir.join(SENTINEL_FILENAME), sentinel_contents()).unwrap();
         assert!(check_target_dir_safe(&dir).is_ok());
     }
 
@@ -155,9 +188,7 @@ mod tests {
     }
 
     #[test]
-    fn directory_missing_fragments_is_refused() {
-        // Containerfile alone, without fragments/, is not a complete prior
-        // run and must not be treated as safe to delete.
+    fn directory_missing_sentinel_is_refused() {
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path().join("partial");
         fs::create_dir(&dir).unwrap();
@@ -165,58 +196,58 @@ mod tests {
         let err = check_target_dir_safe(&dir).unwrap_err();
         assert!(err.to_string().contains("was not generated by this tool"));
     }
+
+    #[test]
+    fn containerfile_and_fragments_without_sentinel_is_refused() {
+        // The exact false positive the sentinel replaces: a user's own
+        // directory that happens to contain both a Containerfile and a
+        // fragments/ subdirectory for unrelated reasons must not be treated
+        // as tool-generated just because a content-only heuristic would
+        // have matched it.
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("users-own-project");
+        fs::create_dir_all(dir.join("fragments/whatever")).unwrap();
+        fs::write(dir.join("Containerfile"), "FROM my-own-base\n").unwrap();
+        let err = check_target_dir_safe(&dir).unwrap_err();
+        assert!(err.to_string().contains("was not generated by this tool"));
+    }
+
+    #[test]
+    fn sentinel_present_but_extra_user_file_is_refused() {
+        // The sentinel proves the tool wrote *something* here at some
+        // point, but an unexpected extra entry alongside it is still
+        // refused rather than silently swept up in the next regeneration.
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("prior-run-plus-extra");
+        fs::create_dir_all(dir.join("fragments/epel")).unwrap();
+        fs::write(dir.join("Containerfile"), "FROM x\n").unwrap();
+        fs::write(dir.join(SENTINEL_FILENAME), sentinel_contents()).unwrap();
+        fs::write(dir.join("notes.txt"), "my own notes").unwrap();
+        let err = check_target_dir_safe(&dir).unwrap_err();
+        assert!(err.to_string().contains("was not generated by this tool"));
+    }
 }
 ```
 
-Note: `TOOL_GENERATED_ENTRIES` is declared now for Step 4's implementation to reference; at this point the safety logic is deliberately too strict (any non-empty directory is refused), which is why `tool_generated_directory_is_safe` fails.
-
-- [ ] **Step 3: Run tests to see the expected failure**
+- [ ] **Step 3: Run tests to verify they pass**
 
 Run: `cargo test --lib self_contained:: -- --nocapture`
-Expected: `tool_generated_directory_is_safe` FAILS (a non-empty, tool-generated directory is currently refused). The other four tests pass already.
+Expected: all 7 tests PASS. (Step 2 writes the sentinel design as settled fact, not an incremental discovery, so there is no red step here beyond the module not existing before this task starts; that failure mode is not worth a separate command.)
 
-- [ ] **Step 4: Implement the tool-generated recognition**
-
-Replace the body of `check_target_dir_safe` (the `if entries.is_empty()` block through the final `bail!`) with:
-
-```rust
-    if entries.is_empty() {
-        return Ok(());
-    }
-
-    let all_recognized = entries
-        .iter()
-        .all(|e| TOOL_GENERATED_ENTRIES.contains(&e.as_str()));
-    let has_containerfile = entries.iter().any(|e| e == "Containerfile");
-    let has_fragments = entries.iter().any(|e| e == "fragments");
-
-    if all_recognized && has_containerfile && has_fragments {
-        return Ok(());
-    }
-
-    bail!(
-        "--self-contained target {} already exists and was not generated by this tool \
-         (expected only Containerfile, manifest.yaml, fragments/); point --self-contained \
-         at a new or empty directory",
-        dir.display()
-    );
-```
-
-- [ ] **Step 5: Run tests to verify they all pass**
-
-Run: `cargo test --lib self_contained:: -- --nocapture`
-Expected: all 5 tests PASS.
-
-- [ ] **Step 6: Commit**
+- [ ] **Step 4: Commit**
 
 ```bash
 git add src/self_contained.rs src/lib.rs
 git commit -m "feat: add self-contained target directory safety check
 
-Part of --self-contained mode. A directory is safe to regenerate only
-if it is absent, empty, or exactly what a prior tool run produced
-(Containerfile + fragments/); anything else is refused rather than
-silently overwritten.
+A directory is safe to regenerate only if it is absent, empty, or
+contains the .osfragment-assemble sentinel plus nothing outside the
+tool-generated entry set. The sentinel replaces a content-only
+heuristic (Containerfile + fragments/ present): that heuristic could
+false-positive on a user's own directory that happens to match, and
+the tool deletes before writing, so a false positive was unrecoverable
+data loss. The sentinel is a regular file in the tree, so it commits
+and packages like everything else the tool writes.
 
 Assisted-by: Claude Code (claude-opus-5)"
 ```
@@ -231,7 +262,7 @@ Assisted-by: Claude Code (claude-opus-5)"
 
 **Interfaces:**
 - Consumes: `osfragment_assemble::self_contained::check_target_dir_safe` (Task 1).
-- Produces: `Cli.self_contained: Option<PathBuf>`, wired to fail fast via `check_target_dir_safe` before any manifest read or network access.
+- Produces: `Cli.self_contained: Option<PathBuf>`, wired to fail fast via `check_target_dir_safe` before any manifest read or network access, and mutually exclusive with both `--ocp` and `--output`.
 
 - [ ] **Step 1: Write the failing CLI tests**
 
@@ -245,6 +276,32 @@ fn self_contained_conflicts_with_ocp() {
         .assert()
         .failure()
         .stderr(predicate::str::contains("cannot be used with"));
+}
+
+#[test]
+fn self_contained_conflicts_with_output() {
+    let mut cmd = Command::cargo_bin("osfragment-assemble").unwrap();
+    cmd.args(["--self-contained", "out", "--output", "Containerfile"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("cannot be used with"));
+}
+
+#[test]
+fn self_contained_alone_does_not_conflict_with_outputs_default() {
+    // --output has a default value, but relying on that default (never
+    // passing --output explicitly) must not trip conflicts_with: only an
+    // explicit --output alongside --self-contained is an error. This run
+    // fails for an unrelated reason (no manifest file in the test's cwd),
+    // which is exactly the point: it must not fail on an --output conflict.
+    let mut cmd = Command::cargo_bin("osfragment-assemble").unwrap();
+    cmd.args(["--self-contained", "out"])
+        .assert()
+        .failure()
+        .stderr(
+            predicate::str::contains("reading manifest")
+                .or(predicate::str::contains("was not generated by this tool")),
+        );
 }
 
 #[test]
@@ -279,14 +336,17 @@ In `src/main.rs`, add to the `Cli` struct, between the `ocp` and `pool` fields:
     /// Materialize fragment contents into a local build context and
     /// package it as a tarball, so the emitted Containerfile needs no
     /// registry access at build time except for the base image. Mutually
-    /// exclusive with --ocp.
-    #[arg(long, value_name = "DIR", conflicts_with = "ocp")]
+    /// exclusive with --ocp and --output: this mode's Containerfile lives
+    /// only at <dir>/Containerfile.
+    #[arg(long, value_name = "DIR", conflicts_with_all = ["ocp", "output"])]
     self_contained: Option<PathBuf>,
 
     /// MachineConfigPool name for --ocp output (only meaningful with --ocp)
     #[arg(long, default_value = "worker")]
     pool: String,
 ```
+
+`conflicts_with_all` checks whether the other argument was **explicitly passed** on the command line, not whether its field ends up populated; `--output`'s default value does not count as "used" for this purpose, so `--self-contained out` alone (relying on `--output`'s default) does not trip the conflict, only an explicit `--output ... --self-contained ...` does. `self_contained_alone_does_not_conflict_with_outputs_default` (Step 1) locks this in.
 
 - [ ] **Step 4: Wire the early safety check**
 
@@ -312,7 +372,7 @@ use osfragment_assemble::self_contained::check_target_dir_safe;
 - [ ] **Step 5: Run tests to verify they pass**
 
 Run: `cargo test --test cli self_contained -- --nocapture`
-Expected: both new tests PASS.
+Expected: all four new tests PASS.
 
 - [ ] **Step 6: Run the full test suite**
 
@@ -323,11 +383,12 @@ Expected: all tests PASS (existing behavior unchanged; `self_contained` defaults
 
 ```bash
 git add src/main.rs tests/cli.rs
-git commit -m "feat: add --self-contained CLI flag with --ocp conflict
+git commit -m "feat: add --self-contained CLI flag, conflicts with --ocp/--output
 
---self-contained is mutually exclusive with --ocp (enforced by clap's
-conflicts_with) and fails fast on an unsafe target directory before
-any manifest read or network access.
+--self-contained is mutually exclusive with both --ocp and --output
+(clap's conflicts_with_all; --output's default value does not trigger
+it, only an explicit pass does) and fails fast on an unsafe target
+directory before any manifest read or network access.
 
 Assisted-by: Claude Code (claude-opus-5)"
 ```
@@ -729,6 +790,10 @@ Then add these tests inside `mod tests`:
         );
         assert!(dir.join("fragments/epel").is_dir());
         assert!(dir.join("fragments/cis").is_dir());
+        assert!(
+            dir.join(SENTINEL_FILENAME).exists(),
+            "sentinel must be written into the output tree"
+        );
     }
 
     #[test]
@@ -737,6 +802,7 @@ Then add these tests inside `mod tests`:
         let dir = workdir.path().join("ctx");
         fs::create_dir_all(dir.join("fragments/old-frag")).unwrap();
         fs::write(dir.join("Containerfile"), "OLD CONTENT\n").unwrap();
+        fs::write(dir.join(SENTINEL_FILENAME), sentinel_contents()).unwrap();
 
         let manifest_path = workdir.path().join("osfragment-assemble.yaml");
         fs::write(&manifest_path, "base: example\n").unwrap();
@@ -756,6 +822,44 @@ Then add these tests inside `mod tests`:
             "NEW CONTENT\n"
         );
         assert!(!dir.join("fragments/old-frag").exists());
+        assert!(dir.join(SENTINEL_FILENAME).exists());
+    }
+
+    #[test]
+    fn regeneration_is_idempotent_and_passes_safety_check_again() {
+        // The update model's central operation: run write_output_with twice
+        // against the same target with the same inputs. The second run must
+        // pass check_target_dir_safe against the first run's own output (the
+        // whole point of the sentinel) and must produce byte-identical
+        // content, since output is a pure function of manifest and registry
+        // state.
+        let workdir = tempfile::tempdir().unwrap();
+        let dir = workdir.path().join("ctx");
+        let manifest_path = workdir.path().join("osfragment-assemble.yaml");
+        fs::write(&manifest_path, "base: example\n").unwrap();
+        let fragments = vec![test_loaded_fragment("epel")];
+
+        for _ in 0..2 {
+            write_output_with(
+                &dir,
+                &manifest_path,
+                "FROM example\n",
+                &fragments,
+                |_r, d| fs::create_dir_all(d).map_err(Into::into),
+            )
+            .unwrap();
+        }
+
+        assert_eq!(
+            fs::read_to_string(dir.join("Containerfile")).unwrap(),
+            "FROM example\n"
+        );
+        assert_eq!(
+            fs::read_to_string(dir.join("manifest.yaml")).unwrap(),
+            "base: example\n"
+        );
+        assert!(dir.join("fragments/epel").is_dir());
+        assert!(dir.join(SENTINEL_FILENAME).exists());
     }
 
     #[test]
@@ -786,6 +890,7 @@ Then add these tests inside `mod tests`:
         let dir = workdir.path().join("ctx");
         fs::create_dir_all(dir.join("fragments/prior-run")).unwrap();
         fs::write(dir.join("Containerfile"), "PRIOR RUN\n").unwrap();
+        fs::write(dir.join(SENTINEL_FILENAME), sentinel_contents()).unwrap();
 
         let manifest_path = workdir.path().join("osfragment-assemble.yaml");
         fs::write(&manifest_path, "base: example\n").unwrap();
@@ -813,6 +918,10 @@ Then add these tests inside `mod tests`:
             "PRIOR RUN\n"
         );
         assert!(dir.join("fragments/prior-run").exists());
+        assert!(
+            dir.join(SENTINEL_FILENAME).exists(),
+            "the prior run's sentinel must survive a failed regeneration untouched"
+        );
         assert!(!dir.join("fragments/good-frag").exists());
     }
 
@@ -907,6 +1016,11 @@ fn write_output_with(
             manifest_path.display()
         )
     })?;
+    // The sentinel is a regular file in the staged tree, so it is part of
+    // the committed tree and the archive like everything else here, and
+    // check_target_dir_safe recognizes it on the next regeneration.
+    fs::write(staging.path().join(SENTINEL_FILENAME), sentinel_contents())
+        .context("writing sentinel marker")?;
 
     let staged_fragments = staging.path().join("fragments");
     fs::create_dir_all(&staged_fragments)
@@ -965,7 +1079,7 @@ pub fn write_output(
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `cargo test --lib self_contained:: -- --nocapture`
-Expected: all tests PASS, including `write_output_normalizes_directory_permissions`.
+Expected: all tests PASS, including `write_output_normalizes_directory_permissions` and `regeneration_is_idempotent_and_passes_safety_check_again`.
 
 - [ ] **Step 5: Run the full test suite and clippy**
 
@@ -978,15 +1092,18 @@ Expected: all tests PASS, zero clippy warnings. (`staging.keep()` is the non-dep
 git add src/self_contained.rs
 git commit -m "feat: add staged, atomic self-contained output writer
 
-write_output stages Containerfile, manifest.yaml copy, and per-fragment
-materialization into a temp directory next to the target, and only
-swaps it into place after every fragment succeeds. A materialization
-failure partway through leaves the original directory (if any)
-untouched, and the CLI's public entry point always uses the real
-registry pull path; tests inject a stub to exercise the atomicity
-guarantee without network access. The swapped-in directory is
-normalized to 0755, overriding the staging tempdir's 0700, since it is
-a handoff artifact rather than a private scratch directory.
+write_output stages Containerfile, manifest.yaml copy, sentinel, and
+per-fragment materialization into a temp directory next to the
+target, and only swaps it into place after every fragment succeeds. A
+materialization failure partway through leaves the original directory
+(if any) untouched, and the CLI's public entry point always uses the
+real registry pull path; tests inject a stub to exercise the
+atomicity guarantee without network access. Regeneration is
+idempotent: running against the same inputs twice produces
+byte-identical output and the second run's safety check passes
+against the first run's own sentinel. The swapped-in directory is
+normalized to 0755, overriding the staging tempdir's 0700, since it
+is a handoff artifact rather than a private scratch directory.
 
 Assisted-by: Claude Code (claude-opus-5)"
 ```
@@ -1002,7 +1119,7 @@ Assisted-by: Claude Code (claude-opus-5)"
 - Consumes: `write_output_with` (Task 5, same-module private function; the composed test below calls it directly), `crate::loader::extract_fragment_payload_to_disk` (Task 4).
 - Produces: `pub fn create_archive(dir: &Path) -> Result<PathBuf>`, used by `src/main.rs` (Task 10).
 
-This task carries two fixes found in plan review, both folded into the steps below rather than left as follow-ups: `archive_path_for`'s naive `OsStr` append breaks on a trailing separator (`--self-contained out/`, what shell completion produces for an existing directory, must still yield `out.tar.gz`, not a hidden `.tar.gz` file inside `out/`), and the spec's acceptance test 2 ("materialize from local fixture fragments, then assert the archive matches the tree byte for byte") needs one test that actually composes materialization with archiving over the same tree. Tasks 4 and 6's other tests each exercise half of that pipeline but never together, and until this step nothing calls `extract_fragment_payload_to_disk` outside its own unit test.
+This task carries fixes and additions found across two rounds of review, all folded into the steps below rather than left as follow-ups: `archive_path_for`'s naive `OsStr` append breaks on a trailing separator (`--self-contained out/`, what shell completion produces for an existing directory, must still yield `out.tar.gz`, not a hidden `.tar.gz` file inside `out/`); the spec's acceptance test 2 ("materialize from fixture fragments, then assert the archive matches the tree byte for byte") needs one test that actually composes materialization with archiving over the same tree, since Tasks 4 and 6's other tests each exercise half of that pipeline but never together; the composed test and the hand-built fixture must include the sentinel from Task 1, since a real self-contained tree always has one; and the spec's hooks-only-fragment acceptance item needs a materialization-level test proving no empty `tree/` directory is created when a fragment has hooks but no tree content.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1095,6 +1212,7 @@ Then add these tests to `mod tests`:
         for rel in [
             "Containerfile",
             "manifest.yaml",
+            SENTINEL_FILENAME,
             "fragments/epel/tree/etc/yum.repos.d/epel.repo",
             "fragments/cis/tree/usr/lib/sysctl.d/99-hardening.conf",
             "fragments/cis/hooks/configure.sh",
@@ -1107,6 +1225,38 @@ Then add these tests to `mod tests`:
                 rel
             );
         }
+    }
+
+    #[test]
+    fn hooks_only_fragment_materializes_hooks_without_tree_dir() {
+        // A fragment with hooks but no tree/ content must produce
+        // fragments/<name>/hooks/ and no fragments/<name>/tree/ at all,
+        // not an empty tree/ directory.
+        let hooks_only_layer =
+            build_fixture_layer(&[("fragment/hooks/setup.sh", b"#!/bin/sh\necho setup\n")]);
+
+        let workdir = tempfile::tempdir().unwrap();
+        let dir = workdir.path().join("ctx");
+        let manifest_path = workdir.path().join("osfragment-assemble.yaml");
+        fs::write(&manifest_path, "base: example\n").unwrap();
+
+        let fragments = vec![test_loaded_fragment("hooks-only")];
+        write_output_with(
+            &dir,
+            &manifest_path,
+            "FROM example\n",
+            &fragments,
+            |_image_ref, dest| {
+                crate::loader::extract_fragment_payload_to_disk(&hooks_only_layer, dest)
+            },
+        )
+        .unwrap();
+
+        assert!(dir.join("fragments/hooks-only/hooks/setup.sh").exists());
+        assert!(
+            !dir.join("fragments/hooks-only/tree").exists(),
+            "a hooks-only fragment must not produce a tree/ directory"
+        );
     }
 
     #[test]
@@ -1146,6 +1296,7 @@ Then add these tests to `mod tests`:
         fs::create_dir_all(dir.join("fragments/cis/hooks")).unwrap();
         fs::write(dir.join("Containerfile"), "FROM registry.example/base:1\n").unwrap();
         fs::write(dir.join("manifest.yaml"), "apiVersion: bootc.io/v1alpha1\n").unwrap();
+        fs::write(dir.join(SENTINEL_FILENAME), sentinel_contents()).unwrap();
         fs::write(
             dir.join("fragments/epel/tree/etc/yum.repos.d/epel.repo"),
             "[epel]\nbaseurl=https://example.com/epel/\n",
@@ -1174,6 +1325,7 @@ Then add these tests to `mod tests`:
         for rel in [
             "Containerfile",
             "manifest.yaml",
+            SENTINEL_FILENAME,
             "fragments/epel/tree/etc/yum.repos.d/epel.repo",
             "fragments/cis/hooks/configure.sh",
         ] {
@@ -1252,7 +1404,7 @@ Note on `archive_path_for`: `dir.file_name()` and `dir.parent()` both normalize 
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `cargo test --lib self_contained:: -- --nocapture`
-Expected: all tests PASS, including `materialize_and_archive_round_trip_byte_for_byte` and `archive_path_normalizes_trailing_separator`.
+Expected: all tests PASS, including `materialize_and_archive_round_trip_byte_for_byte`, `archive_path_normalizes_trailing_separator`, and `hooks_only_fragment_materializes_hooks_without_tree_dir`.
 
 - [ ] **Step 5: Run the full test suite and clippy**
 
@@ -1272,7 +1424,8 @@ Path components rather than raw OsStr concatenation, so a trailing
 separator (out/) still yields the sibling out.tar.gz instead of a
 hidden .tar.gz file inside the output directory. Verified byte-for-
 byte against a tree produced by the real materialize-then-archive
-pipeline, not just a hand-built directory.
+pipeline, not just a hand-built directory, and against a hooks-only
+fragment shape that must not produce an empty tree/ directory.
 
 Assisted-by: Claude Code (claude-opus-5)"
 ```
@@ -1510,9 +1663,9 @@ Assisted-by: Claude Code (claude-opus-5)"
 
 **Interfaces:**
 - Consumes: `self_contained` (Task 7), `copy_from_source` (existing, still used for `!self_contained`).
-- Produces: self-contained-mode emission for repo COPY, config COPY, and hook `RUN --mount`, per the two resolved open items in Global Constraints.
+- Produces: self-contained-mode emission for repo COPY, config COPY, and hook `RUN --mount`, per the two resolved open items in Global Constraints. Also produces the acceptance tests for spec must-fix 4 (`--pin-digests` interaction) and the hooks-only-fragment should-fix item.
 
-- [ ] **Step 1: Write the failing test**
+- [ ] **Step 1: Write the failing tests**
 
 Add to `src/generator.rs`'s `mod tests`:
 
@@ -1558,12 +1711,108 @@ Add to `src/generator.rs`'s `mod tests`:
             vec!["FROM registry.redhat.io/rhel10/rhel-bootc:10.0"]
         );
     }
+
+    #[test]
+    fn self_contained_with_pin_digests_pins_only_the_base() {
+        // --self-contained combined with --pin-digests: the base FROM line
+        // is still pinned (the one thing --pin-digests continues to affect
+        // in this mode), but no fragment FROM stage, digest comment, or
+        // COPY/mount --from= survives, regardless of the flag. Fragment
+        // digests are still resolved internally (materialization needs
+        // them) but self-contained mode's suppression already covers that;
+        // this test locks in that the suppression holds even when a base
+        // digest is also present. Spec must-fix 4 / backlog item
+        // osfragment-assemble-self-contained-pin-digests-invariant.
+        let (epel, mf_epel) = make_repos_fragment("epel", "aaa111");
+        let (mut cis, mf_cis) = make_config_fragment("cis", "bbb222");
+        cis.manifest_index = 1;
+        let manifest = Manifest {
+            base: "registry.redhat.io/rhel10/rhel-bootc:10.0".into(),
+            base_type: None,
+            fragments: vec![mf_epel, mf_cis],
+        };
+        let output = generate_containerfile(
+            &manifest,
+            &[epel, cis],
+            Some("sha256:base123"),
+            &empty_dedup(),
+            false,
+            true,
+            &bootc_caps(),
+        )
+        .unwrap();
+
+        let from_lines: Vec<&str> = output.lines().filter(|l| l.starts_with("FROM")).collect();
+        assert_eq!(
+            from_lines,
+            vec!["FROM registry.redhat.io/rhel10/rhel-bootc@sha256:base123"]
+        );
+        assert!(!output.contains("AS frag-"));
+        assert!(!output.contains("--from="));
+        // The base digest comment is fine (the base is the only remaining
+        // registry reference); fragment digest comments are not.
+        assert!(
+            output.contains("#   base: registry.redhat.io/rhel10/rhel-bootc:10.0@sha256:base123")
+        );
+        assert!(!output.contains("quay.io/test/epel"));
+        assert!(!output.contains("quay.io/test/cis"));
+    }
+
+    #[test]
+    fn self_contained_hooks_only_fragment_has_no_tree_copy() {
+        let loaded = LoadedFragment {
+            fragment: Fragment {
+                name: "hooks-only".to_string(),
+                version: "1.0".into(),
+                description: "test".into(),
+                vendor: None,
+                phase: FragmentPhase::Config,
+                provides: FragmentProvides { repos: vec![] },
+                packages: FragmentPackages { required: vec![] },
+                conflicts: FragmentConflicts { fragments: vec![] },
+            },
+            tree_paths: vec![],
+            hook_paths: vec![PathBuf::from("setup.sh")],
+            source: FragmentSource::Registry {
+                image_ref: "quay.io/test/hooks-only:1.0".into(),
+            },
+            resolved_digest: Some("sha256:hooksonly1".into()),
+            manifest_index: 0,
+            repo_file_contents: std::collections::HashMap::new(),
+        };
+        let manifest_frag = ManifestFragment {
+            image: "quay.io/test/hooks-only:1.0".into(),
+            packages: vec![],
+            mirror: None,
+        };
+        let manifest = Manifest {
+            base: "registry.redhat.io/rhel10/rhel-bootc:10.0".into(),
+            base_type: None,
+            fragments: vec![manifest_frag],
+        };
+        let output = generate_containerfile(
+            &manifest,
+            &[loaded],
+            None,
+            &empty_dedup(),
+            false,
+            true,
+            &bootc_caps(),
+        )
+        .unwrap();
+
+        assert!(!output.contains("COPY fragments/hooks-only/tree"));
+        assert!(output.contains(
+            "RUN --mount=type=bind,source=fragments/hooks-only/hooks,target=/frag-hooks,z \\"
+        ));
+        assert!(output.contains("/frag-hooks/setup.sh"));
+    }
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [ ] **Step 2: Run tests to verify they fail**
 
-Run: `cargo test self_contained_uses_context_relative_copy_and_mount -- --nocapture`
-Expected: FAIL, current self-contained output still uses `COPY --from=` and `bind-propagation=rshared`.
+Run: `cargo test self_contained_uses_context_relative_copy_and_mount self_contained_with_pin_digests_pins_only_the_base self_contained_hooks_only_fragment_has_no_tree_copy -- --nocapture`
+Expected: FAIL, current self-contained output still uses `COPY --from=` and `bind-propagation=rshared`, and named fragment stages still appear regardless of `self_contained`.
 
 - [ ] **Step 3: Replace repo file COPY emission**
 
@@ -1745,10 +1994,10 @@ to:
         }
 ```
 
-- [ ] **Step 6: Run the new test and the full suite**
+- [ ] **Step 6: Run the new tests and the full suite**
 
 Run: `cargo test -- --nocapture 2>&1`
-Expected: all tests PASS, including `self_contained_uses_context_relative_copy_and_mount`.
+Expected: all tests PASS, including `self_contained_uses_context_relative_copy_and_mount`, `self_contained_with_pin_digests_pins_only_the_base`, and `self_contained_hooks_only_fragment_has_no_tree_copy`.
 
 - [ ] **Step 7: Run clippy**
 
@@ -1766,7 +2015,8 @@ resolves against the build context). The hook bind mount drops from=
 and bind-propagation=rshared (meaningless for a static context-relative
 source per containerfile-layer-semantics.md) but keeps z. Verifies the
 mode's defining invariant: no fragment registry reference anywhere,
-comments included.
+comments included, holds under --pin-digests (only the base pins) and
+for a hooks-only fragment shape (hook mount present, no tree COPY).
 
 Assisted-by: Claude Code (claude-opus-5)"
 ```
@@ -2228,7 +2478,7 @@ the full reasoning.
 
 ### Added
 
-- **`--self-contained <dir>`**: materializes fragment tree/hooks payload into a local build context next to the generated Containerfile, then packages the result as a sibling `.tar.gz`. The emitted Containerfile references no registry image except the base. Mutually exclusive with `--ocp`.
+- **`--self-contained <dir>`**: materializes fragment tree/hooks payload into a local build context next to the generated Containerfile, then packages the result as a sibling `.tar.gz`. The output directory carries a `.osfragment-assemble` sentinel file that marks it as tool-generated and safe to regenerate. The emitted Containerfile references no registry image except the base. Mutually exclusive with `--ocp` and `--output`.
 
 ### Changed
 ```
@@ -2247,7 +2497,7 @@ Insert a new line between the `--pin-digests` and `--ocp` entries (alphabetical 
 
 ```markdown
 - `--pin-digests`: Resolve and pin all image refs to sha256 digests
-- `--self-contained <dir>`: Materialize fragment tree/hooks payload into `<dir>` next to the generated Containerfile, and package `<dir>` as a sibling `<dir>.tar.gz`. The emitted Containerfile references no registry image except the base. Mutually exclusive with `--ocp`.
+- `--self-contained <dir>`: Materialize fragment tree/hooks payload into `<dir>` next to the generated Containerfile, and package `<dir>` as a sibling `<dir>.tar.gz`. `<dir>` carries a `.osfragment-assemble` sentinel marking it safe to regenerate. The emitted Containerfile references no registry image except the base. Mutually exclusive with `--ocp` and `--output`.
 - `--ocp [<path>]`: Generate a MachineOSConfig YAML for OpenShift (default: `machineosbuild.yaml`)
 - `--pool <name>`: MachineConfigPool name for `--ocp` output (default: `worker`)
 ```
@@ -2275,27 +2525,29 @@ Assisted-by: Claude Code (claude-opus-5)"
 
 ## Self-Review
 
+This Self-Review covers the plan as it now stands after two revision passes: round 1 addressed plan-review findings (the integration-test split and the archive trailing-slash bug); round 2, below, addresses the spec's own round-1 review (sentinel marker, `--output` conflict, atomicity wording, `--pin-digests` invariant, and the two should-fix items). The full finding-by-finding mapping for round 2 lives in the response memo (`marks-inbox/reviews/2026-07-29-self-contained-mode-spec-r1-response.md`); this section is the plan's internal spec-coverage check, not a duplicate of that memo.
+
 **Spec coverage** (spec section -> task):
 
-- Surface (`--self-contained <dir>`, mutually exclusive with `--ocp`, upstream unchanged) -> Tasks 2, 10.
-- Output tree shape (`Containerfile`, `manifest.yaml`, `fragments/<name>/{tree,hooks}`, sibling `.tar.gz`) -> Tasks 5, 6, 10.
-- Emission changes (context-relative COPY, hook mount drops `from=`) -> Task 8.
-- Update model (regenerate, never mutate; delete-and-recreate in full) -> Tasks 1, 5.
-- Errors (`--self-contained` + `--ocp`; unsafe target dir; registry failure leaves no partial tree) -> Tasks 1, 2, 5.
-- Acceptance: golden-file test -> Task 9. **Integration test (materialize from fixture fragments, archive matches tree byte for byte) -> Task 6's `materialize_and_archive_round_trip_byte_for_byte`.** This is the spec's single acceptance test 2, satisfied by one test that composes `write_output_with` (calling the real `crate::loader::extract_fragment_payload_to_disk` against fixture layer bytes, stubbing only the skopeo pull, since `FragmentSource` has no non-registry variant to source a literal local fixture from) with `create_archive` over the same tree, then diffs every file. Task 4's `payload_extracted_to_disk_matches_source_bytes` additionally unit-tests the extractor in isolation, and Task 6's `archive_contents_match_tree_byte_for_byte` additionally unit-tests archiving a hand-built tree in isolation; both are supplementary coverage, not substitutes for the composed test. No-registry-reference test -> Task 8. Foreign-dir-refused test -> Tasks 1, 2. `--self-contained` + `--ocp` errors test -> Task 2.
+- Surface (`--self-contained <dir>`, mutually exclusive with `--ocp` and `--output`, upstream unchanged) -> Task 2 (both conflicts), Task 10.
+- Output tree shape (sentinel, `Containerfile`, `manifest.yaml`, `fragments/<name>/{tree,hooks}` with `tree/` omitted for hooks-only fragments, sibling `.tar.gz` including the sentinel) -> Tasks 1 (sentinel filename/contents), 5, 6, 10.
+- Emission changes (context-relative COPY for both the generic and repo-phase forms, hook mount drops `from=`, fragment `FROM` stages and digest comments suppressed regardless of `--pin-digests`) -> Task 8 (all three COPY/mount substitutions plus the `--pin-digests` combination test), Task 7 (the suppression itself).
+- Update model (staged-then-atomic-swap, not delete-then-recreate; idempotent regeneration; tarball rebuilt and unconditionally overwritten every run) -> Tasks 1, 5 (sentinel + atomic swap + `regeneration_is_idempotent_and_passes_safety_check_again`), 6 (archive rebuilt from the swapped-in tree every call).
+- Errors (`--self-contained` + `--ocp`; `--self-contained` + `--output`; sentinel-based tool-generated detection; registry failure leaves no partial tree or stale archive) -> Task 1 (sentinel logic), Task 2 (both CLI conflicts), Task 5 (atomicity), Task 6 (archive only ever built from a fully swapped-in tree, so a failed run never produces one).
+- Acceptance: golden-file test -> Task 9. **Integration test (materialize from fixture fragments, archive matches tree byte for byte) -> Task 6's `materialize_and_archive_round_trip_byte_for_byte`.** This is the spec's single acceptance test 2, satisfied by one test that composes `write_output_with` (calling the real `crate::loader::extract_fragment_payload_to_disk` against fixture layer bytes, stubbing only the skopeo pull, since `FragmentSource` has no non-registry variant to source a literal local fixture from) with `create_archive` over the same tree, then diffs every file including the sentinel. Task 4's `payload_extracted_to_disk_matches_source_bytes` additionally unit-tests the extractor in isolation, and Task 6's `archive_contents_match_tree_byte_for_byte` additionally unit-tests archiving a hand-built tree in isolation; both are supplementary coverage, not substitutes for the composed test. No-registry-reference test -> Task 8. `--pin-digests` combination test -> Task 8's `self_contained_with_pin_digests_pins_only_the_base`. Non-tool-generated-dir-refused test, including the specific false positive a content heuristic would miss -> Task 1's `containerfile_and_fragments_without_sentinel_is_refused`. `--self-contained` + `--ocp` errors test -> Task 2. `--self-contained` + `--output` errors test -> Task 2's `self_contained_conflicts_with_output`. Regeneration idempotence test -> Task 5's `regeneration_is_idempotent_and_passes_safety_check_again`. Cleanup-on-failure test -> Task 5's `write_output_leaves_no_partial_tree_on_materialization_failure` (already present from round 1; the spec now names this acceptance item explicitly). `manifest.yaml` copy verified -> Task 5's `write_output_stages_then_swaps_atomically` (already asserts the copied content; no new test needed). Hooks-only fragment test -> Task 6's `hooks_only_fragment_materializes_hooks_without_tree_dir` (materialization) and Task 8's `self_contained_hooks_only_fragment_has_no_tree_copy` (emission).
 - Non-goals (no lockfile, no provenance, no partial update, no archive-suppression flag, no OCP interaction) -> verified absent in Task 11, Step 4.
-- Open item 1 (`--pin-digests` interaction) -> resolved in Global Constraints, implemented in Task 10.
-- Open item 2 (`bind-propagation` meaningfulness) -> resolved in Global Constraints, implemented in Task 8, asserted in Tasks 8-9, skill file scoped to match in Task 12.
+- `--pin-digests` interaction (spec must-fix, formerly an open item) -> stated directly in the spec's Emission changes section; implemented in Task 10 (`should_keep_fragment_digests`) and Task 7 (suppression), tested in Task 8.
+- Hook mount option resolution (`bind-propagation` dropped, `z` kept) -> stated directly in the spec's Emission changes section; implemented in Task 8, asserted in Tasks 8-9, skill file scoped to match in Task 12.
 
 **Placeholder scan:** no "TBD"/"TODO"/"handle edge cases" markers; every step has runnable code or an exact command.
 
-**Type consistency:** `generate_containerfile`'s new parameter is `self_contained: bool` in every task that touches it (7, 8, 9, 10). `write_output`/`write_output_with`/`materialize_fragment`/`extract_fragment_payload_to_disk`/`check_target_dir_safe`/`create_archive`/`archive_path_for`/`pull_layer_bytes`/`should_keep_fragment_digests` are named and typed identically everywhere they are consumed across tasks.
+**Type consistency:** `generate_containerfile`'s new parameter is `self_contained: bool` in every task that touches it (7, 8, 9, 10). `write_output`/`write_output_with`/`materialize_fragment`/`extract_fragment_payload_to_disk`/`check_target_dir_safe`/`create_archive`/`archive_path_for`/`pull_layer_bytes`/`should_keep_fragment_digests`/`SENTINEL_FILENAME`/`sentinel_contents` are named and typed identically everywhere they are consumed across tasks.
 
-**Verification:** every code block in Tasks 1-10 was assembled into a scratch copy of the real repo and run through `cargo build --tests`, `cargo test` (123 tests pass; the one pre-existing unrelated failure, `fragment::tests::postgresql_example_preserves_repos_phase`, is a missing-fixture artifact of the scratch copy, not a regression), `cargo clippy --all-targets -- -D clippy::all`, and `cargo fmt --check`, before this revision was written up. This is how the two mandatory fixes and the formatting advisory were confirmed correct rather than merely reasoned about, and how the pre-existing `main`-branch clippy/fmt drift noted in Task 11 was distinguished from anything this plan introduces.
+**Verification:** every code block in Tasks 1-10, including this round's sentinel logic, the `--output` conflict, and the four new tests (regeneration idempotence, hooks-only materialization, hooks-only emission, `--pin-digests` combination), was assembled into a scratch copy of the real repo and run through `cargo build --tests`, `cargo test` (129 lib tests + 7 CLI integration tests + 1 bin-level test, 137 total, all pass in the scratch copy once `examples/` is present; the one pre-existing unrelated failure noted in round 1, `fragment::tests::postgresql_example_preserves_repos_phase`, is a missing-fixture artifact of an earlier, incomplete scratch copy, not a regression), `cargo clippy --all-targets -- -D clippy::all`, and `cargo fmt --check`, before this revision was written up.
 
-## Advisory dispositions
+## Advisory dispositions (round 1: plan review)
 
-Every advisory from both reviews, fixed in the plan or accepted with a rationale. "Fixed" means the corresponding task above now reflects it; nothing here is deferred to implementation time.
+Every advisory from both round-1 plan-review memos (Thorn's correctness/TDD lane, Collins's architecture/contract lane), fixed in the plan or accepted with a rationale. "Fixed" means the corresponding task above now reflects it; nothing here is deferred to implementation time. The round-2 spec review's findings (sentinel, `--output` conflict, atomicity wording, `--pin-digests` invariant, and the two should-fix items) are tracked in the response memo, not here, since that review targeted the spec, not the plan directly.
 
 **From the correctness/TDD-lane review:**
 
