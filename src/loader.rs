@@ -174,6 +174,69 @@ fn extract_repo_file_contents_from_bytes(
     Ok(contents)
 }
 
+/// Write a layer's `fragment/tree/` and `fragment/hooks/` payload to disk
+/// under `dest_dir/tree` and `dest_dir/hooks`. Shares the same tar-entry
+/// security validation as the metadata-only extractors above.
+///
+/// `pub(crate)` rather than private: `src/self_contained.rs`'s tests
+/// compose this directly with `create_archive` over a fixture layer to
+/// exercise the spec's materialize-then-archive acceptance test without a
+/// registry (Task 6). `materialize_fragment` below is still the production
+/// entry point.
+///
+/// Extraction streams entry-by-entry, so on `Err` `dest_dir` may contain
+/// partially written files from entries processed before the failing one;
+/// callers must treat it as unusable rather than a valid partial result.
+pub(crate) fn extract_fragment_payload_to_disk(compressed: &[u8], dest_dir: &Path) -> Result<()> {
+    let decoder = GzDecoder::new(compressed);
+    let mut archive = tar::Archive::new(decoder);
+
+    for entry_result in archive.entries().context("reading tar entries")? {
+        let mut entry = entry_result.context("reading tar entry")?;
+        let path = entry.path().context("reading entry path")?.to_path_buf();
+        let path_str = path.to_string_lossy().to_string();
+
+        validate_tar_entry(&path_str, entry.header().entry_type())?;
+
+        let entry_type = entry.header().entry_type();
+        if !entry_type.is_file() && !entry_type.is_dir() {
+            continue;
+        }
+
+        let dest = if let Ok(rel) = path.strip_prefix("fragment/tree") {
+            dest_dir.join("tree").join(rel)
+        } else if let Ok(rel) = path.strip_prefix("fragment/hooks") {
+            dest_dir.join("hooks").join(rel)
+        } else {
+            continue;
+        };
+
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("creating {}", parent.display()))?;
+        }
+        entry
+            .unpack(&dest)
+            .with_context(|| format!("writing {}", dest.display()))?;
+    }
+    Ok(())
+}
+
+/// Pull a fragment image by reference and materialize its tree/hooks
+/// payload to disk under `dest_dir`. Reuses `pull_layer_bytes`, the same
+/// skopeo-copy-then-walk-layers path `load_registry_fragment` uses; only
+/// the sink differs (files on disk instead of an in-memory path list).
+///
+/// On `Err`, `dest_dir` may contain partially written files from an
+/// earlier layer or an earlier entry within the failing layer; callers
+/// must treat it as unusable rather than a valid partial result.
+pub fn materialize_fragment(image_ref: &str, dest_dir: &Path) -> Result<()> {
+    for layer_bytes in pull_layer_bytes(image_ref)? {
+        extract_fragment_payload_to_disk(&layer_bytes, dest_dir)?;
+    }
+    Ok(())
+}
+
 /// Try the OCI annotation fast path: parse fragment metadata from
 /// manifest annotations without pulling any layers.
 fn try_annotation_fast_path(image_ref: &str) -> Result<Option<Fragment>> {
@@ -253,15 +316,12 @@ fn try_annotation_fast_path(image_ref: &str) -> Result<Option<Fragment>> {
     }))
 }
 
-pub fn load_registry_fragment(image_ref: &str) -> Result<LoadedFragment> {
-    let digest = resolve_digest(image_ref)?;
-    let (name, _tag) = split_image_ref(image_ref);
-    let image_with_digest = format!("{}@{}", name, digest);
-
-    // Assembly always parses the in-layer fragment.toml for the authoritative
-    // Fragment.  The annotation fast path is limited to metadata-only
-    // operations (inspect/list via load_registry_fragment_metadata_only)
-    // because annotations omit fields like conflicts.
+/// Pull `image_ref` via skopeo into a temporary OCI layout and return the
+/// raw bytes of each layer blob, in manifest order. Shared by every code
+/// path that needs a fragment image's layer contents: the full metadata
+/// load (`load_registry_fragment`) and self-contained materialization
+/// (`materialize_fragment`).
+fn pull_layer_bytes(image_ref: &str) -> Result<Vec<Vec<u8>>> {
     let tmp = tempfile::tempdir().context("creating temp dir")?;
     let oci_path = tmp.path().join("oci-layout");
 
@@ -270,7 +330,7 @@ pub fn load_registry_fragment(image_ref: &str) -> Result<LoadedFragment> {
             "copy",
             "--override-os",
             "linux",
-            &format!("docker://{}", image_with_digest),
+            &format!("docker://{}", image_ref),
             &format!("oci:{}", oci_path.display()),
         ])
         .status()
@@ -280,7 +340,6 @@ pub fn load_registry_fragment(image_ref: &str) -> Result<LoadedFragment> {
         bail!("skopeo copy failed for {}", image_ref);
     }
 
-    // Read OCI index to find the single layer blob
     let index_path = oci_path.join("index.json");
     let index_content = std::fs::read_to_string(&index_path)?;
     let index: serde_json::Value = serde_json::from_str(&index_content)?;
@@ -304,6 +363,30 @@ pub fn load_registry_fragment(image_ref: &str) -> Result<LoadedFragment> {
         .as_array()
         .ok_or_else(|| anyhow::anyhow!("no layers in manifest"))?;
 
+    layers
+        .iter()
+        .map(|layer_desc| {
+            let layer_digest = layer_desc["digest"]
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("no digest in layer descriptor"))?;
+            let layer_blob_path = oci_path.join("blobs").join(layer_digest.replace(':', "/"));
+            std::fs::read(&layer_blob_path)
+                .with_context(|| format!("reading layer blob {}", layer_digest))
+        })
+        .collect()
+}
+
+pub fn load_registry_fragment(image_ref: &str) -> Result<LoadedFragment> {
+    let digest = resolve_digest(image_ref)?;
+    let (name, _tag) = split_image_ref(image_ref);
+    let image_with_digest = format!("{}@{}", name, digest);
+
+    // Assembly always parses the in-layer fragment.toml for the authoritative
+    // Fragment.  The annotation fast path is limited to metadata-only
+    // operations (inspect/list via load_registry_fragment_metadata_only)
+    // because annotations omit fields like conflicts.
+    let layer_bytes_list = pull_layer_bytes(&image_with_digest)?;
+
     // Scan all layers and aggregate: fragment.toml, tree paths, hooks,
     // and repo file contents may be spread across multiple layers.
     let mut fragment = None;
@@ -311,21 +394,14 @@ pub fn load_registry_fragment(image_ref: &str) -> Result<LoadedFragment> {
     let mut all_hook_paths = Vec::new();
     let mut repo_file_contents = std::collections::HashMap::new();
 
-    for layer_desc in layers {
-        let layer_digest = layer_desc["digest"]
-            .as_str()
-            .ok_or_else(|| anyhow::anyhow!("no digest in layer descriptor"))?;
-
-        let layer_blob_path = oci_path.join("blobs").join(layer_digest.replace(':', "/"));
-        let layer_bytes = std::fs::read(&layer_blob_path)?;
-
+    for layer_bytes in &layer_bytes_list {
         if fragment.is_none() {
-            if let Ok(toml_content) = extract_fragment_toml_from_bytes(&layer_bytes) {
+            if let Ok(toml_content) = extract_fragment_toml_from_bytes(layer_bytes) {
                 fragment = Some(parse_fragment_toml(&toml_content)?);
             }
         }
 
-        let tree_paths = extract_tree_paths_from_bytes(&layer_bytes)?;
+        let tree_paths = extract_tree_paths_from_bytes(layer_bytes)?;
 
         // Collect all executable files in hooks/ directory
         let hook_paths: Vec<PathBuf> = tree_paths
@@ -343,7 +419,7 @@ pub fn load_registry_fragment(image_ref: &str) -> Result<LoadedFragment> {
             .collect();
         all_tree_paths.extend(remapped);
 
-        let layer_repo_contents = extract_repo_file_contents_from_bytes(&layer_bytes)?;
+        let layer_repo_contents = extract_repo_file_contents_from_bytes(layer_bytes)?;
         repo_file_contents.extend(layer_repo_contents);
     }
 
@@ -456,6 +532,41 @@ mod layer_tests {
                 header.set_mode(0o644);
                 header.set_cksum();
                 tar.append(&header, &data[..]).unwrap();
+            }
+            tar.into_inner().unwrap().finish().unwrap();
+        }
+        buf
+    }
+
+    /// A tar entry with an explicit mode and entry type, for tests that
+    /// need directory entries or non-default permission bits —
+    /// `create_test_tarball` above always writes regular files at 0o644.
+    struct RawEntry<'a> {
+        path: &'a str,
+        data: &'a [u8],
+        mode: u32,
+        entry_type: tar::EntryType,
+    }
+
+    fn create_test_tarball_with_modes(entries: &[RawEntry]) -> Vec<u8> {
+        let mut buf = Vec::new();
+        {
+            let enc = flate2::write::GzEncoder::new(&mut buf, flate2::Compression::default());
+            let mut tar = tar::Builder::new(enc);
+            for entry in entries {
+                let mut header = tar::Header::new_gnu();
+                header.set_entry_type(entry.entry_type);
+                if header.set_path(entry.path).is_err() {
+                    let name = &mut header.as_old_mut().name;
+                    name.fill(0);
+                    let path_bytes = entry.path.as_bytes();
+                    let len = path_bytes.len().min(name.len());
+                    name[..len].copy_from_slice(&path_bytes[..len]);
+                }
+                header.set_size(entry.data.len() as u64);
+                header.set_mode(entry.mode);
+                header.set_cksum();
+                tar.append(&header, entry.data).unwrap();
             }
             tar.into_inner().unwrap().finish().unwrap();
         }
@@ -609,5 +720,63 @@ phase = "repos"
         assert!(names.contains(&"02-config.bash".to_string()));
         assert!(names.contains(&"configure".to_string()));
         assert!(names.contains(&"setup.py".to_string()));
+    }
+
+    #[test]
+    fn payload_extracted_to_disk_matches_source_bytes() {
+        let tree_content = b"[epel]\nname=EPEL\nbaseurl=https://example.com/epel/\n";
+        let hook_content = b"#!/bin/sh\necho configure\n";
+        let tarball = create_test_tarball(&[
+            ("fragment/tree/etc/yum.repos.d/epel.repo", tree_content),
+            ("fragment/hooks/configure.sh", hook_content),
+        ]);
+
+        let workdir = tempfile::tempdir().unwrap();
+        extract_fragment_payload_to_disk(&tarball, workdir.path()).unwrap();
+
+        let extracted_tree =
+            std::fs::read(workdir.path().join("tree/etc/yum.repos.d/epel.repo")).unwrap();
+        let extracted_hook = std::fs::read(workdir.path().join("hooks/configure.sh")).unwrap();
+        assert_eq!(extracted_tree, tree_content);
+        assert_eq!(extracted_hook, hook_content);
+    }
+
+    #[test]
+    fn payload_extraction_rejects_traversal_like_other_extractors() {
+        let tarball = create_test_tarball(&[
+            ("../etc/passwd", b"evil"),
+            ("fragment/tree/etc/foo.conf", b"data"),
+        ]);
+        let workdir = tempfile::tempdir().unwrap();
+        let result = extract_fragment_payload_to_disk(&tarball, workdir.path());
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("traversal"));
+    }
+
+    #[test]
+    fn empty_tree_directory_and_directory_mode_survive_extraction() {
+        let tarball = create_test_tarball_with_modes(&[RawEntry {
+            path: "fragment/tree/etc/empty-dir",
+            data: b"",
+            mode: 0o700,
+            entry_type: tar::EntryType::Directory,
+        }]);
+
+        let workdir = tempfile::tempdir().unwrap();
+        extract_fragment_payload_to_disk(&tarball, workdir.path()).unwrap();
+
+        let dir_path = workdir.path().join("tree/etc/empty-dir");
+        let metadata = std::fs::metadata(&dir_path).unwrap();
+        assert!(
+            metadata.is_dir(),
+            "empty directory did not survive extraction"
+        );
+
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            metadata.permissions().mode() & 0o777,
+            0o700,
+            "directory mode was not preserved"
+        );
     }
 }

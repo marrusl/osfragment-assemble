@@ -45,7 +45,12 @@ caught, so it is worth stating flatly.
 - `from=<registry image ref>`: the builder pulls it. No build context involved.
 - `from=<named build stage>`: resolves inside the Containerfile.
 
-This tool emits only the second and third. When reasoning about whether a bind
+Omitting `from=` is a fourth case: the mount `source=` resolves against the
+build context, the same place a bare `COPY <src>` reads from. Self-contained
+mode emits this form (`source=fragments/<name>/hooks`) because it materializes
+the fragments into the build context itself, so there is no image or stage left
+to name. Default and OCP modes emit the second and third. When reasoning about
+whether a bind
 mount works in some environment, check which form is at issue. The common
 objection that on-cluster OpenShift builds "have no build context" applies to
 `from=context` only. An on-cluster build does have a build context; MCO supplies
@@ -71,6 +76,9 @@ same `--authfile`, so the mount form needs nothing the `COPY` form does not.
 Practical notes:
 
 - Mirror MCO's options, `bind-propagation=rshared,z`, rather than the bare form.
+  This applies to `from=<image>` mounts. `bind-propagation` is inert for a
+  static build-context source, so self-contained mode drops it and keeps only
+  `z` (the SELinux relabel, which still matters).
 - The fragment image must be pullable with the same pull secret that pulls the
   base image. This is a pre-existing property of the `COPY --from` path, not
   something mounts introduce.

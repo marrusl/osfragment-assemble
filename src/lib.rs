@@ -6,4 +6,5 @@ pub mod list;
 pub mod loader;
 pub mod manifest;
 pub mod ocp;
+pub mod self_contained;
 pub mod validate;

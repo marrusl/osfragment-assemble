@@ -138,11 +138,15 @@ removed and the staged directory is renamed into its place. `<dir>.tar.gz` is
 rebuilt from the same staged tree on every run and unconditionally
 overwritten; it carries no user-added content by construction (it is a pure
 repackaging of `<dir>`, never edited directly), so it needs no ownership
-check analogous to `<dir>`'s. Regeneration is therefore idempotent: running
-the command twice against unchanged manifest and registry state produces
-byte-identical output both times, and the second run's target-directory check
-passes against the first run's own output because the sentinel (see Errors)
-is part of what gets staged and swapped in.
+check analogous to `<dir>`'s. Regeneration is therefore idempotent for the materialized tree: running the
+command twice against unchanged manifest and registry state produces a
+byte-identical `<dir>` both times, and the second run's target-directory
+check passes against the first run's own output because the sentinel (see
+Errors) is part of what gets staged and swapped in. `<dir>.tar.gz` is not
+covered by this guarantee: it is a repackaging of `<dir>`, and per-entry tar
+metadata (e.g. mtimes) may differ between runs even when the tree itself
+does not. Full archive determinism is a tracked follow-up, not a promise
+this spec makes.
 
 If materialization fails partway through (registry error, disk full, a
 fragment that fails to extract), the run exits nonzero and neither `<dir>`
@@ -202,8 +206,8 @@ old output nor the new one.
 - A test that `--self-contained` plus `--ocp` errors.
 - A test that `--self-contained` plus `--output` errors.
 - A test that regeneration is idempotent: running the command twice against
-  the same manifest and registry state produces byte-identical output, and
-  the second run's directory check passes against the first run's own
+  the same manifest and registry state produces a byte-identical `<dir>`,
+  and the second run's directory check passes against the first run's own
   output.
 - A test that a materialization failure leaves a prior tree, if any,
   completely untouched (cleanup-on-failure).

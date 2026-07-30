@@ -153,6 +153,7 @@ osfragment-assemble [OPTIONS]
 - `--manifest <path>`: Path to manifest file (default: `osfragment-assemble.yaml`)
 - `--output <path>`: Output Containerfile path (default: `Containerfile`)
 - `--pin-digests`: Resolve and pin all image refs to sha256 digests
+- `--self-contained <dir>`: Materialize fragment tree/hooks payload into `<dir>`, alongside the generated `<dir>/Containerfile`, and package `<dir>` as a sibling `<dir>.tar.gz`. `<dir>` carries a `.osfragment-assemble` sentinel marking it safe to regenerate. The emitted Containerfile references no registry image except the base. Mutually exclusive with `--ocp` and `--output`. Fragment images are always pulled by digest internally in this mode regardless of `--pin-digests`, but that digest never appears in the output; `--pin-digests` still only controls whether the base image's `FROM` line is pinned.
 - `--ocp [<path>]`: Generate a MachineOSConfig YAML for OpenShift (default: `machineosbuild.yaml`)
 - `--pool <name>`: MachineConfigPool name for `--ocp` output (default: `worker`)
 

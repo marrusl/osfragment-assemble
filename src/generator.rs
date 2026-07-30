@@ -41,12 +41,16 @@ fn copy_from_source(loaded: &LoadedFragment, use_named_stages: bool) -> String {
     }
 }
 
+/// `self_contained` emits context-relative COPY/mount forms instead of
+/// registry references, for `--self-contained` output. Mutually exclusive
+/// with `ocp` (enforced by the CLI's `conflicts_with`, not checked here).
 pub fn generate_containerfile(
     manifest: &Manifest,
     fragments: &[LoadedFragment],
     base_digest: Option<&str>,
     _dedup: &DeduplicationResult,
     ocp: bool,
+    self_contained: bool,
     capabilities: &CapabilitySet,
 ) -> Result<String> {
     let mut out = String::new();
@@ -72,18 +76,24 @@ pub fn generate_containerfile(
             .collect();
         writeln!(out, "# Fragments: {}", frag_summary.join(", "))?;
 
-        // Resolved digests (only when --pin-digests is used)
-        let has_digests =
-            base_digest.is_some() || fragments.iter().any(|f| f.resolved_digest.is_some());
+        // Resolved digests. Self-contained mode always resolves fragment
+        // digests internally (materialization must pull deterministic
+        // content regardless of --pin-digests, see process-docs), but
+        // never prints them: no fragment registry reference may appear
+        // anywhere in this mode's output, comments included.
+        let has_digests = base_digest.is_some()
+            || (!self_contained && fragments.iter().any(|f| f.resolved_digest.is_some()));
         if has_digests {
             writeln!(out, "# Resolved digests:")?;
             if let Some(d) = base_digest {
                 writeln!(out, "#   base: {}@{}", manifest.base, d)?;
             }
-            for loaded in fragments {
-                let mf = &manifest.fragments[loaded.manifest_index];
-                if let Some(d) = &loaded.resolved_digest {
-                    writeln!(out, "#   {}: {}@{}", loaded.fragment.name, mf.image, d)?;
+            if !self_contained {
+                for loaded in fragments {
+                    let mf = &manifest.fragments[loaded.manifest_index];
+                    if let Some(d) = &loaded.resolved_digest {
+                        writeln!(out, "#   {}: {}@{}", loaded.fragment.name, mf.image, d)?;
+                    }
                 }
             }
         }
@@ -130,8 +140,11 @@ pub fn generate_containerfile(
         writeln!(out)?;
     }
 
-    // Fragment FROM stages (only when pinning digests — named stages for readability)
-    if use_named_stages {
+    // Fragment FROM stages (only when pinning digests, named stages for
+    // readability). Self-contained mode never emits these: nothing in the
+    // build context comes from a named stage, and no fragment registry
+    // reference may appear in the output.
+    if use_named_stages && !self_contained {
         if !ocp {
             writeln!(out, "# --- Fragment stages ---")?;
         }
@@ -174,28 +187,45 @@ pub fn generate_containerfile(
             if !has_repo {
                 continue;
             }
-            let source = copy_from_source(loaded, use_named_stages);
             if loaded
                 .tree_paths
                 .iter()
                 .any(|p| p.to_string_lossy().contains("yum.repos.d"))
             {
-                writeln!(
-                    out,
-                    "COPY --from={} /fragment/tree/etc/yum.repos.d/ /etc/yum.repos.d/",
-                    source
-                )?;
+                if self_contained {
+                    writeln!(
+                        out,
+                        "COPY fragments/{}/tree/etc/yum.repos.d/ /etc/yum.repos.d/",
+                        loaded.fragment.name
+                    )?;
+                } else {
+                    let source = copy_from_source(loaded, use_named_stages);
+                    writeln!(
+                        out,
+                        "COPY --from={} /fragment/tree/etc/yum.repos.d/ /etc/yum.repos.d/",
+                        source
+                    )?;
+                }
             }
             if loaded
                 .tree_paths
                 .iter()
                 .any(|p| p.to_string_lossy().contains("rpm-gpg"))
             {
-                writeln!(
-                    out,
-                    "COPY --from={} /fragment/tree/etc/pki/rpm-gpg/ /etc/pki/rpm-gpg/",
-                    source
-                )?;
+                if self_contained {
+                    writeln!(
+                        out,
+                        "COPY fragments/{}/tree/etc/pki/rpm-gpg/ /etc/pki/rpm-gpg/",
+                        loaded.fragment.name
+                    )?;
+                } else {
+                    let source = copy_from_source(loaded, use_named_stages);
+                    writeln!(
+                        out,
+                        "COPY --from={} /fragment/tree/etc/pki/rpm-gpg/ /etc/pki/rpm-gpg/",
+                        source
+                    )?;
+                }
             }
         }
 
@@ -285,8 +315,12 @@ pub fn generate_containerfile(
             if !has_non_repo {
                 continue;
             }
-            let source = copy_from_source(loaded, use_named_stages);
-            writeln!(out, "COPY --from={} /fragment/tree/ /", source)?;
+            if self_contained {
+                writeln!(out, "COPY fragments/{}/tree/ /", loaded.fragment.name)?;
+            } else {
+                let source = copy_from_source(loaded, use_named_stages);
+                writeln!(out, "COPY --from={} /fragment/tree/ /", source)?;
+            }
         }
         if !ocp {
             writeln!(out)?;
@@ -303,8 +337,6 @@ pub fn generate_containerfile(
             writeln!(out, "# --- Hooks ---")?;
         }
         for loaded in &hook_fragments {
-            let source = copy_from_source(loaded, use_named_stages);
-
             // Build chained hook invocations
             let hook_cmds: Vec<String> = loaded
                 .hook_paths
@@ -313,11 +345,20 @@ pub fn generate_containerfile(
                 .collect();
             let chained = hook_cmds.join(" && ");
 
-            writeln!(
-                out,
-                "RUN --mount=type=bind,from={},source=/fragment/hooks,target=/frag-hooks,bind-propagation=rshared,z \\",
-                source
-            )?;
+            if self_contained {
+                writeln!(
+                    out,
+                    "RUN --mount=type=bind,source=fragments/{}/hooks,target=/frag-hooks,z \\",
+                    loaded.fragment.name
+                )?;
+            } else {
+                let source = copy_from_source(loaded, use_named_stages);
+                writeln!(
+                    out,
+                    "RUN --mount=type=bind,from={},source=/fragment/hooks,target=/frag-hooks,bind-propagation=rshared,z \\",
+                    source
+                )?;
+            }
             writeln!(out, "    {}", chained)?;
         }
         if !ocp {
@@ -457,6 +498,7 @@ mod tests {
             Some("sha256:base123"),
             &empty_dedup(),
             false,
+            false,
             &bootc_caps(),
         )
         .unwrap();
@@ -480,6 +522,7 @@ mod tests {
             &[epel, cis],
             Some("sha256:base123"),
             &empty_dedup(),
+            false,
             false,
             &bootc_caps(),
         )
@@ -511,6 +554,7 @@ mod tests {
             Some("sha256:base123"),
             &empty_dedup(),
             false,
+            false,
             &bootc_caps(),
         )
         .unwrap();
@@ -533,6 +577,7 @@ mod tests {
             Some("sha256:base123"),
             &empty_dedup(),
             false,
+            false,
             &bootc_caps(),
         )
         .unwrap();
@@ -553,6 +598,7 @@ mod tests {
             &[cis],
             Some("sha256:base123"),
             &empty_dedup(),
+            false,
             false,
             &bootc_caps(),
         )
@@ -575,6 +621,7 @@ mod tests {
             Some("sha256:base123"),
             &empty_dedup(),
             false,
+            false,
             &bootc_caps(),
         )
         .unwrap();
@@ -595,6 +642,7 @@ mod tests {
             &[epel],
             Some("sha256:base123"),
             &empty_dedup(),
+            false,
             false,
             &bootc_caps(),
         )
@@ -625,6 +673,7 @@ mod tests {
             &[epel, node_exp],
             Some("sha256:base123"),
             &dedup,
+            false,
             false,
             &bootc_caps(),
         )
@@ -703,6 +752,7 @@ mod tests {
             &[epel],
             Some("sha256:base123"),
             &empty_dedup(),
+            false,
             false,
             &bootc_caps(),
         )
@@ -786,9 +836,16 @@ mod tests {
             base_type: None,
             fragments: vec![mf_epel],
         };
-        let output =
-            generate_containerfile(&manifest, &[epel], None, &empty_dedup(), false, &bootc_caps())
-                .unwrap();
+        let output = generate_containerfile(
+            &manifest,
+            &[epel],
+            None,
+            &empty_dedup(),
+            false,
+            false,
+            &bootc_caps(),
+        )
+        .unwrap();
         // Inline image ref in COPY for repo files, no named FROM stage
         assert!(output.contains("COPY --from=quay.io/test/epel:10 /fragment/tree/etc/yum.repos.d/"));
         assert!(!output.contains("AS frag-epel"));
@@ -802,9 +859,16 @@ mod tests {
             base_type: None,
             fragments: vec![mf_epel],
         };
-        let output =
-            generate_containerfile(&manifest, &[epel], None, &empty_dedup(), false, &bootc_caps())
-                .unwrap();
+        let output = generate_containerfile(
+            &manifest,
+            &[epel],
+            None,
+            &empty_dedup(),
+            false,
+            false,
+            &bootc_caps(),
+        )
+        .unwrap();
         assert!(output.contains("FROM registry.redhat.io/rhel10/rhel-bootc:10.0"));
         assert!(!output.contains("@sha256:"));
     }
@@ -818,9 +882,16 @@ mod tests {
             base_type: None,
             fragments: vec![mf_cis],
         };
-        let output =
-            generate_containerfile(&manifest, &[cis], None, &empty_dedup(), false, &bootc_caps())
-                .unwrap();
+        let output = generate_containerfile(
+            &manifest,
+            &[cis],
+            None,
+            &empty_dedup(),
+            false,
+            false,
+            &bootc_caps(),
+        )
+        .unwrap();
         assert!(
             output.contains("RUN --mount=type=bind,from=quay.io/test/cis:2.1,source=/fragment/hooks,target=/frag-hooks,bind-propagation=rshared,z"),
             "expected bind mount with inline image ref:\n{}",
@@ -858,6 +929,7 @@ mod tests {
             Some("sha256:base123"),
             &empty_dedup(),
             false,
+            false,
             &bootc_caps(),
         )
         .unwrap();
@@ -876,9 +948,16 @@ mod tests {
             base_type: None,
             fragments: vec![mf_epel],
         };
-        let output =
-            generate_containerfile(&manifest, &[epel], None, &empty_dedup(), true, &bootc_caps())
-                .unwrap();
+        let output = generate_containerfile(
+            &manifest,
+            &[epel],
+            None,
+            &empty_dedup(),
+            true,
+            false,
+            &bootc_caps(),
+        )
+        .unwrap();
         assert!(output.contains("FROM configs AS final"));
         // Must not contain the standalone base image
         assert!(!output.contains("FROM registry.redhat.io"));
@@ -892,9 +971,16 @@ mod tests {
             base_type: None,
             fragments: vec![mf_epel],
         };
-        let output =
-            generate_containerfile(&manifest, &[epel], None, &empty_dedup(), true, &bootc_caps())
-                .unwrap();
+        let output = generate_containerfile(
+            &manifest,
+            &[epel],
+            None,
+            &empty_dedup(),
+            true,
+            false,
+            &bootc_caps(),
+        )
+        .unwrap();
         assert!(!output.contains("# Generated by"));
         assert!(!output.contains("# Fragments:"));
         assert!(!output.contains("# Override summary"));
@@ -908,9 +994,16 @@ mod tests {
             base_type: None,
             fragments: vec![mf_epel],
         };
-        let output =
-            generate_containerfile(&manifest, &[epel], None, &empty_dedup(), true, &bootc_caps())
-                .unwrap();
+        let output = generate_containerfile(
+            &manifest,
+            &[epel],
+            None,
+            &empty_dedup(),
+            true,
+            false,
+            &bootc_caps(),
+        )
+        .unwrap();
         assert!(!output.contains("# ---"));
     }
 
@@ -922,9 +1015,16 @@ mod tests {
             base_type: None,
             fragments: vec![mf_epel],
         };
-        let output =
-            generate_containerfile(&manifest, &[epel], None, &empty_dedup(), true, &bootc_caps())
-                .unwrap();
+        let output = generate_containerfile(
+            &manifest,
+            &[epel],
+            None,
+            &empty_dedup(),
+            true,
+            false,
+            &bootc_caps(),
+        )
+        .unwrap();
         assert!(output.contains("COPY --from=quay.io/test/epel:10 /fragment/tree/etc/yum.repos.d/"));
         assert!(!output.contains("AS frag-"));
     }
@@ -943,6 +1043,7 @@ mod tests {
             Some("sha256:base123"),
             &empty_dedup(),
             true,
+            false,
             &bootc_caps(),
         )
         .unwrap();
@@ -964,9 +1065,16 @@ mod tests {
             base_type: None,
             fragments: vec![mf_epel],
         };
-        let output =
-            generate_containerfile(&manifest, &[epel], None, &empty_dedup(), true, &bootc_caps())
-                .unwrap();
+        let output = generate_containerfile(
+            &manifest,
+            &[epel],
+            None,
+            &empty_dedup(),
+            true,
+            false,
+            &bootc_caps(),
+        )
+        .unwrap();
         assert!(output.contains("systemctl preset-all"));
         assert!(output.contains("bootc container lint"));
     }
@@ -1008,9 +1116,16 @@ mod tests {
             base_type: None,
             fragments: vec![manifest_frag],
         };
-        let output =
-            generate_containerfile(&manifest, &[loaded], None, &empty_dedup(), false, &bootc_caps())
-                .unwrap();
+        let output = generate_containerfile(
+            &manifest,
+            &[loaded],
+            None,
+            &empty_dedup(),
+            false,
+            false,
+            &bootc_caps(),
+        )
+        .unwrap();
 
         // Verify all three hooks are present via the mount target path
         assert!(output.contains("/frag-hooks/01-first.bash"));
@@ -1057,6 +1172,7 @@ mod tests {
             Some("sha256:base123"),
             &empty_dedup(),
             false,
+            false,
             &bootc_caps(),
         )
         .unwrap();
@@ -1082,6 +1198,7 @@ mod tests {
             &[epel, cis],
             Some("sha256:base123"),
             &empty_dedup(),
+            false,
             false,
             &bootc_caps(),
         )
@@ -1123,6 +1240,7 @@ mod tests {
             Some("sha256:base123"),
             &empty_dedup(),
             false,
+            false,
             &bootc_caps(),
         )
         .unwrap();
@@ -1144,9 +1262,16 @@ mod tests {
             base_type: None,
             fragments: vec![mf_cis],
         };
-        let output =
-            generate_containerfile(&manifest, &[cis], None, &empty_dedup(), true, &bootc_caps())
-                .unwrap();
+        let output = generate_containerfile(
+            &manifest,
+            &[cis],
+            None,
+            &empty_dedup(),
+            true,
+            false,
+            &bootc_caps(),
+        )
+        .unwrap();
         // Hooks should use bind mount in OCP output
         assert!(
             output.contains("RUN --mount=type=bind"),
@@ -1182,6 +1307,7 @@ mod tests {
             None,
             &empty_dedup(),
             false,
+            false,
             &bootc_caps(),
         )
         .unwrap();
@@ -1202,6 +1328,7 @@ mod tests {
             None,
             &empty_dedup(),
             true,
+            false,
             &bootc_caps(),
         )
         .unwrap();
@@ -1228,6 +1355,7 @@ mod tests {
             &[pinned_cis],
             Some("sha256:base123"),
             &empty_dedup(),
+            false,
             false,
             &bootc_caps(),
         )
@@ -1258,6 +1386,7 @@ mod tests {
             &[cis],
             Some("sha256:base123"),
             &empty_dedup(),
+            false,
             false,
             &bootc_caps(),
         )
@@ -1291,6 +1420,7 @@ mod tests {
             None,
             &empty_dedup(),
             false,
+            false,
             &bootc_caps(),
         )
         .unwrap();
@@ -1323,6 +1453,7 @@ mod tests {
             None,
             &empty_dedup(),
             false,
+            false,
             &bootc_caps(),
         )
         .unwrap();
@@ -1339,6 +1470,7 @@ mod tests {
             None,
             &empty_dedup(),
             true,
+            false,
             &bootc_caps(),
         )
         .unwrap();
@@ -1369,6 +1501,7 @@ mod tests {
             None,
             &empty_dedup(),
             false,
+            false,
             &bootc_caps(),
         )
         .unwrap();
@@ -1378,6 +1511,7 @@ mod tests {
             None,
             &empty_dedup(),
             true,
+            false,
             &bootc_caps(),
         )
         .unwrap();
@@ -1471,6 +1605,7 @@ mod tests {
             None,
             &empty_dedup(),
             false,
+            false,
             &bootc_caps(),
         )
         .unwrap();
@@ -1507,6 +1642,7 @@ mod tests {
             Some("sha256:base123"),
             &empty_dedup(),
             false,
+            false,
             &bootc_caps(),
         )
         .unwrap();
@@ -1537,6 +1673,7 @@ mod tests {
             &[epel],
             Some("sha256:base123"),
             &empty_dedup(),
+            false,
             false,
             &bootc_caps(),
         )
@@ -1577,6 +1714,7 @@ mod tests {
             Some("sha256:base123"),
             &empty_dedup(),
             false,
+            false,
             &bootc_caps(),
         )
         .unwrap();
@@ -1612,6 +1750,7 @@ mod tests {
             Some("sha256:base123"),
             &empty_dedup(),
             false,
+            false,
             &bootc_caps(),
         )
         .unwrap();
@@ -1637,6 +1776,7 @@ mod tests {
             &[epel],
             Some("sha256:base123"),
             &empty_dedup(),
+            false,
             false,
             &bootc_caps(),
         )
@@ -1669,6 +1809,7 @@ mod tests {
             &[pg],
             Some("sha256:base123"),
             &empty_dedup(),
+            false,
             false,
             &bootc_caps(),
         )
@@ -1704,6 +1845,7 @@ mod tests {
             None,
             &empty_dedup(),
             false,
+            false,
             &empty_caps(),
         )
         .unwrap();
@@ -1727,6 +1869,7 @@ mod tests {
             None,
             &empty_dedup(),
             false,
+            false,
             &bootc_caps(),
         )
         .unwrap();
@@ -1749,6 +1892,7 @@ mod tests {
             &[epel],
             None,
             &empty_dedup(),
+            false,
             false,
             &caps,
         )
@@ -1777,6 +1921,7 @@ mod tests {
             None,
             &empty_dedup(),
             true,
+            false,
             &ocp_caps,
         )
         .unwrap();
@@ -1801,6 +1946,7 @@ mod tests {
             None,
             &empty_dedup(),
             false,
+            false,
             &standalone_caps,
         )
         .unwrap();
@@ -1813,6 +1959,7 @@ mod tests {
             None,
             &empty_dedup(),
             true,
+            false,
             &ocp_caps,
         )
         .unwrap();
@@ -1841,6 +1988,7 @@ mod tests {
             None,
             &empty_dedup(),
             false,
+            false,
             &bootc_caps(),
         )
         .unwrap();
@@ -1865,10 +2013,211 @@ mod tests {
             None,
             &empty_dedup(),
             false,
+            false,
             &empty_caps(),
         )
         .unwrap();
         assert!(!output.contains("systemctl preset-all"));
         assert!(!output.contains("bootc container lint"));
+    }
+
+    #[test]
+    fn self_contained_uses_context_relative_copy_and_mount() {
+        let (epel, mf_epel) = make_repos_fragment("epel", "aaa111");
+        let (mut cis, mf_cis) = make_config_fragment("cis", "bbb222");
+        cis.manifest_index = 1;
+        let manifest = Manifest {
+            base: "registry.redhat.io/rhel10/rhel-bootc:10.0".into(),
+            base_type: None,
+            fragments: vec![mf_epel, mf_cis],
+        };
+        let output = generate_containerfile(
+            &manifest,
+            &[epel, cis],
+            None,
+            &empty_dedup(),
+            false,
+            true,
+            &bootc_caps(),
+        )
+        .unwrap();
+
+        assert!(output.contains("COPY fragments/epel/tree/etc/yum.repos.d/ /etc/yum.repos.d/"));
+        assert!(output.contains("COPY fragments/epel/tree/etc/pki/rpm-gpg/ /etc/pki/rpm-gpg/"));
+        assert!(output.contains("COPY fragments/cis/tree/ /"));
+        assert!(output
+            .contains("RUN --mount=type=bind,source=fragments/cis/hooks,target=/frag-hooks,z \\"));
+        assert!(output.contains("/frag-hooks/configure.sh"));
+
+        // The mode's defining invariant: no fragment registry reference
+        // anywhere, including comments, and no leftover default-mode forms.
+        assert!(!output.contains("bind-propagation"));
+        assert!(!output.contains("--from="));
+        assert!(!output.contains("AS frag-"));
+        assert!(!output.contains("quay.io/test/epel"));
+        assert!(!output.contains("quay.io/test/cis"));
+        // With no base digest, suppressing the fragment digests must leave no
+        // orphan header behind.
+        assert!(!output.contains("# Resolved digests:"));
+        let from_lines: Vec<&str> = output.lines().filter(|l| l.starts_with("FROM")).collect();
+        assert_eq!(
+            from_lines,
+            vec!["FROM registry.redhat.io/rhel10/rhel-bootc:10.0"]
+        );
+    }
+
+    #[test]
+    fn self_contained_with_pin_digests_pins_only_the_base() {
+        // --self-contained combined with --pin-digests: the base FROM line
+        // is still pinned (the one thing --pin-digests continues to affect
+        // in this mode), but no fragment FROM stage, digest comment, or
+        // COPY/mount --from= survives, regardless of the flag. Fragment
+        // digests are still resolved internally (materialization needs
+        // them) but self-contained mode's suppression already covers that;
+        // this test locks in that the suppression holds even when a base
+        // digest is also present. Spec must-fix 4 / backlog item
+        // osfragment-assemble-self-contained-pin-digests-invariant.
+        let (epel, mf_epel) = make_repos_fragment("epel", "aaa111");
+        let (mut cis, mf_cis) = make_config_fragment("cis", "bbb222");
+        cis.manifest_index = 1;
+        let manifest = Manifest {
+            base: "registry.redhat.io/rhel10/rhel-bootc:10.0".into(),
+            base_type: None,
+            fragments: vec![mf_epel, mf_cis],
+        };
+        let output = generate_containerfile(
+            &manifest,
+            &[epel, cis],
+            Some("sha256:base123"),
+            &empty_dedup(),
+            false,
+            true,
+            &bootc_caps(),
+        )
+        .unwrap();
+
+        let from_lines: Vec<&str> = output.lines().filter(|l| l.starts_with("FROM")).collect();
+        assert_eq!(
+            from_lines,
+            vec!["FROM registry.redhat.io/rhel10/rhel-bootc@sha256:base123"]
+        );
+        assert!(!output.contains("AS frag-"));
+        assert!(!output.contains("--from="));
+        // The base digest comment is fine (the base is the only remaining
+        // registry reference); fragment digest comments are not.
+        assert!(
+            output.contains("#   base: registry.redhat.io/rhel10/rhel-bootc:10.0@sha256:base123")
+        );
+        assert!(!output.contains("quay.io/test/epel"));
+        assert!(!output.contains("quay.io/test/cis"));
+        // No fragment may be listed in the digest block, by name or by ref.
+        assert!(!output.contains("#   epel:"));
+        assert!(!output.contains("#   cis:"));
+    }
+
+    #[test]
+    fn self_contained_hooks_only_fragment_has_no_tree_copy() {
+        let loaded = LoadedFragment {
+            fragment: Fragment {
+                name: "hooks-only".to_string(),
+                version: "1.0".into(),
+                description: "test".into(),
+                vendor: None,
+                phase: FragmentPhase::Config,
+                provides: FragmentProvides { repos: vec![] },
+                packages: FragmentPackages { required: vec![] },
+                conflicts: FragmentConflicts { fragments: vec![] },
+            },
+            tree_paths: vec![],
+            hook_paths: vec![PathBuf::from("setup.sh")],
+            source: FragmentSource::Registry {
+                image_ref: "quay.io/test/hooks-only:1.0".into(),
+            },
+            resolved_digest: Some("sha256:hooksonly1".into()),
+            manifest_index: 0,
+            repo_file_contents: std::collections::HashMap::new(),
+        };
+        let manifest_frag = ManifestFragment {
+            image: "quay.io/test/hooks-only:1.0".into(),
+            packages: vec![],
+            mirror: None,
+        };
+        let manifest = Manifest {
+            base: "registry.redhat.io/rhel10/rhel-bootc:10.0".into(),
+            base_type: None,
+            fragments: vec![manifest_frag],
+        };
+        let output = generate_containerfile(
+            &manifest,
+            &[loaded],
+            None,
+            &empty_dedup(),
+            false,
+            true,
+            &bootc_caps(),
+        )
+        .unwrap();
+
+        assert!(!output.contains("COPY fragments/hooks-only/tree"));
+        assert!(output.contains(
+            "RUN --mount=type=bind,source=fragments/hooks-only/hooks,target=/frag-hooks,z \\"
+        ));
+        assert!(output.contains("/frag-hooks/setup.sh"));
+    }
+
+    #[test]
+    fn self_contained_output_matches_golden_containerfile() {
+        const EXPECTED: &str = r#"# Generated by osfragment-assemble v0.1.0
+# Manifest: osfragment-assemble.yaml
+# Fragments: epel (repos), cis (config)
+# Override summary: no file path collisions detected
+
+# --- Base ---
+FROM registry.redhat.io/rhel10/rhel-bootc:10.0
+
+# --- Repo files ---
+COPY fragments/epel/tree/etc/yum.repos.d/ /etc/yum.repos.d/
+COPY fragments/epel/tree/etc/pki/rpm-gpg/ /etc/pki/rpm-gpg/
+
+# --- Packages ---
+RUN dnf install -y \
+        htop \
+    && dnf clean all \
+    && rm -rf /var/cache/dnf /var/log/dnf* /var/log/hawkey.log /var/lib/dnf/history.sqlite*
+
+# --- Config files ---
+COPY fragments/cis/tree/ /
+
+# --- Hooks ---
+RUN --mount=type=bind,source=fragments/cis/hooks,target=/frag-hooks,z \
+    /frag-hooks/configure.sh
+
+# Apply systemd presets from fragments
+RUN systemctl preset-all --preset-mode=enable-only 2>/dev/null || true
+
+# --- Phase: validation (90) ---
+RUN bootc container lint
+"#;
+
+        let (epel, mf_epel) = make_repos_fragment("epel", "aaa111");
+        let (mut cis, mf_cis) = make_config_fragment("cis", "bbb222");
+        cis.manifest_index = 1;
+        let manifest = Manifest {
+            base: "registry.redhat.io/rhel10/rhel-bootc:10.0".into(),
+            base_type: None,
+            fragments: vec![mf_epel, mf_cis],
+        };
+        let output = generate_containerfile(
+            &manifest,
+            &[epel, cis],
+            None,
+            &empty_dedup(),
+            false,
+            true,
+            &bootc_caps(),
+        )
+        .unwrap();
+
+        assert_eq!(output, EXPECTED);
     }
 }
