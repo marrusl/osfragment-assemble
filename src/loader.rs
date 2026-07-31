@@ -261,6 +261,13 @@ fn try_annotation_fast_path(image_ref: &str) -> Result<Option<Fragment>> {
         None => return Ok(None),
     };
 
+    Ok(fragment_from_annotations(annotations))
+}
+
+/// Map an OCI manifest `annotations` object onto a `Fragment`.
+/// Returns `None` when a required key is missing or the phase is
+/// unrecognized; the caller falls back to layer extraction.
+fn fragment_from_annotations(annotations: &serde_json::Value) -> Option<Fragment> {
     // Check for required annotation fields
     let name = annotations
         .get("com.github.marrusl.osfragment.name")
@@ -278,13 +285,13 @@ fn try_annotation_fast_path(image_ref: &str) -> Result<Option<Fragment>> {
 
     let (name, version, phase_str) = match (name, version, phase_str) {
         (Some(n), Some(v), Some(p)) => (n, v, p),
-        _ => return Ok(None), // Missing required annotations — fall back to layer extraction
+        _ => return None, // Missing required annotations — fall back to layer extraction
     };
 
     let phase = match phase_str {
         "repos" => FragmentPhase::Repos,
         "config" => FragmentPhase::Config,
-        _ => return Ok(None),
+        _ => return None,
     };
 
     let repos: Vec<String> = annotations
@@ -304,7 +311,7 @@ fn try_annotation_fast_path(image_ref: &str) -> Result<Option<Fragment>> {
         .and_then(|v| v.as_str())
         .map(String::from);
 
-    Ok(Some(Fragment {
+    Some(Fragment {
         name: name.to_string(),
         version: version.to_string(),
         description: description.to_string(),
@@ -313,7 +320,7 @@ fn try_annotation_fast_path(image_ref: &str) -> Result<Option<Fragment>> {
         provides: FragmentProvides { repos },
         packages: FragmentPackages { required },
         conflicts: FragmentConflicts { fragments: vec![] },
-    }))
+    })
 }
 
 /// Pull `image_ref` via skopeo into a temporary OCI layout and return the
@@ -777,6 +784,42 @@ phase = "repos"
             metadata.permissions().mode() & 0o777,
             0o700,
             "directory mode was not preserved"
+        );
+    }
+
+    #[test]
+    fn annotations_populate_fragment_from_project_namespace() {
+        let annotations = serde_json::json!({
+            "com.github.marrusl.osfragment.name": "tailscale",
+            "com.github.marrusl.osfragment.version": "1.82.0",
+            "com.github.marrusl.osfragment.description": "Tailscale mesh VPN",
+            "com.github.marrusl.osfragment.vendor": "Tailscale Inc.",
+            "com.github.marrusl.osfragment.phase": "config",
+            "com.github.marrusl.osfragment.provides.repos": "[\"tailscale\"]",
+            "com.github.marrusl.osfragment.packages.required": "[\"tailscale\"]",
+        });
+
+        let frag = fragment_from_annotations(&annotations).expect("all required keys present");
+        assert_eq!(frag.name, "tailscale");
+        assert_eq!(frag.version, "1.82.0");
+        assert_eq!(frag.description, "Tailscale mesh VPN");
+        assert_eq!(frag.vendor.as_deref(), Some("Tailscale Inc."));
+        assert_eq!(frag.phase, FragmentPhase::Config);
+        assert_eq!(frag.provides.repos, vec!["tailscale"]);
+        assert_eq!(frag.packages.required, vec!["tailscale"]);
+    }
+
+    #[test]
+    fn retired_bootc_annotations_do_not_satisfy_fast_path() {
+        let annotations = serde_json::json!({
+            "io.bootc.fragment.name": "tailscale",
+            "io.bootc.fragment.version": "1.82.0",
+            "io.bootc.fragment.phase": "config",
+        });
+
+        assert!(
+            fragment_from_annotations(&annotations).is_none(),
+            "old-namespace keys must not satisfy the fast path; the fragment falls back to layer extraction"
         );
     }
 }
