@@ -96,7 +96,7 @@ mod tests {
     use super::*;
 
     const MINIMAL_YAML: &str = r#"
-apiVersion: bootc.io/v1alpha1
+apiVersion: osfragment/v1alpha1
 kind: Composition
 base: registry.redhat.io/rhel10/rhel-bootc:10.0
 fragments:
@@ -108,7 +108,7 @@ fragments:
 "#;
 
     const MIRROR_YAML: &str = r#"
-apiVersion: bootc.io/v1alpha1
+apiVersion: osfragment/v1alpha1
 kind: Composition
 base: registry.redhat.io/rhel10/rhel-bootc:10.0
 fragments:
@@ -146,7 +146,7 @@ fragments:
     #[test]
     fn reject_dir_source() {
         let dir_yaml = r#"
-apiVersion: bootc.io/v1alpha1
+apiVersion: osfragment/v1alpha1
 kind: Composition
 base: registry.redhat.io/rhel10/rhel-bootc:10.0
 fragments:
@@ -163,7 +163,7 @@ fragments:
     #[test]
     fn reject_missing_base() {
         let bad = r#"
-apiVersion: bootc.io/v1alpha1
+apiVersion: osfragment/v1alpha1
 kind: Composition
 fragments:
   - image: quay.io/test:1
@@ -174,7 +174,7 @@ fragments:
     #[test]
     fn reject_empty_fragments() {
         let bad = r#"
-apiVersion: bootc.io/v1alpha1
+apiVersion: osfragment/v1alpha1
 kind: Composition
 base: registry.redhat.io/rhel10/rhel-bootc:10.0
 fragments: []
@@ -186,7 +186,7 @@ fragments: []
     #[test]
     fn parse_base_type_bootc() {
         let yaml = r#"
-apiVersion: bootc.io/v1alpha1
+apiVersion: osfragment/v1alpha1
 kind: Composition
 base: registry.redhat.io/rhel10/rhel-bootc:10.0
 baseType: bootc
@@ -200,7 +200,7 @@ fragments:
     #[test]
     fn parse_base_type_container() {
         let yaml = r#"
-apiVersion: bootc.io/v1alpha1
+apiVersion: osfragment/v1alpha1
 kind: Composition
 base: quay.io/fedora/fedora:41
 baseType: container
@@ -220,7 +220,7 @@ fragments:
     #[test]
     fn parse_base_type_invalid_rejected() {
         let yaml = r#"
-apiVersion: bootc.io/v1alpha1
+apiVersion: osfragment/v1alpha1
 kind: Composition
 base: quay.io/fedora/fedora:41
 baseType: something-else

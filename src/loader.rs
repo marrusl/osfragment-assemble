@@ -263,17 +263,17 @@ fn try_annotation_fast_path(image_ref: &str) -> Result<Option<Fragment>> {
 
     // Check for required annotation fields
     let name = annotations
-        .get("io.bootc.fragment.name")
+        .get("com.github.marrusl.osfragment.name")
         .and_then(|v| v.as_str());
     let version = annotations
-        .get("io.bootc.fragment.version")
+        .get("com.github.marrusl.osfragment.version")
         .and_then(|v| v.as_str());
     let description = annotations
-        .get("io.bootc.fragment.description")
+        .get("com.github.marrusl.osfragment.description")
         .and_then(|v| v.as_str())
         .unwrap_or("");
     let phase_str = annotations
-        .get("io.bootc.fragment.phase")
+        .get("com.github.marrusl.osfragment.phase")
         .and_then(|v| v.as_str());
 
     let (name, version, phase_str) = match (name, version, phase_str) {
@@ -288,19 +288,19 @@ fn try_annotation_fast_path(image_ref: &str) -> Result<Option<Fragment>> {
     };
 
     let repos: Vec<String> = annotations
-        .get("io.bootc.fragment.provides.repos")
+        .get("com.github.marrusl.osfragment.provides.repos")
         .and_then(|v| v.as_str())
         .and_then(|s| serde_json::from_str(s).ok())
         .unwrap_or_default();
 
     let required: Vec<String> = annotations
-        .get("io.bootc.fragment.packages.required")
+        .get("com.github.marrusl.osfragment.packages.required")
         .and_then(|v| v.as_str())
         .and_then(|s| serde_json::from_str(s).ok())
         .unwrap_or_default();
 
     let vendor = annotations
-        .get("io.bootc.fragment.vendor")
+        .get("com.github.marrusl.osfragment.vendor")
         .and_then(|v| v.as_str())
         .map(String::from);
 

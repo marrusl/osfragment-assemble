@@ -120,22 +120,22 @@ podman push quay.io/user/fragment:1.0
 For performance, fragments should include OCI annotations that mirror `fragment.toml` fields. When present, `inspect` and `list` can read metadata without pulling layers.
 
 Annotation keys:
-- `io.bootc.fragment.name`: fragment name
-- `io.bootc.fragment.version`: version string
-- `io.bootc.fragment.description`: description text
-- `io.bootc.fragment.vendor`: vendor name (optional)
-- `io.bootc.fragment.phase`: `"repos"` or `"config"`
-- `io.bootc.fragment.provides.repos`: JSON array of repo IDs (e.g., `["epel"]`)
-- `io.bootc.fragment.packages.required`: JSON array of required package names
+- `com.github.marrusl.osfragment.name`: fragment name
+- `com.github.marrusl.osfragment.version`: version string
+- `com.github.marrusl.osfragment.description`: description text
+- `com.github.marrusl.osfragment.vendor`: vendor name (optional)
+- `com.github.marrusl.osfragment.phase`: `"repos"` or `"config"`
+- `com.github.marrusl.osfragment.provides.repos`: JSON array of repo IDs (e.g., `["epel"]`)
+- `com.github.marrusl.osfragment.packages.required`: JSON array of required package names
 
 Annotations are **not** used during assembly; the tool always parses the in-layer `fragment.toml` for the authoritative fragment definition. Annotations are a read-only optimization.
 
 Set annotations during build:
 ```bash
-podman build --annotation io.bootc.fragment.name=tailscale \
-             --annotation io.bootc.fragment.version=1.82.0 \
-             --annotation io.bootc.fragment.phase=config \
-             --annotation 'io.bootc.fragment.packages.required=["tailscale"]' \
+podman build --annotation com.github.marrusl.osfragment.name=tailscale \
+             --annotation com.github.marrusl.osfragment.version=1.82.0 \
+             --annotation com.github.marrusl.osfragment.phase=config \
+             --annotation 'com.github.marrusl.osfragment.packages.required=["tailscale"]' \
              -f Containerfile.fragment -t quay.io/user/tailscale:1.82.0 .
 ```
 
@@ -144,7 +144,7 @@ podman build --annotation io.bootc.fragment.name=tailscale \
 Manifests declare the base image and fragment composition:
 
 ```yaml
-apiVersion: bootc.io/v1alpha1
+apiVersion: osfragment/v1alpha1
 kind: Composition
 
 base: quay.io/centos-bootc/centos-bootc:stream10
@@ -160,7 +160,7 @@ fragments:
 
 ### Fields
 
-- `apiVersion`: Must be `bootc.io/v1alpha1`
+- `apiVersion`: Must be `osfragment/v1alpha1`
 - `kind`: Must be `Composition`
 - `base`: Required. Base bootc or RHCOS image reference.
 - `baseType`: Optional. Overrides automatic base image classification. Values: `bootc` or `container`.

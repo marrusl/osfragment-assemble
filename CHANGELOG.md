@@ -13,4 +13,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Namespace** - Manifest `apiVersion` is now `osfragment/v1alpha1` (was `bootc.io/v1alpha1`) and OCI annotation keys are now `com.github.marrusl.osfragment.<key>` (was `io.bootc.fragment.<key>`), moving both to a namespace this project controls. No compatibility path is provided: the old annotation keys are not read, so previously published fragments must be rebuilt and republished with the new keys or they fall back to layer extraction for metadata. Update `apiVersion` in existing manifests; the tool does not validate its value, so stale manifests parse without complaint.
 - **Hooks** - Renamed fragment directory from `scripts/` to `hooks/`; all files under `fragment/hooks/` are collected as executables regardless of extension, allowing Python, Perl, or any interpreter-based hook

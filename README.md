@@ -53,7 +53,7 @@ The generated Containerfile is a draft. Review and edit it before building for p
 Given this manifest with an EPEL repo fragment and a CIS hardening fragment:
 
 ```yaml
-apiVersion: bootc.io/v1alpha1
+apiVersion: osfragment/v1alpha1
 kind: Composition
 
 base: quay.io/centos-bootc/centos-bootc:stream10
@@ -190,7 +190,7 @@ MachineOSConfig output (`--ocp`) always uses the full bootc step set regardless 
 Example with explicit classification:
 
 ```yaml
-apiVersion: bootc.io/v1alpha1
+apiVersion: osfragment/v1alpha1
 kind: Composition
 base: quay.io/fedora/fedora:41
 baseType: container

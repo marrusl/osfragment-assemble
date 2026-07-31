@@ -919,7 +919,11 @@ mod tests {
         fs::create_dir_all(dir.join("fragments/epel/tree/etc/yum.repos.d")).unwrap();
         fs::create_dir_all(dir.join("fragments/cis/hooks")).unwrap();
         fs::write(dir.join("Containerfile"), "FROM registry.example/base:1\n").unwrap();
-        fs::write(dir.join("manifest.yaml"), "apiVersion: bootc.io/v1alpha1\n").unwrap();
+        fs::write(
+            dir.join("manifest.yaml"),
+            "apiVersion: osfragment/v1alpha1\n",
+        )
+        .unwrap();
         fs::write(dir.join(SENTINEL_FILENAME), sentinel_contents()).unwrap();
         fs::write(
             dir.join("fragments/epel/tree/etc/yum.repos.d/epel.repo"),

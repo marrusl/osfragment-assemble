@@ -1,4 +1,4 @@
-apiVersion: bootc.io/v1alpha1
+apiVersion: osfragment/v1alpha1
 kind: Composition
 
 base: quay.io/centos-bootc/centos-bootc:stream10
