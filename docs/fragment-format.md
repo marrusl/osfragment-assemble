@@ -4,7 +4,7 @@ Authoritative specification for the osfragment-assemble fragment format.
 
 ## Fragment Image Anatomy
 
-A fragment is a single-layer OCI image with this directory structure under `/fragment/`:
+A fragment is an OCI image with this directory structure under `/fragment/`:
 
 ```
 /fragment/
@@ -86,7 +86,7 @@ RUN --mount=type=bind,from=<fragment>,source=/fragment/hooks,target=/frag-hooks,
 
 The hooks are never copied into the image. A bind mount is not committed to a layer, so no hook bytes remain in the built image and there is nothing to clean up afterwards. Copying the directory and deleting it in a later `RUN` would not achieve this: the delete only writes a whiteout, and the bytes stay recoverable in the `COPY` layer.
 
-Under `--self-contained` the same instruction mounts from the build context instead of the fragment image, as `source=fragments/<name>/hooks` with no `from=`.
+Under `--self-contained` the hooks are mounted from the build context instead of the fragment image, as `source=fragments/<name>/hooks`, with no `from=` and no `bind-propagation`.
 
 ### Rules
 
@@ -104,7 +104,7 @@ Typical uses:
 
 ## Containerfile.fragment Build Pattern
 
-Fragments are built with this single-layer pattern:
+Fragments are built with this pattern:
 
 ```dockerfile
 FROM scratch
