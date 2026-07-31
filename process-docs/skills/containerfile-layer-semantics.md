@@ -42,7 +42,7 @@ caught, so it is worth stating flatly.
 ## A multi-source `COPY` into a directory copies contents, not directories
 
 Fragment authoring, not generator emission, but the same failure family and it
-sat wrong in the README for a long time:
+sat wrong in both the README and `docs/fragment-format.md` for a long time:
 
 ```dockerfile
 # Wrong: produces /fragment/configure.sh and /fragment/etc/...
@@ -63,7 +63,7 @@ COPY hooks/ /fragment/hooks/
 ```
 
 Verified 2026-07-31 by building both forms and listing the layer contents.
-`docs/fragment-format.md` still shows the wrong form.
+Both documents now show the correct form.
 
 ## `--mount=type=bind,from=` has three sources, and they are not interchangeable
 

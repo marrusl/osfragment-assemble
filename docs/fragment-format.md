@@ -77,12 +77,16 @@ Config files land after package installation to ensure fragment-supplied configu
 
 ## Hooks Contract
 
-All files in `/fragment/hooks/` are executed after packages are installed, in alphabetical order. Fragment authors are responsible for ensuring files are executable and that any required interpreters are available in the image at build time. The generated Containerfile copies the entire `hooks/` directory and chains execution:
+All files in `/fragment/hooks/` are executed after packages are installed, in alphabetical order. Fragment authors are responsible for ensuring files are executable and that any required interpreters are available in the image at build time. The generated Containerfile bind-mounts the fragment's `hooks/` directory for the duration of a single `RUN` and chains execution:
 
 ```dockerfile
-COPY --from=<fragment> /fragment/hooks/ /tmp/frag-<name>-hooks/
-RUN /tmp/frag-<name>-hooks/01-setup.sh && /tmp/frag-<name>-hooks/02-config && rm -rf /tmp/frag-<name>-hooks
+RUN --mount=type=bind,from=<fragment>,source=/fragment/hooks,target=/frag-hooks,bind-propagation=rshared,z \
+    /frag-hooks/01-setup.sh && /frag-hooks/02-config
 ```
+
+The hooks are never copied into the image. A bind mount is not committed to a layer, so no hook bytes remain in the built image and there is nothing to clean up afterwards. Copying the directory and deleting it in a later `RUN` would not achieve this: the delete only writes a whiteout, and the bytes stay recoverable in the `COPY` layer.
+
+Under `--self-contained` the same instruction mounts from the build context instead of the fragment image, as `source=fragments/<name>/hooks` with no `from=`.
 
 ### Rules
 
@@ -104,10 +108,14 @@ Fragments are built with this single-layer pattern:
 
 ```dockerfile
 FROM scratch
-COPY fragment.toml tree/ hooks/ /fragment/
+COPY fragment.toml /fragment/
+COPY tree/ /fragment/tree/
+COPY hooks/ /fragment/hooks/
 ```
 
-No `RUN` commands, no base image. The fragment carries only the files needed for assembly.
+No `RUN` commands, no base image. The fragment carries only the files needed for assembly. Omit the `tree/` or `hooks/` line if the fragment has no such directory.
+
+Each directory needs its own `COPY` with an explicit destination. A single `COPY fragment.toml tree/ hooks/ /fragment/` copies the *contents* of `tree/` and `hooks/` into `/fragment/`, so neither `/fragment/tree/` nor `/fragment/hooks/` exists and the fragment reads as empty. That form builds and pushes without error, so the mistake surfaces only when the tool loads the fragment.
 
 Build and push:
 ```bash
