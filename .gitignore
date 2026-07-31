@@ -2,3 +2,5 @@
 /tmp
 .superpowers/
 /Containerfile
+/demo-context/
+/demo-context.tar.gz
