@@ -39,6 +39,32 @@ caught, so it is worth stating flatly.
 - `--squash`. Lossy, non-standard, and it destroys the readability of a
   generated Containerfile. Not used here.
 
+## A multi-source `COPY` into a directory copies contents, not directories
+
+Fragment authoring, not generator emission, but the same failure family and it
+sat wrong in the README for a long time:
+
+```dockerfile
+# Wrong: produces /fragment/configure.sh and /fragment/etc/...
+COPY fragment.toml tree/ hooks/ /fragment/
+```
+
+With a directory destination, `COPY` copies the *contents* of each source
+directory, so `tree/` and `hooks/` are flattened into `/fragment/` and neither
+`/fragment/tree/` nor `/fragment/hooks/` exists. The loader keys on exactly
+those two prefixes, so a fragment built this way reports no tree and no hooks
+while building and pushing without error. Each directory needs its own `COPY`
+with an explicit destination:
+
+```dockerfile
+COPY fragment.toml /fragment/
+COPY tree/ /fragment/tree/
+COPY hooks/ /fragment/hooks/
+```
+
+Verified 2026-07-31 by building both forms and listing the layer contents.
+`docs/fragment-format.md` still shows the wrong form.
+
 ## `--mount=type=bind,from=` has three sources, and they are not interchangeable
 
 - `from=context`: needs a build context holding the user's files.
