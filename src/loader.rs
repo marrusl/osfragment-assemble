@@ -884,6 +884,32 @@ description = "test fragment"
         }
     }
 
+    /// These two messages are the contract's whole user interface — a fragment
+    /// author reads one line of stderr, not this function — and the spec fixes
+    /// their wording. The substring assertions below would not catch a reflow,
+    /// a dropped remediation sentence, or a space lost at a `\` continuation;
+    /// that last one is invisible at review time because it sits at
+    /// end-of-line. Single-line by design: the terminal wraps at its own width,
+    /// and no other error in this crate embeds a newline.
+    ///
+    /// The expected strings are deliberately unbroken source lines, so this
+    /// test cannot suffer the continuation fault it exists to detect.
+    #[test]
+    fn entrypoint_errors_are_verbatim_single_lines() {
+        assert_eq!(
+            validate_hooks_entrypoint("nvidia-driver", None)
+                .unwrap_err()
+                .to_string(),
+            "fragment 'nvidia-driver': hooks/ contains files but no executable hooks/entrypoint; the entrypoint is the single file osfragment-assemble runs. Rename the script to hooks/entrypoint, or add one that invokes the others."
+        );
+        assert_eq!(
+            validate_hooks_entrypoint("nvidia-driver", Some(0o644))
+                .unwrap_err()
+                .to_string(),
+            "fragment 'nvidia-driver': hooks/entrypoint is not executable; the entrypoint is the single file osfragment-assemble runs. Set the execute bit (chmod +x) before building the fragment image."
+        );
+    }
+
     #[test]
     fn hooks_without_entrypoint_are_rejected() {
         let layers = fragment_layers(vec![hook_entry("fragment/hooks/other.sh", 0o755)]);
