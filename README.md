@@ -184,7 +184,7 @@ Examine a fragment's metadata and contents. Accepts a local directory path or an
 osfragment-assemble list --manifest <path>
 ```
 
-List fragments in phase-sorted order (the order they'll appear in the generated Containerfile).
+List fragments in manifest order (the order they'll appear in the generated Containerfile).
 
 ## Base image classification
 

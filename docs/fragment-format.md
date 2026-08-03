@@ -28,7 +28,6 @@ name = "tailscale"                    # Required: unique identifier (ASCII, no s
 version = "1.82.0"                    # Required: semantic version or date
 description = "Tailscale VPN client"  # Required: one-line summary
 vendor = "Tailscale Inc."             # Optional: provider name
-phase = "config"                      # Required: "repos" or "config"
 
 [fragment.conflicts]
 # Optional: fragment names this fragment conflicts with
@@ -45,9 +44,6 @@ required = ["tailscale"]
 - `version`: Any string. Not validated, purely informational.
 - `description`: Single-line text. Displayed by `inspect` and `list`.
 - `vendor`: Optional. Identifies the fragment publisher.
-- `phase`: Must be `"repos"` or `"config"`. Controls execution order.
-  - `repos` (weight 10): Runs before packages are installed. Tree content is restricted to repo definitions and GPG keys (paths under `etc/yum.repos.d/` or `etc/pki/rpm-gpg/`). Must not contain hooks.
-  - `config` (weight 30): Runs after packages are installed. No tree restrictions. May contain hooks.
 - `conflicts.fragments`: Optional array of fragment names this fragment is incompatible with. Assembly fails if any listed fragment is present in the manifest.
 - `packages.required`: Optional array of package names this fragment forces during assembly. These packages are always installed, even without a manifest entry. Unknown keys in `[fragment.packages]` are rejected as parse errors.
 
@@ -62,14 +58,15 @@ tree/etc/pki/rpm-gpg/RPM-GPG-KEY-TS  →  /etc/pki/rpm-gpg/RPM-GPG-KEY-TS
 tree/usr/lib/systemd/system/ts.service → /usr/lib/systemd/system/ts.service
 ```
 
-Phase-specific restrictions:
-- `repos` fragments: Tree may only contain paths under `etc/yum.repos.d/` or `etc/pki/rpm-gpg/`. Other paths cause assembly to fail.
-- `config` fragments: No restrictions.
+Where a file lands is decided by its path, not by any declaration. Repo
+definitions and GPG keys (`etc/yum.repos.d/`, `etc/pki/rpm-gpg/`) are hoisted
+ahead of the package install; everything else under `tree/` is copied after it.
+A fragment carrying both gets both treatments.
 
 The generated Containerfile applies fragments in this order:
 1. Repo files (yum.repos.d, rpm-gpg) from all fragments
 2. Packages (single batched `dnf install` with all requested packages)
-3. Config files (full `tree/` content from config-phase fragments)
+3. Config files (the rest of each fragment's `tree/` content)
 4. Hooks (all files in `hooks/`, alphabetical order)
 5. Preset application and validation
 
@@ -132,7 +129,6 @@ Annotation keys:
 - `com.github.marrusl.osfragment.version`: version string
 - `com.github.marrusl.osfragment.description`: description text
 - `com.github.marrusl.osfragment.vendor`: vendor name (optional)
-- `com.github.marrusl.osfragment.phase`: `"repos"` or `"config"`
 - `com.github.marrusl.osfragment.provides.repos`: JSON array of repo IDs (e.g., `["epel"]`)
 - `com.github.marrusl.osfragment.packages.required`: JSON array of required package names
 
@@ -142,7 +138,6 @@ Set annotations during build:
 ```bash
 podman build --annotation com.github.marrusl.osfragment.name=tailscale \
              --annotation com.github.marrusl.osfragment.version=1.82.0 \
-             --annotation com.github.marrusl.osfragment.phase=config \
              --annotation 'com.github.marrusl.osfragment.packages.required=["tailscale"]' \
              -f Containerfile.fragment -t quay.io/user/tailscale:1.82.0 .
 ```
