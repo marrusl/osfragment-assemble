@@ -63,3 +63,49 @@ podman build --annotation com.github.marrusl.osfragment.name=tailscale \
 
 `skopeo inspect --raw` shows the manifest's `annotations` map and is the quickest
 way to confirm they survived the push.
+
+## Never write non-trivial inline `python3 -c` in this pipeline
+
+Deriving annotation arguments from `fragment.toml`, or checking a manifest's
+annotation map, invites a one-liner. Do not. Inside a single-quoted shell string
+the shell passes backslashes through literally, so escaped quotes land in the
+Python source in places the parser rejects — reliably inside f-string
+expressions, which is exactly where JSON and dict literals want them:
+
+```bash
+# All three of these died with SyntaxError before running a single statement:
+python3 -c 'print(json.dumps(repos, separators=(\",\", \":\")))'
+python3 -c 'print(f"{rows(\"full.Containerfile\", n)} rows")'
+python3 -c 'print(f".phase present: {any(k.endswith(\".phase\") for k in ks)}")'
+```
+
+**It fails silently.** A `SyntaxError` means nothing executes and the error goes
+to stderr. When the call sits in a command substitution feeding a shell array,
+or under `>/dev/null 2>&1`, the caller sees empty output rather than a failure,
+and `set -e` does not necessarily abort a subshell or process substitution.
+
+This caused a real incident on 2026-08-03. The fragment rebuild script derived
+its `--annotation` flags from each `fragment.toml` through an inline
+`python3 -c`. The Python died on the escaped quotes, the argument array came
+back empty, and `podman build` ran with no annotations at all. The script
+printed `==> building ...` for each fragment, printed `done: 8 fragments`, and
+exited 0. Eight images were built and pushed carrying zero annotations, and it
+was only caught later by inspecting a published manifest.
+
+The fix is mechanical: **write the script to a file in scratch and run the
+file.** A heredoc into a `.py` file, or a `read -r -d '' VAR <<'PY'` block whose
+quoted delimiter stops the shell from touching the contents, both work; passing
+the program as an argv string does not.
+
+Then assert on the derived data before acting on it, because the failure mode is
+absence rather than error:
+
+```bash
+if [ "${#args[@]}" -lt 3 ]; then
+    echo "refusing to build $name: only ${#args[@]} annotations derived" >&2
+    exit 1
+fi
+```
+
+That guard is what turns a silent zero-annotation build into a loud refusal. Any
+step that derives build arguments from parsed metadata should carry one.
