@@ -64,6 +64,40 @@ podman build --annotation com.github.marrusl.osfragment.name=tailscale \
 `skopeo inspect --raw` shows the manifest's `annotations` map and is the quickest
 way to confirm they survived the push.
 
+## Regenerating docs that must show published refs
+
+A doc example is supposed to be real tool output, but the fragments it names
+(`quay.io/marrusl2/fragments/...`) are the ones a breaking change has not been
+applied to yet — they are exactly what the change stops loading. Pointing the
+manifest at `localhost:5050` produces a genuine run with the wrong refs in it,
+and hand-editing the host back afterwards produces output that is no longer
+genuine.
+
+Mirror the published location to the local registry instead. Only the pull is
+redirected; the tool still resolves and emits the manifest's declared refs:
+
+```bash
+cat > /tmp/scratch/registries-mirror.conf <<'EOF'
+[[registry]]
+location = "quay.io/marrusl2/fragments"
+
+[[registry.mirror]]
+location = "localhost:5050/fragments"
+insecure = true
+EOF
+export CONTAINERS_REGISTRIES_CONF=/tmp/scratch/registries-mirror.conf
+```
+
+The manifest keeps its `quay.io/...` entries and the emitted Containerfile
+carries them, while the bytes come from the locally rebuilt fragments. Diff the
+doc's code block against the generated file rather than eyeballing it; that is
+what catches unrelated drift, such as a stale `# Fragments:` comment still
+carrying parentheticals from a field that was deleted two changes ago.
+
+Note the mirror is consulted, not enforced: if the local registry is missing
+the image, skopeo falls through to the real location and silently pulls the
+published (pre-change) fragment. Build and push before generating.
+
 ## Never write non-trivial inline `python3 -c` in this pipeline
 
 Deriving annotation arguments from `fragment.toml`, or checking a manifest's
