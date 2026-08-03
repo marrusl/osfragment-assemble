@@ -6,7 +6,11 @@ Engineering decisions behind osfragment-assemble's fragment format and assembly 
 
 Fragments use the existing OCI distribution stack: no new builder, no custom registry plugins, no client-side tooling changes. Vendors can publish fragments to quay.io, GHCR, or ECR using the same workflows they use for container images. Customers can pull them with skopeo, mirror them with podman, and scan them with existing supply chain tools.
 
+Being an artifact rather than a piece of text is the point. A unit that lives in a registry has a digest, so it can be pinned exactly. It has a tag, so it can be versioned and upgraded. It can be signed, mirrored into a disconnected environment, pulled through whatever authenticated proxy is already in place, and scanned by whatever already scans images. Text spliced into a build at parse time has none of that: no identity to pin, nothing to sign, nothing for a mirror to hold. Everything a registry already does for container images it does for fragments at no additional cost, and that is the reason the unit is an image.
+
 Alternative considered: a custom archive format (`.tar.gz` or `.zip`). Rejected because it requires a separate distribution story and doesn't benefit from existing registry infrastructure.
+
+Alternative considered: an include directive in the Containerfile itself. Rejected on the distribution grounds above, and it would leave the composition work undone regardless: a unit's content has to be split across the package install, and batching, deduplication, and conflict detection are properties of the whole set rather than of any one inclusion site.
 
 ## Why fragments are not delivered as RPMs
 
@@ -26,7 +30,7 @@ The design goal for `fragment.toml` is to be the *minimum* metadata that lets re
 
 ### As light as possible: the muxer knows what a unit is, not what it does
 
-Declarative languages for configuring Linux systems already exist and are mature: kickstart, osbuild blueprints, rpm-ostree treefiles, comps groups, cloud-init, Butane. The format defers to them completely. Configuration is their job, and they do it well.
+Declarative languages for configuring Linux systems already exist and are mature: kickstart, osbuild blueprints, rpm-ostree treefiles, comps groups, cloud-init, Butane, and Ansible roles. The format defers to them completely. Configuration is their job, and they do it well.
 
 `fragment.toml` has a different job: describing a unit so units can be combined. It carries `name`, `version`, `description`, `vendor`, `phase`, `conflicts`, `provides`, and one deliberate exception, `packages.required`: the packages a fragment installs in order to be itself (see "Packages: what a unit *is* versus what a build *selects*" below). Every field but the last answers a question about the *unit*: what is this thing, who published it, what version is it, what can it not be combined with, when does it apply relative to other units. None of them, `packages.required` included, answers a question about the *system's configuration*: no users, no services, no firewall rules, no partitioning, no file contents. The format has no vocabulary for expressing arbitrary system state and does not need one. The forced package list describes the unit's own completeness, not the machine it lands on.
 
@@ -80,6 +84,32 @@ Two questions settle whether something belongs in `fragment.toml`:
 
 1. **Does it describe the fragment, or the system the fragment configures?** The first belongs in `fragment.toml`. The second belongs in `tree/` or `hooks/`.
 2. **If it describes the fragment, is it a flat statement of fact, or does it need to be evaluated?** Facts belong in `fragment.toml`. Anything requiring conditions, precedence, or context belongs in a hook.
+
+## What a fragment is for depends on who is writing it
+
+The same format serves two people with different problems, and the parts they use barely overlap.
+
+**A vendor's problem is that there is no way to ship the thing.** Today a vendor documents an integration in prose and the reader retypes it. What a vendor packages into a fragment is a repo definition, the package or packages their component needs, and the hooks that set it up: one artifact, versioned and published, that a consumer references by name instead of transcribing. Their configuration defaults usually arrive inside the package already, so a vendor's `tree/` is often thin or empty.
+
+**A consumer's problem is combining several additions into one image.** For them `tree/` is the important part. It is where their own configuration lives, the settings that differ from whatever a package ships by default, and where they override what a vendor's fragment provides. This is why configuration lands after the package install: it is what makes the configuration a consumer authored the version that survives into the image.
+
+A useful consequence: a fragment is also a base image. Deriving from a vendor's fragment, layering your own files on top, and publishing the result as your own fragment is an ordinary container build, and it is how a consumer keeps their overrides while still tracking a vendor's updates.
+
+## How fragments compose with configuration management
+
+Configuration management describes what a system should look like. Ansible roles, system roles built on them, and the declarative formats listed above are all mature answers to that question, and a fragment has no vocabulary to compete with any of them.
+
+A fragment answers a different question: how a reusable piece of an image gets published, versioned, and placed in a build. The two compose at the payload boundary, in either direction. A fragment can carry a playbook and run it from a hook at build time. Or a playbook can run wherever it already runs and its output can be captured into `tree/` and shipped as a fragment. In both cases the configuration logic stays where it is, written in the language it is already written in, and what the fragment adds is distribution and placement: a versioned artifact a third party can publish, and a defined position relative to the package install.
+
+## Why conflicts resolve by order rather than by merging
+
+Two fragments can write the same path. The rule is that fragments apply in manifest order and the last writer wins, and the generated Containerfile lists every such path in its header comment so the outcome is visible rather than discovered later.
+
+Ordering is deliberately the whole contract. Anything smarter, merging by key or by section or by line, requires the tool to understand what a given file *is*, and that is an unbounded commitment: every format anyone might ship would eventually need its own merge behavior. The tool would become an arbiter of content, which is precisely the job it declines everywhere else in this document.
+
+Two escape hatches cover what ordering does not. Genuinely additive resources belong in `.d`-style directories, which is the host's own convention for the problem and needs nothing from this format. Anything else is a derived fragment: take the fragment you disagree with as a base, change what you need, and publish your own. Same mental model as container layering, which anyone composing images already has.
+
+Repo definitions are the deliberate exception, and they fail the build instead. Two fragments disagreeing about what a repository is cannot be resolved by picking one, because the disagreement itself is the defect.
 
 ## Why no fragment type taxonomy
 
@@ -155,4 +185,4 @@ Alternative considered: copy hooks, execute them, and remove them in the same `R
 
 Fragments are trusted build code, not passive data. A fragment's hooks run as root during image assembly. Pulling a fragment is equivalent to running an upstream install script; it's a supply chain trust decision. The tool does not sandbox fragment hooks or validate their behavior.
 
-Repo deduplication is a correctness check, not a security boundary. When two fragments ship a repo file with the same repo ID and identical content, one copy is kept. When the contents differ, generation fails with an error naming both fragments; the tool never silently picks a winner between two units that disagree about what a repository is. Repo definitions are the one case that stops the build. Every other path is ordinary payload and resolves by manifest order, last writer wins, with each such path listed in the generated Containerfile's header comment. Ordering plus a downstream rebuild is the whole conflict contract: the tool never merges file contents and holds no opinion about what any file means.
+Repo deduplication is a correctness check, not a security boundary. When two fragments ship a repo file with the same repo ID and identical content, one copy is kept. When the contents differ, generation fails with an error naming both fragments; the tool never silently picks a winner between two units that disagree about what a repository is. How every other kind of collision resolves is covered in "Why conflicts resolve by order rather than by merging" above, and none of it is a security mechanism either.
