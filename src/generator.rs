@@ -247,7 +247,7 @@ pub fn generate_containerfile(
     let mut all_packages: Vec<String> = Vec::new();
 
     // Phase 1: fragment-declared required packages, in fragment order
-    // (fragments are already sorted by phase weight then manifest order)
+    // (fragments are in manifest order)
     for loaded in fragments {
         for pkg in &loaded.fragment.packages.required {
             if seen.insert(pkg.clone()) {
@@ -1561,35 +1561,40 @@ mod tests {
     }
 
     #[test]
-    fn required_packages_follow_fragment_order() {
-        // Required packages are collected in the order the fragments are
-        // given, which is manifest order.
+    fn manifest_order_wins_over_any_phase_notion() {
+        // Config-flavored fragment first in the manifest, repos-flavored second.
+        // A phase-weight sort would have emitted the repos fragment first; manifest
+        // order is now the whole contract, so the manifest's order stands.
         let (mut cis, mf_cis) = make_config_fragment("cis", "bbb222");
         cis.fragment.packages.required = vec!["config-pkg".into()];
-        cis.manifest_index = 1;
+        cis.manifest_index = 0;
         let (mut epel, mf_epel) = make_repos_fragment("epel", "aaa111");
         epel.fragment.packages.required = vec!["repos-pkg".into()];
-        epel.manifest_index = 0;
+        epel.manifest_index = 1;
         let manifest = Manifest {
             base: "registry.redhat.io/rhel10/rhel-bootc:10.0".into(),
             base_type: None,
-            fragments: vec![mf_epel, mf_cis],
+            fragments: vec![mf_cis, mf_epel],
         };
-        let ordered_fragments = vec![epel, cis];
+
         let output = generate_containerfile(
             &manifest,
-            &ordered_fragments,
+            &[cis, epel],
             Some("sha256:base123"),
             false,
             false,
             &bootc_caps(),
         )
         .unwrap();
-        let repos_pos = output.find("repos-pkg").unwrap();
+
         let config_pos = output.find("config-pkg").unwrap();
+        let repos_pos = output.find("repos-pkg").unwrap();
         assert!(
-            repos_pos < config_pos,
-            "required packages must follow fragment order"
+            config_pos < repos_pos,
+            "manifest order must win: the config fragment is listed first, so its \
+             required packages come first even though a phase sort would have \
+             hoisted the repos fragment:\n{}",
+            output
         );
     }
 

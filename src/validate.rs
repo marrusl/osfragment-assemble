@@ -41,14 +41,20 @@ pub fn check_conflicts(fragments: &[LoadedFragment]) -> Result<()> {
     Ok(())
 }
 
-/// For each repo ID provided by multiple fragments, compare the actual
-/// .repo file content. Conflicting definitions (same repo ID, different
-/// content) fail the build with a clear error. Identical definitions are
-/// allowed through: every provider still emits its own COPY, the last one
+/// For each repo ID provided by more than one fragment, compare what those
+/// fragments ship. Disagreement fails the build with a clear error. Agreement
+/// is allowed through: every provider still emits its own COPY, the last one
 /// wins, and the generated Containerfile's header comment names the
 /// collision. Nothing is silently skipped.
+///
+/// The comparison is coarser than per-repo-ID: each fragment contributes a
+/// single hash over its *entire* `repo_file_contents` map, and that one hash
+/// is attributed to every repo ID it provides. Two fragments that agree on a
+/// shared repo ID but differ in some other `.repo` file they also ship will
+/// therefore be reported as conflicting on the shared ID. Pre-existing
+/// behavior; the shipped examples do not trip it.
 pub fn check_repo_conflicts(fragments: &[LoadedFragment]) -> Result<()> {
-    // Map repo ID -> list of (fragment name, repo file content hash)
+    // Map repo ID -> list of (fragment name, whole-map content hash)
     let mut repo_providers: HashMap<String, Vec<(&str, u64)>> = HashMap::new();
 
     for f in fragments {

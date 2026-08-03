@@ -16,9 +16,10 @@ pub struct LoadedFragment {
     pub hook_paths: Vec<PathBuf>,
     pub source: FragmentSource,
     pub resolved_digest: Option<String>,
-    /// Index into the original manifest.fragments vec, preserved through sorting.
+    /// Index into `manifest.fragments`. Emission is manifest order, so this
+    /// currently equals the fragment's position in the slice.
     pub manifest_index: usize,
-    /// Cached .repo file contents for dedup comparison, keyed by filename.
+    /// Cached .repo file contents for repo conflict comparison, keyed by filename.
     /// Populated during loading from either local filesystem or layer extraction.
     pub repo_file_contents: std::collections::HashMap<String, String>,
 }

@@ -127,6 +127,11 @@ fragments = []
     /// `FragmentInner` does not deny unknown fields, so such a fragment parses
     /// and the stale key is ignored rather than rejected. Previously published
     /// fragments therefore keep working without a rebuild.
+    ///
+    /// The value is deliberately one the old schema would have rejected, so
+    /// this test fails both if `deny_unknown_fields` is added and if `phase`
+    /// is reintroduced as a typed field. It does not depend on a sibling test
+    /// to catch either mutation.
     #[test]
     fn stale_phase_key_is_ignored() {
         let stale = r#"
@@ -134,7 +139,7 @@ fragments = []
 name = "legacy"
 version = "1"
 description = "published before phase was removed"
-phase = "repos"
+phase = "install"
 "#;
         let frag = parse_fragment_toml(stale).expect("stale phase key must not be rejected");
         assert_eq!(frag.name, "legacy");
