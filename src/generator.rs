@@ -323,14 +323,6 @@ pub fn generate_containerfile(
             writeln!(out, "# --- Hooks ---")?;
         }
         for loaded in &hook_fragments {
-            // Build chained hook invocations
-            let hook_cmds: Vec<String> = loaded
-                .hook_paths
-                .iter()
-                .map(|h| format!("/frag-hooks/{}", h.display()))
-                .collect();
-            let chained = hook_cmds.join(" && ");
-
             if self_contained {
                 writeln!(
                     out,
@@ -345,7 +337,9 @@ pub fn generate_containerfile(
                     source
                 )?;
             }
-            writeln!(out, "    {}", chained)?;
+            // The entrypoint is the only file the tool runs; anything else
+            // under hooks/ is support material it can reach at the mount path.
+            writeln!(out, "    /frag-hooks/entrypoint")?;
         }
         if !ocp {
             writeln!(out)?;
@@ -444,7 +438,7 @@ mod tests {
                 conflicts: FragmentConflicts { fragments: vec![] },
             },
             tree_paths: vec![PathBuf::from("tree/usr/lib/sysctl.d/99-hardening.conf")],
-            hook_paths: vec![PathBuf::from("configure.sh")],
+            hook_paths: vec![PathBuf::from("entrypoint")],
             source: FragmentSource::Registry {
                 image_ref: format!("quay.io/test/{}@sha256:{}", name, digest),
             },
@@ -458,6 +452,67 @@ mod tests {
             mirror: None,
         };
         (loaded, manifest_frag)
+    }
+
+    /// The one invocation line every hook-carrying fragment gets, in every
+    /// mode, indentation included.
+    const HOOK_INVOCATION: &str = "    /frag-hooks/entrypoint";
+
+    /// A fragment carrying only hooks, whose `hook_paths` list is whatever the
+    /// caller names — the loader guarantees `entrypoint` is among them, and
+    /// the extras are the support material emission must ignore.
+    fn make_hook_fragment(name: &str, hooks: &[&str]) -> (LoadedFragment, ManifestFragment) {
+        let loaded = LoadedFragment {
+            fragment: Fragment {
+                name: name.to_string(),
+                version: "1.0".into(),
+                description: "test".into(),
+                vendor: None,
+                provides: FragmentProvides { repos: vec![] },
+                packages: FragmentPackages { required: vec![] },
+                conflicts: FragmentConflicts { fragments: vec![] },
+            },
+            tree_paths: vec![],
+            hook_paths: hooks.iter().map(PathBuf::from).collect(),
+            source: FragmentSource::Registry {
+                image_ref: format!("quay.io/test/{}:1.0", name),
+            },
+            resolved_digest: None,
+            manifest_index: 0,
+            repo_file_contents: std::collections::HashMap::new(),
+        };
+        let manifest_frag = ManifestFragment {
+            image: format!("quay.io/test/{}:1.0", name),
+            packages: vec![],
+            mirror: None,
+        };
+        (loaded, manifest_frag)
+    }
+
+    /// The line following each hook mount line, verbatim: the invocation is a
+    /// fixed literal, so comparing anything less than the whole line would
+    /// let a differently indented or extended command through.
+    fn hook_invocation_lines(output: &str) -> Vec<&str> {
+        let lines: Vec<&str> = output.lines().collect();
+        lines
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| l.starts_with("RUN --mount=type=bind"))
+            .map(|(idx, _)| {
+                *lines
+                    .get(idx + 1)
+                    .expect("a hook mount line is always followed by its command line")
+            })
+            .collect()
+    }
+
+    /// Every path under the hook mount target the output names. The mount
+    /// lines' own `target=/frag-hooks` option is not one of these.
+    fn frag_hook_tokens(output: &str) -> Vec<&str> {
+        output
+            .split_whitespace()
+            .filter(|t| t.starts_with("/frag-hooks/"))
+            .collect()
     }
 
     #[test]
@@ -783,7 +838,7 @@ mod tests {
                 conflicts: FragmentConflicts { fragments: vec![] },
             },
             tree_paths: vec![PathBuf::from("tree/usr/lib/sysctl.d/99-hardening.conf")],
-            hook_paths: vec![PathBuf::from("configure.sh")],
+            hook_paths: vec![PathBuf::from("entrypoint")],
             source: FragmentSource::Registry {
                 image_ref: format!("quay.io/test/{}:2.1", name),
             },
@@ -847,7 +902,7 @@ mod tests {
             output
         );
         assert!(
-            output.contains("/frag-hooks/configure.sh"),
+            output.contains("/frag-hooks/entrypoint"),
             "expected hook execution via mount target:\n{}",
             output
         );
@@ -987,36 +1042,10 @@ mod tests {
     }
 
     #[test]
-    fn multiple_hooks_run_in_alphabetical_order() {
-        let mut loaded = LoadedFragment {
-            fragment: Fragment {
-                name: "multi-hook".to_string(),
-                version: "1.0".into(),
-                description: "test".into(),
-                vendor: None,
-                provides: FragmentProvides { repos: vec![] },
-                packages: FragmentPackages { required: vec![] },
-                conflicts: FragmentConflicts { fragments: vec![] },
-            },
-            tree_paths: vec![],
-            hook_paths: vec![
-                PathBuf::from("03-final.sh"),
-                PathBuf::from("01-first.bash"),
-                PathBuf::from("02-second.sh"),
-            ],
-            source: FragmentSource::Registry {
-                image_ref: "quay.io/test/multi-hook:1.0".into(),
-            },
-            resolved_digest: None,
-            manifest_index: 0,
-            repo_file_contents: std::collections::HashMap::new(),
-        };
-        loaded.hook_paths.sort(); // Simulate what loader does
-        let manifest_frag = ManifestFragment {
-            image: "quay.io/test/multi-hook:1.0".into(),
-            packages: vec![],
-            mirror: None,
-        };
+    fn support_files_are_never_invoked() {
+        let (mut loaded, manifest_frag) =
+            make_hook_fragment("multi-file", &["entrypoint", "lib/helper.sh", "nvidia.run"]);
+        loaded.manifest_index = 0;
         let manifest = Manifest {
             base: "registry.redhat.io/rhel10/rhel-bootc:10.0".into(),
             base_type: None,
@@ -1026,23 +1055,18 @@ mod tests {
             generate_containerfile(&manifest, &[loaded], None, false, false, &bootc_caps())
                 .unwrap();
 
-        // Verify all three hooks are present via the mount target path
-        assert!(output.contains("/frag-hooks/01-first.bash"));
-        assert!(output.contains("/frag-hooks/02-second.sh"));
-        assert!(output.contains("/frag-hooks/03-final.sh"));
-
-        // Verify alphabetical ordering by checking positions
-        let first_pos = output.find("/frag-hooks/01-first.bash").unwrap();
-        let second_pos = output.find("/frag-hooks/02-second.sh").unwrap();
-        let third_pos = output.find("/frag-hooks/03-final.sh").unwrap();
-        assert!(first_pos < second_pos);
-        assert!(second_pos < third_pos);
-
-        // Verify single RUN --mount instruction (not per-hook)
+        // One mount for the fragment, and the entrypoint is the only path
+        // under the mount target that the output names.
         let mount_count = output.matches("RUN --mount=type=bind").count();
         assert_eq!(
             mount_count, 1,
             "expected exactly one RUN --mount instruction:\n{}",
+            output
+        );
+        assert_eq!(
+            frag_hook_tokens(&output),
+            vec![HOOK_INVOCATION.trim()],
+            "only the entrypoint may be invoked:\n{}",
             output
         );
     }
@@ -1154,15 +1178,16 @@ mod tests {
         };
         let output =
             generate_containerfile(&manifest, &[cis], None, true, false, &bootc_caps()).unwrap();
-        // Hooks should use bind mount in OCP output
+        // Hooks should use bind mount in OCP output, in the registry form
         assert!(
-            output.contains("RUN --mount=type=bind"),
-            "expected RUN --mount in OCP output:\n{}",
+            output.contains("RUN --mount=type=bind,from=quay.io/test/cis:2.1,source=/fragment/hooks,target=/frag-hooks,bind-propagation=rshared,z"),
+            "expected the registry mount form in OCP output:\n{}",
             output
         );
-        assert!(
-            output.contains("/frag-hooks/configure.sh"),
-            "expected hook execution in OCP output:\n{}",
+        assert_eq!(
+            hook_invocation_lines(&output),
+            vec![HOOK_INVOCATION],
+            "OCP emits one fixed invocation:\n{}",
             output
         );
         // No section comment headers in OCP mode
@@ -1334,10 +1359,7 @@ mod tests {
     fn standalone_and_ocp_emit_same_hook_instruction() {
         let (mut cis, mf_cis) = make_unpinned_config_fragment("cis");
         cis.manifest_index = 0;
-        cis.hook_paths = vec![
-            PathBuf::from("10-configure.sh"),
-            PathBuf::from("20-enable.sh"),
-        ];
+        cis.hook_paths = vec![PathBuf::from("entrypoint"), PathBuf::from("lib/helper.sh")];
         let manifest = Manifest {
             base: "registry.redhat.io/rhel10/rhel-bootc:10.0".into(),
             base_type: None,
@@ -1371,74 +1393,34 @@ mod tests {
         );
     }
 
-    #[test]
-    fn one_mount_per_fragment_not_per_hook() {
-        // Fragment with 3 hooks
-        let mut loaded = LoadedFragment {
-            fragment: Fragment {
-                name: "multi-hook".to_string(),
-                version: "1.0".into(),
-                description: "test".into(),
-                vendor: None,
-                provides: FragmentProvides { repos: vec![] },
-                packages: FragmentPackages { required: vec![] },
-                conflicts: FragmentConflicts { fragments: vec![] },
-            },
-            tree_paths: vec![],
-            hook_paths: vec![
-                PathBuf::from("01-first.sh"),
-                PathBuf::from("02-second.sh"),
-                PathBuf::from("03-third.sh"),
-            ],
-            source: FragmentSource::Registry {
-                image_ref: "quay.io/test/multi-hook:1.0".into(),
-            },
-            resolved_digest: None,
-            manifest_index: 0,
-            repo_file_contents: std::collections::HashMap::new(),
-        };
-        loaded.hook_paths.sort();
-        let manifest_frag = ManifestFragment {
-            image: "quay.io/test/multi-hook:1.0".into(),
-            packages: vec![],
-            mirror: None,
-        };
-
-        // Second fragment with 1 hook
-        let loaded2 = LoadedFragment {
-            fragment: Fragment {
-                name: "single-hook".to_string(),
-                version: "1.0".into(),
-                description: "test".into(),
-                vendor: None,
-                provides: FragmentProvides { repos: vec![] },
-                packages: FragmentPackages { required: vec![] },
-                conflicts: FragmentConflicts { fragments: vec![] },
-            },
-            tree_paths: vec![],
-            hook_paths: vec![PathBuf::from("setup.sh")],
-            source: FragmentSource::Registry {
-                image_ref: "quay.io/test/single-hook:1.0".into(),
-            },
-            resolved_digest: None,
-            manifest_index: 1,
-            repo_file_contents: std::collections::HashMap::new(),
-        };
-        let manifest_frag2 = ManifestFragment {
-            image: "quay.io/test/single-hook:1.0".into(),
-            packages: vec![],
-            mirror: None,
-        };
+    /// Two hook-carrying fragments at one pinning mode, so a uniformly wrong
+    /// invocation cannot pass by matching itself: every invocation line must
+    /// equal the fixed literal. Run pinned and unpinned, because the mount
+    /// line's shape differs between them while the invocation must not.
+    fn assert_fixed_invocation_over_two_fragments(pinned: bool) {
+        let (mut multi, mf_multi) =
+            make_hook_fragment("multi-file", &["entrypoint", "lib/helper.sh"]);
+        let (mut single, mf_single) = make_hook_fragment("single-file", &["entrypoint"]);
+        single.manifest_index = 1;
+        if pinned {
+            for (loaded, digest) in [(&mut multi, "aaa111"), (&mut single, "bbb222")] {
+                loaded.resolved_digest = Some(format!("sha256:{}", digest));
+                loaded.source = FragmentSource::Registry {
+                    image_ref: format!("quay.io/test/{}@sha256:{}", loaded.fragment.name, digest),
+                };
+            }
+        }
 
         let manifest = Manifest {
             base: "registry.redhat.io/rhel10/rhel-bootc:10.0".into(),
             base_type: None,
-            fragments: vec![manifest_frag, manifest_frag2],
+            fragments: vec![mf_multi, mf_single],
         };
+        let base_digest = pinned.then_some("sha256:base123");
         let output = generate_containerfile(
             &manifest,
-            &[loaded, loaded2],
-            None,
+            &[multi, single],
+            base_digest,
             false,
             false,
             &bootc_caps(),
@@ -1449,16 +1431,85 @@ mod tests {
         let mount_count = output.matches("RUN --mount=type=bind").count();
         assert_eq!(
             mount_count, 2,
-            "expected 2 RUN --mount instructions (one per fragment), got {}:\n{}",
-            mount_count, output
+            "expected 2 RUN --mount instructions (one per fragment), pinned={}:\n{}",
+            pinned, output
         );
-
-        // First fragment's hooks all chained in one line
+        assert_eq!(
+            hook_invocation_lines(&output),
+            vec![HOOK_INVOCATION, HOOK_INVOCATION],
+            "every invocation must be the fixed literal, pinned={}:\n{}",
+            pinned,
+            output
+        );
+        // Whichever reference the mount line carries, it is the only shape
+        // that varies with pinning.
+        let expected_mount_ref = if pinned {
+            "from=frag-multi-file,"
+        } else {
+            "from=quay.io/test/multi-file:1.0,"
+        };
         assert!(
-            output.contains(
-                "/frag-hooks/01-first.sh && /frag-hooks/02-second.sh && /frag-hooks/03-third.sh"
-            ),
-            "expected all hooks chained with && in one instruction:\n{}",
+            output.contains(expected_mount_ref),
+            "expected {} in the mount line, pinned={}:\n{}",
+            expected_mount_ref,
+            pinned,
+            output
+        );
+    }
+
+    #[test]
+    fn unpinned_invocation_is_fixed_across_fragments() {
+        assert_fixed_invocation_over_two_fragments(false);
+    }
+
+    #[test]
+    fn pinned_invocation_is_fixed_across_fragments() {
+        assert_fixed_invocation_over_two_fragments(true);
+    }
+
+    #[test]
+    fn self_contained_emits_one_fixed_invocation_per_hook_fragment() {
+        let (mut multi, mf_multi) =
+            make_hook_fragment("multi-file", &["entrypoint", "lib/helper.sh"]);
+        let (mut single, mf_single) = make_hook_fragment("single-file", &["entrypoint"]);
+        multi.manifest_index = 0;
+        single.manifest_index = 1;
+        let manifest = Manifest {
+            base: "registry.redhat.io/rhel10/rhel-bootc:10.0".into(),
+            base_type: None,
+            fragments: vec![mf_multi, mf_single],
+        };
+        let output = generate_containerfile(
+            &manifest,
+            &[multi, single],
+            None,
+            false,
+            true,
+            &bootc_caps(),
+        )
+        .unwrap();
+
+        for name in ["multi-file", "single-file"] {
+            assert!(
+                output.contains(&format!(
+                    "RUN --mount=type=bind,source=fragments/{}/hooks,target=/frag-hooks,z \\",
+                    name
+                )),
+                "expected the context-relative mount form for {}:\n{}",
+                name,
+                output
+            );
+        }
+        assert_eq!(
+            hook_invocation_lines(&output),
+            vec![HOOK_INVOCATION, HOOK_INVOCATION],
+            "self-contained mode emits the same fixed invocation:\n{}",
+            output
+        );
+        assert_eq!(
+            frag_hook_tokens(&output),
+            vec![HOOK_INVOCATION.trim(), HOOK_INVOCATION.trim()],
+            "only the entrypoint may be invoked:\n{}",
             output
         );
     }
@@ -1814,7 +1865,7 @@ mod tests {
         assert!(output.contains("COPY fragments/cis/tree/ /"));
         assert!(output
             .contains("RUN --mount=type=bind,source=fragments/cis/hooks,target=/frag-hooks,z \\"));
-        assert!(output.contains("/frag-hooks/configure.sh"));
+        assert!(output.contains("/frag-hooks/entrypoint"));
 
         // The mode's defining invariant: no fragment registry reference
         // anywhere, including comments, and no leftover default-mode forms.
@@ -1894,7 +1945,7 @@ mod tests {
                 conflicts: FragmentConflicts { fragments: vec![] },
             },
             tree_paths: vec![],
-            hook_paths: vec![PathBuf::from("setup.sh")],
+            hook_paths: vec![PathBuf::from("entrypoint")],
             source: FragmentSource::Registry {
                 image_ref: "quay.io/test/hooks-only:1.0".into(),
             },
@@ -1919,7 +1970,7 @@ mod tests {
         assert!(output.contains(
             "RUN --mount=type=bind,source=fragments/hooks-only/hooks,target=/frag-hooks,z \\"
         ));
-        assert!(output.contains("/frag-hooks/setup.sh"));
+        assert!(output.contains("/frag-hooks/entrypoint"));
     }
 
     #[test]
@@ -1947,7 +1998,7 @@ COPY fragments/cis/tree/ /
 
 # --- Hooks ---
 RUN --mount=type=bind,source=fragments/cis/hooks,target=/frag-hooks,z \
-    /frag-hooks/configure.sh
+    /frag-hooks/entrypoint
 
 # Apply systemd presets from fragments
 RUN systemctl preset-all --preset-mode=enable-only 2>/dev/null || true

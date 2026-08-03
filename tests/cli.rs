@@ -24,7 +24,7 @@ fn inspect_tailscale_shows_hook() {
     cmd.args(["inspect", "examples/fragments/tailscale"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("configure.sh"));
+        .stdout(predicate::str::contains("entrypoint"));
 }
 
 #[test]

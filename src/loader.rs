@@ -68,6 +68,44 @@ pub fn resolve_digest(image_ref: &str) -> Result<String> {
 const MAX_FRAGMENT_TOML_SIZE: u64 = 64 * 1024; // 64KB
 const FRAGMENT_TOML_PATH: &str = "fragment/fragment.toml";
 
+/// The single file under a fragment's `hooks/` that the tool runs.
+pub const HOOKS_ENTRYPOINT_NAME: &str = "entrypoint";
+
+/// The same file as it appears inside a fragment layer.
+const HOOKS_ENTRYPOINT_TAR_PATH: &str = "fragment/hooks/entrypoint";
+
+/// Execute bits (`u+x`, `g+x`, `o+x`). Root's `CAP_DAC_OVERRIDE` grants
+/// execute only when at least one of them is set, so this mask matches
+/// exactly what is runnable at build time.
+const EXECUTE_BITS: u32 = 0o111;
+
+/// Enforce the hooks entrypoint contract for a fragment that carries at least
+/// one hook file: `hooks/entrypoint` must exist as an executable regular file,
+/// and it is the only thing the tool runs.
+///
+/// `entrypoint_mode` is the mode of `hooks/entrypoint` when it is a regular
+/// file, and `None` when it is missing or is something else (a directory of
+/// that name is not an entrypoint). Both validation sites — the registry load,
+/// reading the mode off the tar header, and `inspect`, reading it off the
+/// filesystem — call this so their messages cannot drift apart.
+pub fn validate_hooks_entrypoint(fragment_name: &str, entrypoint_mode: Option<u32>) -> Result<()> {
+    match entrypoint_mode {
+        None => bail!(
+            "fragment '{}': hooks/ contains files but no executable hooks/entrypoint; \
+             the entrypoint is the single file osfragment-assemble runs. Rename the \
+             script to hooks/entrypoint, or add one that invokes the others.",
+            fragment_name
+        ),
+        Some(mode) if mode & EXECUTE_BITS == 0 => bail!(
+            "fragment '{}': hooks/entrypoint is not executable; the entrypoint is the \
+             single file osfragment-assemble runs. Set the execute bit (chmod +x) before \
+             building the fragment image.",
+            fragment_name
+        ),
+        Some(_) => Ok(()),
+    }
+}
+
 /// Shared validation for tar entries across all extraction functions.
 /// Rejects path traversal, absolute paths outside /fragment/, and symlinks/hardlinks.
 fn validate_tar_entry(path_str: &str, entry_type: tar::EntryType) -> Result<()> {
@@ -128,10 +166,16 @@ pub fn extract_fragment_toml_from_bytes(compressed: &[u8]) -> Result<String> {
     found.ok_or_else(|| anyhow::anyhow!("fragment.toml not found in layer"))
 }
 
-fn extract_tree_paths_from_bytes(compressed: &[u8]) -> Result<Vec<PathBuf>> {
+/// Regular-file paths in a layer, plus the mode of
+/// `fragment/hooks/entrypoint` when this layer carries one as a regular file.
+///
+/// The mode comes off the header this loop already holds, so enforcing the
+/// entrypoint contract costs no second pass over the archive.
+fn extract_tree_paths_from_bytes(compressed: &[u8]) -> Result<(Vec<PathBuf>, Option<u32>)> {
     let decoder = GzDecoder::new(compressed);
     let mut archive = tar::Archive::new(decoder);
     let mut paths = Vec::new();
+    let mut entrypoint_mode = None;
 
     for entry_result in archive.entries()? {
         let entry = entry_result?;
@@ -140,10 +184,13 @@ fn extract_tree_paths_from_bytes(compressed: &[u8]) -> Result<Vec<PathBuf>> {
 
         validate_tar_entry(&path_str, entry.header().entry_type())?;
         if entry.header().entry_type().is_file() {
+            if path_str == HOOKS_ENTRYPOINT_TAR_PATH {
+                entrypoint_mode = Some(entry.header().mode()?);
+            }
             paths.push(path.to_path_buf());
         }
     }
-    Ok(paths)
+    Ok((paths, entrypoint_mode))
 }
 
 fn extract_repo_file_contents_from_bytes(
@@ -374,34 +421,42 @@ fn pull_layer_bytes(image_ref: &str) -> Result<Vec<Vec<u8>>> {
         .collect()
 }
 
-pub fn load_registry_fragment(image_ref: &str) -> Result<LoadedFragment> {
-    let digest = resolve_digest(image_ref)?;
-    let (name, _tag) = split_image_ref(image_ref);
-    let image_with_digest = format!("{}@{}", name, digest);
+/// A fragment's metadata as aggregated from its layers, before the
+/// registry-specific fields (source, digest, manifest index) are attached.
+#[derive(Debug)]
+struct LayeredMetadata {
+    fragment: Fragment,
+    tree_paths: Vec<PathBuf>,
+    hook_paths: Vec<PathBuf>,
+    repo_file_contents: std::collections::HashMap<String, String>,
+}
 
-    // Assembly always parses the in-layer fragment.toml for the authoritative
-    // Fragment.  The annotation fast path is limited to metadata-only
-    // operations (inspect/list via load_registry_fragment_metadata_only)
-    // because annotations omit fields like conflicts.
-    let layer_bytes_list = pull_layer_bytes(&image_with_digest)?;
-
-    // Scan all layers and aggregate: fragment.toml, tree paths, hooks,
-    // and repo file contents may be spread across multiple layers.
+/// Scan all layers and aggregate: fragment.toml, tree paths, hooks, and repo
+/// file contents may be spread across multiple layers. The hooks entrypoint
+/// contract is enforced here, once, against the aggregate.
+///
+/// Split out of `load_registry_fragment` so the aggregation — including that
+/// contract — is exercisable from fixture layers without a registry.
+fn fragment_from_layers(layer_bytes_list: &[Vec<u8>]) -> Result<LayeredMetadata> {
     let mut fragment = None;
     let mut all_tree_paths = Vec::new();
     let mut all_hook_paths = Vec::new();
+    let mut entrypoint_mode = None;
     let mut repo_file_contents = std::collections::HashMap::new();
 
-    for layer_bytes in &layer_bytes_list {
+    for layer_bytes in layer_bytes_list {
         if fragment.is_none() {
             if let Ok(toml_content) = extract_fragment_toml_from_bytes(layer_bytes) {
                 fragment = Some(parse_fragment_toml(&toml_content)?);
             }
         }
 
-        let tree_paths = extract_tree_paths_from_bytes(layer_bytes)?;
+        let (tree_paths, layer_entrypoint_mode) = extract_tree_paths_from_bytes(layer_bytes)?;
+        // Later layers shadow earlier ones, so the last entrypoint wins.
+        if layer_entrypoint_mode.is_some() {
+            entrypoint_mode = layer_entrypoint_mode;
+        }
 
-        // Collect all executable files in hooks/ directory
         let hook_paths: Vec<PathBuf> = tree_paths
             .iter()
             .filter(|p| p.to_string_lossy().starts_with("fragment/hooks/"))
@@ -424,21 +479,44 @@ pub fn load_registry_fragment(image_ref: &str) -> Result<LoadedFragment> {
     let fragment = fragment.ok_or_else(|| {
         anyhow::anyhow!("no layer containing fragment/fragment.toml found in image")
     })?;
-    let relative_paths = all_tree_paths;
 
     // Sort hooks alphabetically
     all_hook_paths.sort();
 
-    Ok(LoadedFragment {
+    if !all_hook_paths.is_empty() {
+        validate_hooks_entrypoint(&fragment.name, entrypoint_mode)?;
+    }
+
+    Ok(LayeredMetadata {
         fragment,
-        tree_paths: relative_paths,
+        tree_paths: all_tree_paths,
         hook_paths: all_hook_paths,
+        repo_file_contents,
+    })
+}
+
+pub fn load_registry_fragment(image_ref: &str) -> Result<LoadedFragment> {
+    let digest = resolve_digest(image_ref)?;
+    let (name, _tag) = split_image_ref(image_ref);
+    let image_with_digest = format!("{}@{}", name, digest);
+
+    // Assembly always parses the in-layer fragment.toml for the authoritative
+    // Fragment.  The annotation fast path is limited to metadata-only
+    // operations (inspect/list via load_registry_fragment_metadata_only)
+    // because annotations omit fields like conflicts.
+    let layer_bytes_list = pull_layer_bytes(&image_with_digest)?;
+    let metadata = fragment_from_layers(&layer_bytes_list)?;
+
+    Ok(LoadedFragment {
+        fragment: metadata.fragment,
+        tree_paths: metadata.tree_paths,
+        hook_paths: metadata.hook_paths,
         source: FragmentSource::Registry {
             image_ref: image_with_digest,
         },
         resolved_digest: Some(digest),
         manifest_index: 0, // set by caller
-        repo_file_contents,
+        repo_file_contents: metadata.repo_file_contents,
     })
 }
 
@@ -705,7 +783,7 @@ description = "test fragment"
             ),
             ("fragment/tree/etc/foo.conf", b"data"),
         ]);
-        let paths = extract_tree_paths_from_bytes(&tarball).unwrap();
+        let (paths, _entrypoint_mode) = extract_tree_paths_from_bytes(&tarball).unwrap();
         let hook_paths: Vec<PathBuf> = paths
             .iter()
             .filter(|p| p.to_string_lossy().starts_with("fragment/hooks/"))
@@ -775,6 +853,166 @@ description = "test fragment"
             metadata.permissions().mode() & 0o777,
             0o700,
             "directory mode was not preserved"
+        );
+    }
+
+    const TEST_FRAGMENT_TOML: &[u8] = br#"[fragment]
+name = "nvidia-driver"
+version = "1.0"
+description = "test fragment"
+"#;
+
+    /// A one-layer fragment carrying `fragment.toml` plus the given entries,
+    /// for driving `fragment_from_layers` without a registry.
+    fn fragment_layers(entries: Vec<RawEntry>) -> Vec<Vec<u8>> {
+        let mut all = vec![RawEntry {
+            path: FRAGMENT_TOML_PATH,
+            data: TEST_FRAGMENT_TOML,
+            mode: 0o644,
+            entry_type: tar::EntryType::Regular,
+        }];
+        all.extend(entries);
+        vec![create_test_tarball_with_modes(&all)]
+    }
+
+    fn hook_entry<'a>(path: &'a str, mode: u32) -> RawEntry<'a> {
+        RawEntry {
+            path,
+            data: b"#!/bin/sh\necho hook\n",
+            mode,
+            entry_type: tar::EntryType::Regular,
+        }
+    }
+
+    #[test]
+    fn hooks_without_entrypoint_are_rejected() {
+        let layers = fragment_layers(vec![hook_entry("fragment/hooks/other.sh", 0o755)]);
+        let err = fragment_from_layers(&layers).unwrap_err().to_string();
+        assert!(
+            err.contains("nvidia-driver") && err.contains("no executable hooks/entrypoint"),
+            "error must name the fragment and hooks/entrypoint, got: {err}"
+        );
+    }
+
+    #[test]
+    fn non_executable_entrypoint_is_rejected() {
+        let layers = fragment_layers(vec![hook_entry("fragment/hooks/entrypoint", 0o644)]);
+        let err = fragment_from_layers(&layers).unwrap_err().to_string();
+        assert!(
+            err.contains("nvidia-driver")
+                && err.contains("hooks/entrypoint is not executable")
+                && err.contains("chmod +x"),
+            "error must name the mode problem and its fix, got: {err}"
+        );
+    }
+
+    #[test]
+    fn valid_hook_shapes_are_accepted() {
+        let cases: Vec<(&str, Vec<RawEntry>)> = vec![
+            (
+                "zero hook files",
+                vec![RawEntry {
+                    path: "fragment/tree/etc/foo.conf",
+                    data: b"data",
+                    mode: 0o644,
+                    entry_type: tar::EntryType::Regular,
+                }],
+            ),
+            (
+                "entrypoint alone",
+                vec![hook_entry("fragment/hooks/entrypoint", 0o755)],
+            ),
+            (
+                "entrypoint alongside other files",
+                vec![
+                    hook_entry("fragment/hooks/entrypoint", 0o755),
+                    hook_entry("fragment/hooks/nvidia.run", 0o755),
+                    hook_entry("fragment/hooks/README", 0o644),
+                ],
+            ),
+            (
+                "entrypoint alongside a subdirectory",
+                vec![
+                    hook_entry("fragment/hooks/entrypoint", 0o755),
+                    RawEntry {
+                        path: "fragment/hooks/lib",
+                        data: b"",
+                        mode: 0o755,
+                        entry_type: tar::EntryType::Directory,
+                    },
+                    hook_entry("fragment/hooks/lib/helper.sh", 0o644),
+                ],
+            ),
+            (
+                "entrypoint executable by group only",
+                vec![hook_entry("fragment/hooks/entrypoint", 0o610)],
+            ),
+        ];
+
+        for (label, entries) in cases {
+            let result = fragment_from_layers(&fragment_layers(entries));
+            assert!(result.is_ok(), "{label} must load: {:?}", result.err());
+        }
+    }
+
+    /// The hook list survives validation: `inspect` still displays every file
+    /// under `hooks/`, including the ones the tool will never invoke.
+    #[test]
+    fn support_files_stay_in_the_hook_list() {
+        let layers = fragment_layers(vec![
+            hook_entry("fragment/hooks/entrypoint", 0o755),
+            hook_entry("fragment/hooks/lib/helper.sh", 0o644),
+        ]);
+        let metadata = fragment_from_layers(&layers).unwrap();
+        let names: Vec<String> = metadata
+            .hook_paths
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect();
+        assert_eq!(names, vec!["entrypoint", "lib/helper.sh"]);
+    }
+
+    #[test]
+    fn nested_entrypoint_does_not_satisfy_the_rule() {
+        let layers = fragment_layers(vec![hook_entry("fragment/hooks/lib/entrypoint", 0o755)]);
+        let err = fragment_from_layers(&layers).unwrap_err().to_string();
+        assert!(
+            err.contains("no executable hooks/entrypoint"),
+            "only hooks/entrypoint counts, got: {err}"
+        );
+    }
+
+    #[test]
+    fn entrypoint_as_a_directory_is_rejected() {
+        let layers = fragment_layers(vec![
+            RawEntry {
+                path: "fragment/hooks/entrypoint",
+                data: b"",
+                mode: 0o755,
+                entry_type: tar::EntryType::Directory,
+            },
+            hook_entry("fragment/hooks/entrypoint/real.sh", 0o755),
+        ]);
+        let err = fragment_from_layers(&layers).unwrap_err().to_string();
+        assert!(
+            err.contains("no executable hooks/entrypoint"),
+            "a directory named entrypoint is not an entrypoint, got: {err}"
+        );
+    }
+
+    /// The regression that would reintroduce auto-discovery: an old-style
+    /// fragment whose hooks were chained by filename order must fail to load
+    /// rather than run anything.
+    #[test]
+    fn old_style_chained_hooks_are_rejected() {
+        let layers = fragment_layers(vec![
+            hook_entry("fragment/hooks/01-setup.sh", 0o755),
+            hook_entry("fragment/hooks/02-config.sh", 0o755),
+        ]);
+        let err = fragment_from_layers(&layers).unwrap_err().to_string();
+        assert!(
+            err.contains("no executable hooks/entrypoint"),
+            "old-layout fragments must be rejected, not chained, got: {err}"
         );
     }
 

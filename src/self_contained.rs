@@ -632,13 +632,16 @@ mod tests {
                 0o644,
             ),
             (
-                "fragment/hooks/configure.sh",
+                "fragment/hooks/entrypoint",
                 b"#!/bin/sh\necho configure\n",
                 0o755,
             ),
         ];
-        let hooks_only_entries: [(&str, &[u8], u32); 1] =
-            [("fragment/hooks/setup.sh", b"#!/bin/sh\necho setup\n", 0o755)];
+        let hooks_only_entries: [(&str, &[u8], u32); 1] = [(
+            "fragment/hooks/entrypoint",
+            b"#!/bin/sh\necho setup\n",
+            0o755,
+        )];
 
         let fragments = vec![
             fixture_fragment("epel", 0, &epel_entries),
@@ -731,8 +734,8 @@ mod tests {
             "a hooks-only fragment must still get its hook mount, got {refs:?}"
         );
 
-        // The hook mount's target is /frag-hooks, so every chained hook
-        // command must resolve to a real file under that fragment's
+        // The hook mount's target is /frag-hooks, so each fragment's
+        // invocation must resolve to a real file under that fragment's
         // materialized hooks/ directory.
         let lines: Vec<&str> = containerfile.lines().collect();
         let mut checked_hooks = 0;
