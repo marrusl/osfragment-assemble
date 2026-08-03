@@ -12,19 +12,15 @@ pub fn run_list(manifest: &Manifest, fragments: &[LoadedFragment]) -> Result<()>
 
     if has_digests {
         println!(
-            "  {:<20} {:<8} {:<10} {:<20} PACKAGES",
-            "NAME", "PHASE", "VERSION", "DIGEST"
+            "  {:<20} {:<10} {:<20} PACKAGES",
+            "NAME", "VERSION", "DIGEST"
         );
     } else {
-        println!("  {:<20} {:<8} {:<10} PACKAGES", "NAME", "PHASE", "VERSION");
+        println!("  {:<20} {:<10} PACKAGES", "NAME", "VERSION");
     }
 
     for loaded in fragments {
         let mf = &manifest.fragments[loaded.manifest_index];
-        let phase_str = match loaded.fragment.phase {
-            crate::fragment::FragmentPhase::Repos => "repos",
-            crate::fragment::FragmentPhase::Config => "config",
-        };
         let packages = if mf.packages.is_empty() {
             "\u{2014}".to_string()
         } else {
@@ -40,13 +36,13 @@ pub fn run_list(manifest: &Manifest, fragments: &[LoadedFragment]) -> Result<()>
                 })
                 .unwrap_or_else(|| "(local)".to_string());
             println!(
-                "  {:<20} {:<8} {:<10} {:<20} {}",
-                loaded.fragment.name, phase_str, loaded.fragment.version, digest_short, packages
+                "  {:<20} {:<10} {:<20} {}",
+                loaded.fragment.name, loaded.fragment.version, digest_short, packages
             );
         } else {
             println!(
-                "  {:<20} {:<8} {:<10} {}",
-                loaded.fragment.name, phase_str, loaded.fragment.version, packages
+                "  {:<20} {:<10} {}",
+                loaded.fragment.name, loaded.fragment.version, packages
             );
         }
     }

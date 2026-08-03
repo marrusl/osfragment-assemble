@@ -2,4 +2,3 @@
 name = "cis-hardening"
 version = "2.1"
 description = "CIS Level 2 security hardening — sysctl, audit, filesystem"
-phase = "config"

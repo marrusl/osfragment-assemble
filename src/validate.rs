@@ -4,14 +4,11 @@ use std::collections::{HashMap, HashSet};
 use crate::loader::LoadedFragment;
 use crate::manifest::Manifest;
 
-pub fn validate_composition(
-    _manifest: &Manifest,
-    fragments: &[LoadedFragment],
-) -> Result<DeduplicationResult> {
+pub fn validate_composition(_manifest: &Manifest, fragments: &[LoadedFragment]) -> Result<()> {
     check_duplicate_names(fragments)?;
     check_conflicts(fragments)?;
-    let dedup = check_repo_deduplication(fragments)?;
-    Ok(dedup)
+    check_repo_conflicts(fragments)?;
+    Ok(())
 }
 
 pub fn check_duplicate_names(fragments: &[LoadedFragment]) -> Result<()> {
@@ -45,10 +42,12 @@ pub fn check_conflicts(fragments: &[LoadedFragment]) -> Result<()> {
 }
 
 /// For each repo ID provided by multiple fragments, compare the actual
-/// .repo file content. Identical definitions are deduplicated (first
-/// provider wins). Conflicting definitions (same repo ID, different
-/// content) fail the build with a clear error.
-pub fn check_repo_deduplication(fragments: &[LoadedFragment]) -> Result<DeduplicationResult> {
+/// .repo file content. Conflicting definitions (same repo ID, different
+/// content) fail the build with a clear error. Identical definitions are
+/// allowed through: every provider still emits its own COPY, the last one
+/// wins, and the generated Containerfile's header comment names the
+/// collision. Nothing is silently skipped.
+pub fn check_repo_conflicts(fragments: &[LoadedFragment]) -> Result<()> {
     // Map repo ID -> list of (fragment name, repo file content hash)
     let mut repo_providers: HashMap<String, Vec<(&str, u64)>> = HashMap::new();
 
@@ -73,7 +72,6 @@ pub fn check_repo_deduplication(fragments: &[LoadedFragment]) -> Result<Deduplic
         }
     }
 
-    let mut deduplicated_repos: HashMap<String, String> = HashMap::new();
     for (repo_id, providers) in &repo_providers {
         if providers.len() > 1 {
             // Check for conflicting definitions (different content hashes)
@@ -88,29 +86,10 @@ pub fn check_repo_deduplication(fragments: &[LoadedFragment]) -> Result<Deduplic
                     );
                 }
             }
-
-            // Identical definitions — first provider wins
-            let canonical = providers[0].0;
-            let skipped: Vec<&str> = providers[1..].iter().map(|(n, _)| *n).collect();
-            eprintln!(
-                "note: repo '{}' provided by multiple fragments — using repo files from '{}', skipping duplicate repo files from '{}'",
-                repo_id,
-                canonical,
-                skipped.join("', '")
-            );
-            deduplicated_repos.insert(repo_id.clone(), canonical.to_string());
         }
     }
 
-    Ok(DeduplicationResult { deduplicated_repos })
-}
-
-#[derive(Debug, Clone)]
-pub struct DeduplicationResult {
-    /// Map of repo ID -> canonical provider fragment name.
-    /// Only populated for repo IDs with multiple providers.
-    /// The generator skips repo COPY steps for non-canonical providers.
-    pub deduplicated_repos: HashMap<String, String>,
+    Ok(())
 }
 
 #[cfg(test)]
@@ -126,7 +105,6 @@ mod tests {
                 version: "1.0".into(),
                 description: "test".into(),
                 vendor: None,
-                phase: FragmentPhase::Config,
                 provides: FragmentProvides {
                     repos: repos.into_iter().map(String::from).collect(),
                 },
@@ -173,15 +151,15 @@ mod tests {
         assert!(check_conflicts(&frags).is_err());
     }
 
+    /// Identical repo definitions are not an error and are not skipped:
+    /// both providers emit a COPY and the header comment names the collision.
     #[test]
-    fn repo_dedup_same_id_deduplicates() {
+    fn repo_same_id_identical_content_passes() {
         let frags = vec![
             test_fragment("epel-user1", vec!["epel"], vec![]),
             test_fragment("epel-user2", vec!["epel"], vec![]),
         ];
-        let result = check_repo_deduplication(&frags).unwrap();
-        assert!(result.deduplicated_repos.contains_key("epel"));
-        assert_eq!(result.deduplicated_repos["epel"], "epel-user1");
+        assert!(check_repo_conflicts(&frags).is_ok());
     }
 
     #[test]
@@ -205,7 +183,7 @@ mod tests {
             "shared.repo".to_string(),
             "[shared]\nbaseurl=https://b.example.com/\n".to_string(),
         );
-        let result = check_repo_deduplication(&[frag_a, frag_b]);
+        let result = check_repo_conflicts(&[frag_a, frag_b]);
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(

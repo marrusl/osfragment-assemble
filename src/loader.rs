@@ -3,8 +3,8 @@ use flate2::read::GzDecoder;
 use std::path::{Path, PathBuf};
 
 use crate::fragment::{
-    is_repo_path, parse_fragment_toml, validate_phase_consistency, Fragment, FragmentConflicts,
-    FragmentPackages, FragmentPhase, FragmentProvides,
+    is_repo_path, parse_fragment_toml, Fragment, FragmentConflicts, FragmentPackages,
+    FragmentProvides,
 };
 use crate::generator::split_image_ref;
 use crate::manifest::FragmentSource;
@@ -265,8 +265,8 @@ fn try_annotation_fast_path(image_ref: &str) -> Result<Option<Fragment>> {
 }
 
 /// Map an OCI manifest `annotations` object onto a `Fragment`.
-/// Returns `None` when a required key is missing or the phase is
-/// unrecognized; the caller falls back to layer extraction.
+/// Returns `None` when a required key is missing; the caller falls back
+/// to layer extraction.
 fn fragment_from_annotations(annotations: &serde_json::Value) -> Option<Fragment> {
     // Check for required annotation fields
     let name = annotations
@@ -279,19 +279,10 @@ fn fragment_from_annotations(annotations: &serde_json::Value) -> Option<Fragment
         .get("com.github.marrusl.osfragment.description")
         .and_then(|v| v.as_str())
         .unwrap_or("");
-    let phase_str = annotations
-        .get("com.github.marrusl.osfragment.phase")
-        .and_then(|v| v.as_str());
 
-    let (name, version, phase_str) = match (name, version, phase_str) {
-        (Some(n), Some(v), Some(p)) => (n, v, p),
+    let (name, version) = match (name, version) {
+        (Some(n), Some(v)) => (n, v),
         _ => return None, // Missing required annotations — fall back to layer extraction
-    };
-
-    let phase = match phase_str {
-        "repos" => FragmentPhase::Repos,
-        "config" => FragmentPhase::Config,
-        _ => return None,
     };
 
     let repos: Vec<String> = annotations
@@ -316,7 +307,6 @@ fn fragment_from_annotations(annotations: &serde_json::Value) -> Option<Fragment
         version: version.to_string(),
         description: description.to_string(),
         vendor,
-        phase,
         provides: FragmentProvides { repos },
         packages: FragmentPackages { required },
         conflicts: FragmentConflicts { fragments: vec![] },
@@ -437,8 +427,6 @@ pub fn load_registry_fragment(image_ref: &str) -> Result<LoadedFragment> {
 
     // Sort hooks alphabetically
     all_hook_paths.sort();
-
-    validate_phase_consistency(&fragment, &relative_paths)?;
 
     Ok(LoadedFragment {
         fragment,
@@ -586,7 +574,6 @@ mod layer_tests {
 name = "test"
 version = "1.0"
 description = "test fragment"
-phase = "repos"
 "#;
         let tarball = create_test_tarball(&[("fragment/fragment.toml", toml_content)]);
         let result = extract_fragment_toml_from_bytes(&tarball).unwrap();
@@ -599,7 +586,7 @@ phase = "repos"
             ("../etc/passwd", b"evil"),
             (
                 "fragment/fragment.toml",
-                b"[fragment]\nname=\"x\"\nversion=\"1\"\ndescription=\"x\"\nphase=\"repos\"",
+                b"[fragment]\nname=\"x\"\nversion=\"1\"\ndescription=\"x\"",
             ),
         ]);
         // Fail-closed: traversal entries cause immediate failure
@@ -628,11 +615,11 @@ phase = "repos"
         let tarball = create_test_tarball(&[
             (
                 "fragment/fragment.toml",
-                b"[fragment]\nname=\"a\"\nversion=\"1\"\ndescription=\"a\"\nphase=\"repos\"",
+                b"[fragment]\nname=\"a\"\nversion=\"1\"\ndescription=\"a\"",
             ),
             (
                 "fragment/fragment.toml",
-                b"[fragment]\nname=\"b\"\nversion=\"2\"\ndescription=\"b\"\nphase=\"config\"",
+                b"[fragment]\nname=\"b\"\nversion=\"2\"\ndescription=\"b\"",
             ),
         ]);
         let result = extract_fragment_toml_from_bytes(&tarball);
@@ -711,7 +698,10 @@ phase = "repos"
             ("fragment/hooks/01-setup.sh", b"#!/bin/bash\necho setup"),
             ("fragment/hooks/02-config.bash", b"#!/bin/bash\necho config"),
             ("fragment/hooks/configure", b"#!/bin/sh\necho configure"),
-            ("fragment/hooks/setup.py", b"#!/usr/bin/env python3\nprint('ok')"),
+            (
+                "fragment/hooks/setup.py",
+                b"#!/usr/bin/env python3\nprint('ok')",
+            ),
             ("fragment/tree/etc/foo.conf", b"data"),
         ]);
         let paths = extract_tree_paths_from_bytes(&tarball).unwrap();
@@ -794,7 +784,6 @@ phase = "repos"
             "com.github.marrusl.osfragment.version": "1.82.0",
             "com.github.marrusl.osfragment.description": "Tailscale mesh VPN",
             "com.github.marrusl.osfragment.vendor": "Tailscale Inc.",
-            "com.github.marrusl.osfragment.phase": "config",
             "com.github.marrusl.osfragment.provides.repos": "[\"tailscale\"]",
             "com.github.marrusl.osfragment.packages.required": "[\"tailscale\"]",
         });
@@ -804,9 +793,24 @@ phase = "repos"
         assert_eq!(frag.version, "1.82.0");
         assert_eq!(frag.description, "Tailscale mesh VPN");
         assert_eq!(frag.vendor.as_deref(), Some("Tailscale Inc."));
-        assert_eq!(frag.phase, FragmentPhase::Config);
         assert_eq!(frag.provides.repos, vec!["tailscale"]);
         assert_eq!(frag.packages.required, vec!["tailscale"]);
+    }
+
+    /// A fragment published while `phase` was still emitted carries a seventh
+    /// annotation. Lookups are per-key, so the extra one is ignored and the
+    /// fast path still resolves: already-published fragments keep working.
+    #[test]
+    fn stale_phase_annotation_is_ignored_by_fast_path() {
+        let annotations = serde_json::json!({
+            "com.github.marrusl.osfragment.name": "epel",
+            "com.github.marrusl.osfragment.version": "10",
+            "com.github.marrusl.osfragment.phase": "repos",
+        });
+
+        let frag = fragment_from_annotations(&annotations)
+            .expect("stale phase key must not block resolution");
+        assert_eq!(frag.name, "epel");
     }
 
     #[test]

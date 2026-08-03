@@ -1,22 +1,6 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 use serde::Deserialize;
-use std::path::{Path, PathBuf};
-
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum FragmentPhase {
-    Repos,
-    Config,
-}
-
-impl FragmentPhase {
-    pub fn weight(&self) -> u32 {
-        match self {
-            FragmentPhase::Repos => 10,
-            FragmentPhase::Config => 30,
-        }
-    }
-}
+use std::path::Path;
 
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct FragmentProvides {
@@ -49,7 +33,6 @@ struct FragmentInner {
     description: String,
     #[serde(default)]
     vendor: Option<String>,
-    phase: FragmentPhase,
     #[serde(default)]
     provides: FragmentProvides,
     #[serde(default)]
@@ -64,7 +47,6 @@ pub struct Fragment {
     pub version: String,
     pub description: String,
     pub vendor: Option<String>,
-    pub phase: FragmentPhase,
     pub provides: FragmentProvides,
     pub packages: FragmentPackages,
     pub conflicts: FragmentConflicts,
@@ -78,7 +60,6 @@ pub fn parse_fragment_toml(content: &str) -> Result<Fragment> {
         version: inner.version,
         description: inner.description,
         vendor: inner.vendor,
-        phase: inner.phase,
         provides: inner.provides,
         packages: inner.packages,
         conflicts: inner.conflicts,
@@ -92,31 +73,6 @@ pub fn is_repo_path(path: &Path) -> bool {
     REPO_PREFIXES.iter().any(|prefix| s.starts_with(prefix))
 }
 
-pub fn validate_phase_consistency(fragment: &Fragment, tree_paths: &[PathBuf]) -> Result<()> {
-    if fragment.phase != FragmentPhase::Repos {
-        return Ok(());
-    }
-    let has_hooks = tree_paths
-        .iter()
-        .any(|p| p.to_string_lossy().starts_with("hooks/"));
-    if has_hooks {
-        bail!(
-            "repos fragment '{}' must not contain hooks — change phase to 'config'",
-            fragment.name
-        );
-    }
-    let has_non_repo = tree_paths
-        .iter()
-        .filter(|p| p.to_string_lossy().starts_with("tree/"))
-        .any(|p| !is_repo_path(p));
-    if has_non_repo {
-        bail!(
-            "repos fragment '{}' contains non-repo tree content — change phase to 'config'",
-            fragment.name
-        );
-    }
-    Ok(())
-}
 
 #[cfg(test)]
 mod tests {
@@ -127,7 +83,6 @@ mod tests {
 name = "epel"
 version = "10"
 description = "EPEL repository for RHEL"
-phase = "repos"
 
 [fragment.provides]
 repos = ["epel"]
@@ -139,7 +94,6 @@ name = "tailscale"
 version = "1.82.0"
 description = "Tailscale VPN client"
 vendor = "Tailscale Inc."
-phase = "config"
 
 [fragment.provides]
 repos = ["tailscale-stable"]
@@ -156,7 +110,6 @@ fragments = []
         let frag = parse_fragment_toml(MINIMAL_TOML).unwrap();
         assert_eq!(frag.name, "epel");
         assert_eq!(frag.version, "10");
-        assert_eq!(frag.phase, FragmentPhase::Repos);
         assert_eq!(frag.provides.repos, vec!["epel"]);
         assert!(frag.vendor.is_none());
         assert!(frag.packages.required.is_empty());
@@ -166,21 +119,25 @@ fragments = []
     fn parse_full_fragment() {
         let frag = parse_fragment_toml(FULL_TOML).unwrap();
         assert_eq!(frag.name, "tailscale");
-        assert_eq!(frag.phase, FragmentPhase::Config);
         assert_eq!(frag.vendor.as_deref(), Some("Tailscale Inc."));
         assert_eq!(frag.packages.required, vec!["tailscale"]);
     }
 
+    /// A fragment published before `phase` was removed still carries the key.
+    /// `FragmentInner` does not deny unknown fields, so such a fragment parses
+    /// and the stale key is ignored rather than rejected. Previously published
+    /// fragments therefore keep working without a rebuild.
     #[test]
-    fn reject_invalid_phase() {
-        let bad = r#"
+    fn stale_phase_key_is_ignored() {
+        let stale = r#"
 [fragment]
-name = "bad"
+name = "legacy"
 version = "1"
-description = "bad phase"
-phase = "install"
+description = "published before phase was removed"
+phase = "repos"
 "#;
-        assert!(parse_fragment_toml(bad).is_err());
+        let frag = parse_fragment_toml(stale).expect("stale phase key must not be rejected");
+        assert_eq!(frag.name, "legacy");
     }
 
     #[test]
@@ -190,7 +147,6 @@ phase = "install"
 name = "bad"
 version = "1"
 description = "unknown field test"
-phase = "config"
 
 [fragment.packages]
 available = ["grafana"]
@@ -211,7 +167,6 @@ available = ["grafana"]
 name = "bad"
 version = "1"
 description = "typo field test"
-phase = "config"
 
 [fragment.packages]
 requred = ["grafana"]
@@ -223,52 +178,6 @@ requred = ["grafana"]
             "expected 'unknown field' error, got: {}",
             msg
         );
-    }
-
-    #[test]
-    fn phase_consistency_repos_fragment_with_hooks_fails() {
-        let paths = vec![
-            PathBuf::from("tree/etc/yum.repos.d/epel.repo"),
-            PathBuf::from("hooks/configure.sh"),
-        ];
-        let frag = parse_fragment_toml(MINIMAL_TOML).unwrap();
-        assert!(validate_phase_consistency(&frag, &paths).is_err());
-    }
-
-    #[test]
-    fn phase_consistency_repos_fragment_with_non_repo_tree_fails() {
-        let paths = vec![
-            PathBuf::from("tree/etc/yum.repos.d/epel.repo"),
-            PathBuf::from("tree/usr/lib/sysctl.d/99-hardening.conf"),
-        ];
-        let frag = parse_fragment_toml(MINIMAL_TOML).unwrap();
-        assert!(validate_phase_consistency(&frag, &paths).is_err());
-    }
-
-    #[test]
-    fn phase_consistency_repos_fragment_with_only_repo_content_passes() {
-        let paths = vec![
-            PathBuf::from("tree/etc/yum.repos.d/epel.repo"),
-            PathBuf::from("tree/etc/pki/rpm-gpg/RPM-GPG-KEY-EPEL-10"),
-        ];
-        let frag = parse_fragment_toml(MINIMAL_TOML).unwrap();
-        assert!(validate_phase_consistency(&frag, &paths).is_ok());
-    }
-
-    #[test]
-    fn phase_consistency_config_fragment_with_mixed_content_passes() {
-        let paths = vec![
-            PathBuf::from("tree/etc/yum.repos.d/tailscale.repo"),
-            PathBuf::from("tree/usr/lib/systemd/system-preset/50-tailscale.preset"),
-            PathBuf::from("hooks/configure.sh"),
-        ];
-        let frag = parse_fragment_toml(FULL_TOML).unwrap();
-        assert!(validate_phase_consistency(&frag, &paths).is_ok());
-    }
-
-    #[test]
-    fn phase_weight_ordering() {
-        assert!(FragmentPhase::Repos.weight() < FragmentPhase::Config.weight());
     }
 
     #[test]
@@ -294,17 +203,12 @@ requred = ["grafana"]
     }
 
     #[test]
-    fn postgresql_example_preserves_repos_phase() {
+    fn postgresql_example_declares_required_packages() {
         let toml_path = Path::new("examples/fragments/postgresql/fragment.toml");
-        let content = std::fs::read_to_string(toml_path)
-            .expect("postgresql example fragment should exist");
-        let frag = parse_fragment_toml(&content)
-            .expect("postgresql example fragment should parse");
-        assert_eq!(
-            frag.phase,
-            FragmentPhase::Repos,
-            "postgresql must stay phase=repos after migration to required packages"
-        );
+        let content =
+            std::fs::read_to_string(toml_path).expect("postgresql example fragment should exist");
+        let frag =
+            parse_fragment_toml(&content).expect("postgresql example fragment should parse");
         assert!(
             frag.packages.required.contains(&"postgresql17-server".to_string()),
             "postgresql must declare postgresql17-server as required"

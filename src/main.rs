@@ -64,7 +64,7 @@ enum Commands {
         /// Fragment image reference or local directory path
         target: String,
     },
-    /// List fragments from the manifest in phase-sorted order
+    /// List fragments from the manifest in manifest order
     List {
         /// Path to the manifest file
         #[arg(long, default_value = "osfragment-assemble.yaml")]
@@ -100,13 +100,6 @@ fn main() -> Result<()> {
                 loaded.manifest_index = idx;
                 fragments.push(loaded);
             }
-            fragments.sort_by(|a, b| {
-                a.fragment
-                    .phase
-                    .weight()
-                    .cmp(&b.fragment.phase.weight())
-                    .then(a.manifest_index.cmp(&b.manifest_index))
-            });
             run_list(&manifest_data, &fragments)?;
         }
         None => {
@@ -131,7 +124,7 @@ fn main() -> Result<()> {
             let fragments = load_all_fragments(&manifest, keep_digests)?;
 
             eprintln!("Validating composition...");
-            let dedup = validate_composition(&manifest, &fragments)?;
+            validate_composition(&manifest, &fragments)?;
 
             // Classify the base image
             eprintln!("Classifying base image...");
@@ -142,7 +135,6 @@ fn main() -> Result<()> {
                     &manifest,
                     &fragments,
                     base_digest.as_deref(),
-                    &dedup,
                     false,
                     true,
                     &capabilities,
@@ -190,7 +182,6 @@ fn main() -> Result<()> {
                     &manifest,
                     &fragments,
                     base_digest.as_deref(),
-                    &dedup,
                     false,
                     false,
                     &capabilities,
@@ -212,7 +203,6 @@ fn main() -> Result<()> {
                         &manifest,
                         &fragments,
                         base_digest.as_deref(),
-                        &dedup,
                         true,
                         false,
                         &ocp_capabilities,
@@ -259,14 +249,7 @@ fn load_all_fragments(
         fragments.push(loaded);
     }
 
-    // Sort by phase weight; within same weight, preserve manifest order
-    fragments.sort_by(|a, b| {
-        a.fragment
-            .phase
-            .weight()
-            .cmp(&b.fragment.phase.weight())
-            .then(a.manifest_index.cmp(&b.manifest_index))
-    });
+    // No reordering: emission follows manifest order, which is user intent.
     Ok(fragments)
 }
 

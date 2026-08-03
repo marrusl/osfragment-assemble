@@ -3,7 +3,6 @@ name = "postgresql"
 version = "17"
 description = "PostgreSQL Global Development Group RPM repository"
 vendor = "PostgreSQL Global Development Group"
-phase = "repos"
 
 [fragment.provides]
 repos = ["pgdg-common", "pgdg17"]

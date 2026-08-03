@@ -3,7 +3,6 @@ name = "epel"
 version = "10"
 description = "Extra Packages for Enterprise Linux (EPEL) repository"
 vendor = "Fedora Project"
-phase = "repos"
 
 [fragment.provides]
 repos = ["epel"]

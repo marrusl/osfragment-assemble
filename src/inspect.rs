@@ -56,16 +56,10 @@ pub fn run_inspect(target: &str) -> Result<()> {
         (loaded.fragment, display_paths, hook_list)
     };
 
-    let phase_str = match fragment.phase {
-        crate::fragment::FragmentPhase::Repos => "repos",
-        crate::fragment::FragmentPhase::Config => "config",
-    };
-
     println!("Fragment: {} v{}", fragment.name, fragment.version);
     if let Some(v) = &fragment.vendor {
         println!("Vendor:   {}", v);
     }
-    println!("Phase:    {}", phase_str);
     if !fragment.provides.repos.is_empty() {
         println!("Repos:    {}", fragment.provides.repos.join(", "));
     }

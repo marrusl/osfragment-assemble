@@ -401,16 +401,13 @@ mod tests {
     }
 
     fn test_loaded_fragment(name: &str) -> LoadedFragment {
-        use crate::fragment::{
-            Fragment, FragmentConflicts, FragmentPackages, FragmentPhase, FragmentProvides,
-        };
+        use crate::fragment::{Fragment, FragmentConflicts, FragmentPackages, FragmentProvides};
         LoadedFragment {
             fragment: Fragment {
                 name: name.to_string(),
                 version: "1".into(),
                 description: "test".into(),
                 vendor: None,
-                phase: FragmentPhase::Config,
                 provides: FragmentProvides { repos: vec![] },
                 packages: FragmentPackages { required: vec![] },
                 conflicts: FragmentConflicts { fragments: vec![] },
@@ -567,12 +564,10 @@ mod tests {
     /// which is what keeps the seam test below from confirming itself.
     fn fixture_fragment(
         name: &str,
-        phase: crate::fragment::FragmentPhase,
         manifest_index: usize,
         entries: &[(&str, &[u8], u32)],
     ) -> LoadedFragment {
         let mut loaded = test_loaded_fragment(name);
-        loaded.fragment.phase = phase;
         loaded.manifest_index = manifest_index;
         loaded.tree_paths = entries
             .iter()
@@ -646,24 +641,9 @@ mod tests {
             [("fragment/hooks/setup.sh", b"#!/bin/sh\necho setup\n", 0o755)];
 
         let fragments = vec![
-            fixture_fragment(
-                "epel",
-                crate::fragment::FragmentPhase::Repos,
-                0,
-                &epel_entries,
-            ),
-            fixture_fragment(
-                "cis",
-                crate::fragment::FragmentPhase::Config,
-                1,
-                &cis_entries,
-            ),
-            fixture_fragment(
-                "hooks-only",
-                crate::fragment::FragmentPhase::Config,
-                2,
-                &hooks_only_entries,
-            ),
+            fixture_fragment("epel", 0, &epel_entries),
+            fixture_fragment("cis", 1, &cis_entries),
+            fixture_fragment("hooks-only", 2, &hooks_only_entries),
         ];
 
         let manifest = crate::manifest::Manifest {
@@ -687,15 +667,10 @@ mod tests {
                 },
             ],
         };
-        let dedup = crate::validate::DeduplicationResult {
-            deduplicated_repos: std::collections::HashMap::new(),
-        };
-
         let containerfile = crate::generator::generate_containerfile(
             &manifest,
             &fragments,
             None,
-            &dedup,
             false,
             true,
             &crate::classify::CapabilitySet::new(),

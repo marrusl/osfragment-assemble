@@ -3,7 +3,6 @@ name = "grafana"
 version = "11.0"
 description = "Grafana monitoring dashboard — repo, package, and service enablement"
 vendor = "Grafana Labs"
-phase = "config"
 
 [fragment.provides]
 repos = ["grafana"]
