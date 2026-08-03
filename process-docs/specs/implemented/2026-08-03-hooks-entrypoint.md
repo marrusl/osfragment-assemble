@@ -1,6 +1,6 @@
 # Hooks Entrypoint Contract
 
-**Status:** Proposed
+**Status:** Implemented
 **Date:** 2026-08-03
 
 If a fragment's `hooks/` directory contains any file, it must contain an
