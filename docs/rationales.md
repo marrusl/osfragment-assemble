@@ -169,7 +169,7 @@ Hooks are build inputs, not delivered payload. The tool emits `RUN --mount=type=
 
 ```dockerfile
 RUN --mount=type=bind,from=<fragment>,source=/fragment/hooks,target=/frag-hooks,bind-propagation=rshared,z \
-    /frag-hooks/10-configure.sh && /frag-hooks/20-enable.sh
+    /frag-hooks/entrypoint
 ```
 
 The bind mount exists only during the `RUN` instruction. Hook scripts execute, produce their effects (install packages, write config files, enable services), and disappear. Nothing from `/fragment/hooks` persists in the final image layers.

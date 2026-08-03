@@ -13,9 +13,9 @@ A fragment is an OCI image with this directory structure under `/fragment/`:
 │   ├── etc/yum.repos.d/*.repo
 │   ├── etc/pki/rpm-gpg/RPM-GPG-KEY-*
 │   └── ...            # Arbitrary filesystem paths
-└── hooks/             # Optional: post-install executables (any language)
-    ├── 01-setup.sh    # Executed in alphabetical order
-    └── 02-configure
+└── hooks/             # Optional: build-time setup (any language)
+    ├── entrypoint     # Required when hooks/ has content; the only file run
+    └── lib/helper.sh  # Support material, never invoked by the tool
 ```
 
 ## `fragment.toml` Schema
@@ -67,18 +67,18 @@ The generated Containerfile applies fragments in this order:
 1. Repo files (yum.repos.d, rpm-gpg) from all fragments
 2. Packages (single batched `dnf install` with all requested packages)
 3. Config files (the rest of each fragment's `tree/` content)
-4. Hooks (all files in `hooks/`, alphabetical order)
+4. Hooks (each hook-carrying fragment's `hooks/entrypoint`)
 5. Preset application and validation
 
 Config files land after package installation to ensure fragment-supplied configurations are never overwritten by RPM defaults.
 
 ## Hooks Contract
 
-All files in `/fragment/hooks/` are executed after packages are installed, in alphabetical order. Fragment authors are responsible for ensuring files are executable and that any required interpreters are available in the image at build time. The generated Containerfile bind-mounts the fragment's `hooks/` directory for the duration of a single `RUN` and chains execution:
+If `/fragment/hooks/` contains any file, it must contain an executable regular file named `entrypoint`. That file is the only thing osfragment-assemble runs: once, as root, after packages are installed, with no arguments and no environment beyond what the build already provides. Fragment authors are responsible for setting the execute bit and for any required interpreters being available in the image at build time. The generated Containerfile bind-mounts the fragment's `hooks/` directory for the duration of a single `RUN` and invokes the entrypoint through it:
 
 ```dockerfile
 RUN --mount=type=bind,from=<fragment>,source=/fragment/hooks,target=/frag-hooks,bind-propagation=rshared,z \
-    /frag-hooks/01-setup.sh && /frag-hooks/02-config
+    /frag-hooks/entrypoint
 ```
 
 The hooks are never copied into the image. A bind mount is not committed to a layer, so no hook bytes remain in the built image and there is nothing to clean up afterwards. Copying the directory and deleting it in a later `RUN` would not achieve this: the delete only writes a whiteout, and the bytes stay recoverable in the `COPY` layer.
@@ -87,11 +87,12 @@ Under `--self-contained` the hooks are mounted from the build context instead of
 
 ### Rules
 
-1. All files in `hooks/` are executed. Control ordering via naming (`01-`, `02-`, etc.).
-2. Hooks run as root in the target image's filesystem.
-3. Packages declared in the manifest are preferred; the tool can deduplicate and batch them. Hooks are not prevented from installing packages, but hook-installed packages bypass deduplication and won't appear in the manifest's package list.
-4. Hooks should be idempotent where possible (though they only run once during build).
-5. Exit code 0 = success. Nonzero exits fail the build.
+1. `hooks/entrypoint` is the only file executed. Everything else under `hooks/`, at any depth, is support material available to it at `/frag-hooks/`: helper scripts, vendor installers, payload binaries. Sequencing, arguments, and conditionals belong inside the entrypoint, which is a real program and has control flow.
+2. A fragment whose `hooks/` holds files but no executable `hooks/entrypoint` fails to load, with an error naming the fragment. There is no fallback to running whatever looks runnable. A nested `hooks/lib/entrypoint` does not satisfy the rule; only `hooks/entrypoint` counts.
+3. Hooks run as root in the target image's filesystem.
+4. Packages declared in the manifest are preferred; the tool can deduplicate and batch them. Hooks are not prevented from installing packages, but hook-installed packages bypass deduplication and won't appear in the manifest's package list.
+5. Hooks should be idempotent where possible (though they only run once during build).
+6. Exit code 0 = success. Nonzero exits fail the build.
 
 Typical uses:
 - Apply systemd presets (`systemctl preset <service>`)
