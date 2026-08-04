@@ -1,0 +1,3 @@
+FROM scratch
+COPY fragment.toml /fragment/
+COPY hooks/ /fragment/hooks/

@@ -1,0 +1,115 @@
+#!/bin/bash
+#
+# Install AWS CLI v2 from the vendor's self-contained zip, into /usr instead of
+# the /usr/local the installer would pick on its own.
+#
+# This entire script runs inside ONE RUN instruction, with the fragment's hooks/
+# directory bind-mounted at /frag-hooks. A bind mount is never committed to a
+# layer, so the ~70 MB zip contributes zero bytes to the built image and there is
+# nothing to clean up afterwards.
+#
+# `unzip` is installed AND removed here for the same reason. It is deliberately
+# not declared as packages.required in fragment.toml: that would install it
+# during the earlier batched dnf step, where a later removal writes only a
+# whiteout and the bytes stay recoverable in that layer forever. See
+# process-docs/skills/containerfile-layer-semantics.md.
+#
+# The whole point of the fragment is the two arguments passed to ./aws/install.
+# Left to itself the installer writes to /usr/local/aws-cli and /usr/local/bin,
+# which is the one path bootc has a documented opinion about. See README.md.
+#
+set -euo pipefail
+
+AWSCLI_VERSION="2.36.16"
+
+# The two arguments that make this correct for image mode. /usr/lib is owned by
+# the image and read-only at runtime, which is what an image-mode install is;
+# /usr/local is conventionally mutable and is not the image's to write into.
+INSTALL_DIR="/usr/lib/aws-cli"
+BIN_DIR="/usr/bin"
+
+LICENSE_DIR="/usr/share/licenses/awscli-zip"
+
+# AWS names its zips with the same architecture strings `uname -m` reports, so
+# one entrypoint serves every architecture the CLI is published for. `uname -m`
+# is safe here because the build container's architecture is the target image's.
+ZIP_FILE="/frag-hooks/awscli-exe-linux-$(uname -m)-${AWSCLI_VERSION}.zip"
+if [[ ! -f "$ZIP_FILE" ]]; then
+    echo "awscli-zip: installer zip not found at ${ZIP_FILE}" >&2
+    echo "awscli-zip: run fetch-awscli-zip.sh before building the fragment image" >&2
+    exit 1
+fi
+
+echo "awscli-zip: installing AWS CLI ${AWSCLI_VERSION} into ${INSTALL_DIR}"
+
+# Only install unzip if the base does not already provide it, and only remove
+# what we installed. Unconditionally removing it would strip a tool the base
+# image deliberately ships, for every consumer of that base.
+INSTALLED_UNZIP=0
+if ! command -v unzip >/dev/null 2>&1; then
+    dnf -y install unzip
+    INSTALLED_UNZIP=1
+fi
+
+WORK_DIR="$(mktemp -d -p /var/tmp awscli-zip.XXXXXX)"
+trap 'rm -rf "$WORK_DIR"' EXIT
+
+unzip -q "$ZIP_FILE" -d "$WORK_DIR"
+
+# --update: makes re-application over an image that already carries an install
+#     at this path an upgrade rather than a hard error. The installer refuses to
+#     touch a preexisting install without it.
+"${WORK_DIR}/aws/install" \
+    --install-dir "$INSTALL_DIR" \
+    --bin-dir "$BIN_DIR" \
+    --update
+
+# The bundle ships THIRD_PARTY_LICENSES at its top level, outside the dist/
+# directory the installer copies, so an unassisted install leaves it behind in
+# the scratch directory and the image carries none of it. Place it explicitly.
+install -D -m 0644 "${WORK_DIR}/aws/THIRD_PARTY_LICENSES" \
+    "${LICENSE_DIR}/THIRD_PARTY_LICENSES"
+
+# Fail loudly rather than shipping an image that merely looks installed.
+if ! "${BIN_DIR}/aws" --version 2>&1 | grep -q "aws-cli/${AWSCLI_VERSION}"; then
+    echo "awscli-zip: ${BIN_DIR}/aws did not report version ${AWSCLI_VERSION}" >&2
+    "${BIN_DIR}/aws" --version >&2 || true
+    exit 1
+fi
+
+RESOLVED="$(readlink -f "${BIN_DIR}/aws")"
+if [[ "$RESOLVED" != "${INSTALL_DIR}/"* ]]; then
+    echo "awscli-zip: ${BIN_DIR}/aws resolves to ${RESOLVED}, expected a path under ${INSTALL_DIR}" >&2
+    exit 1
+fi
+
+# The assertion this fragment exists to make. If the installer's defaults ever
+# leak back in, the build stops here instead of shipping an image whose CLI
+# lives somewhere bootc does not want it.
+for stray in /usr/local/aws-cli /usr/local/bin/aws /usr/local/bin/aws_completer; do
+    if [[ -e "$stray" ]] || [[ -L "$stray" ]]; then
+        echo "awscli-zip: the installer wrote ${stray}; /usr/local must stay untouched" >&2
+        exit 1
+    fi
+done
+
+if [[ "$INSTALLED_UNZIP" -eq 1 ]]; then
+    # Same layer, so unzip leaves no recoverable bytes behind. The package
+    # manager residue is cleaned in the same breath because dnf writes logs and
+    # caches that trip `bootc container lint`'s var-log, var-tmpfiles, and
+    # nonempty-run-tmp checks.
+    #
+    # The rhsm paths are not obvious: dnf's subscription-manager plugin creates
+    # /run/rhsm, /var/log/rhsm, and /var/lib/rhsm on any dnf invocation, and
+    # ldconfig leaves /var/cache/ldconfig behind. All four are absent from a
+    # stock centos-bootc:stream10 (verified 2026-08-04), so they are this
+    # fragment's residue rather than the base's, and each one costs a lint
+    # warning if left.
+    dnf -y remove unzip
+    dnf clean all
+    rm -rf /var/cache/libdnf5 /var/cache/dnf /var/lib/dnf \
+           /var/log/dnf*.log /var/log/hawkey.log \
+           /run/rhsm /var/log/rhsm /var/lib/rhsm /var/cache/ldconfig
+fi
+
+echo "awscli-zip: AWS CLI ${AWSCLI_VERSION} installed at ${INSTALL_DIR}, symlinked into ${BIN_DIR}"

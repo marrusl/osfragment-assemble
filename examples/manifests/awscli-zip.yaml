@@ -1,0 +1,11 @@
+apiVersion: osfragment/v1alpha1
+kind: Composition
+
+# Unpinned on purpose: the fragment installs a self-contained binary bundle and
+# asks nothing of the base beyond a package manager, so it adapts to a current
+# base rather than requiring one. Pin by digest if you want byte-reproducible
+# rebuilds.
+base: quay.io/centos-bootc/centos-bootc:stream10
+
+fragments:
+  - image: quay.io/marrusl2/fragments/awscli-zip:2.36.16

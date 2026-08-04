@@ -103,3 +103,74 @@ no member named 'state'`, `too few arguments to function 'pci_resize_resource'`,
 and `'const struct dma_map_ops' has no member named 'map_resource'` — all
 symptoms of the kernel being *newer* than the driver's feature detection
 expects, not older. Reach for a newer driver branch when those appear.
+
+## Any entrypoint that runs dnf leaves rhsm residue, and it is easy to misread
+
+A single `dnf` invocation inside a hook creates all of these on
+`centos-bootc:stream10`, none of which exist in the stock base (measured
+2026-08-04):
+
+| path | left by | costs a lint warning |
+|---|---|---|
+| `/run/rhsm` | subscription-manager dnf plugin | yes, `nonempty-run-tmp` |
+| `/var/log/rhsm/rhsm.log` | subscription-manager dnf plugin | yes, `var-log` + `var-tmpfiles` |
+| `/var/lib/rhsm/` | subscription-manager dnf plugin | yes, `var-tmpfiles` |
+| `/var/cache/ldconfig/aux-cache` | ldconfig | yes, `var-tmpfiles` |
+| `/etc/yum.repos.d/redhat.repo` | subscription-manager dnf plugin | no |
+| `/usr/share/rpm/rpmdb.sqlite-{shm,wal}`, `.rpm.lock` | rpm | no |
+
+The first four must be removed in the same `RUN`, on top of the dnf caches and
+logs, or the build ships three extra lint warnings.
+
+**The trap:** the NVIDIA experiment recorded the rhsm paths as base artifacts.
+They are not. That run tested against a scaffold base which had itself run `dnf`
+to update the kernel, so the residue was already present before the fragment
+ran and looked like it belonged to the base. **Always diff against the *stock*
+base, not against whatever scaffold the experiment needed.** Stock
+`centos-bootc:stream10` lints with exactly one warning
+(`var/roothome/buildinfo/content-sets.json`); that is the number a fragment has
+to match to be clean.
+
+The last two rows are residue that `bootc container lint` does not check for.
+They are left in place: the rpmdb sidecars are 0-byte and 32 KB with the rpmdb
+fully queryable afterwards, and `redhat.repo` is a 376-byte auto-generated stub
+with no repo definitions. Removing `redhat.repo` unconditionally would be wrong
+on a RHEL base, where subscription-manager legitimately owns it.
+
+## Remove only the build tooling you installed
+
+A fragment that installs a tool in its entrypoint must not unconditionally
+remove it, or it strips that tool from every base that ships it deliberately.
+Check first and remember:
+
+```bash
+INSTALLED_UNZIP=0
+if ! command -v unzip >/dev/null 2>&1; then
+    dnf -y install unzip
+    INSTALLED_UNZIP=1
+fi
+# ... later, in the same RUN ...
+if [[ "$INSTALLED_UNZIP" -eq 1 ]]; then
+    dnf -y remove unzip
+fi
+```
+
+For reference, none of `centos-bootc:stream10`, `centos-bootc:stream9`, or
+`fedora-bootc:42` ships `unzip` (measured 2026-08-04).
+
+## `python3 -m zipfile` is not a substitute for `unzip`
+
+Reaching for the base's Python to avoid installing an extraction tool looks
+attractive and silently breaks executables. A zip records permissions, and
+`python3 -m zipfile -e` discards them: the AWS CLI bundle stores `aws/install`
+and `aws/dist/aws` as `-rwxr-xr-x` and Python extracts both `-rw-r--r--`
+(verified 2026-08-04). Recovering means `chmod`-ing whichever paths the payload
+happens to need, which is worse to maintain than installing a 186 KB package
+and removing it in the same layer.
+
+## A fragment may carry `hooks/` with no `tree/`
+
+`awscli-zip` is the first example shaped that way and the loader handles it —
+`inspect` reports the fragment with only a `hooks/` listing. Omit the
+`COPY tree/` line from `Containerfile.fragment` entirely; do not ship an empty
+`tree/` to keep the shape uniform.

@@ -11,3 +11,4 @@
 /examples/fragments/nvidia-driver-run/hooks/*.run
 /examples/fragments/nvidia-driver-run/hooks/LICENSE
 /examples/fragments/nvidia-driver-run/tree/usr/share/licenses/nvidia-driver-run/LICENSE
+/examples/fragments/awscli-zip/hooks/*.zip
