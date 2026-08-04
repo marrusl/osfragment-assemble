@@ -652,6 +652,7 @@ mod tests {
         let manifest = crate::manifest::Manifest {
             base: "registry.example/base:1".into(),
             base_type: None,
+            source_path: "test-manifest.yaml".into(),
             fragments: vec![
                 crate::manifest::ManifestFragment {
                     image: "quay.io/test/epel:1".into(),

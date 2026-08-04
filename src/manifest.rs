@@ -42,6 +42,10 @@ pub struct Manifest {
     pub base: String,
     pub base_type: Option<BaseType>,
     pub fragments: Vec<ManifestFragment>,
+    /// Path the manifest was read from, as the user wrote it. Reported in the
+    /// generated Containerfile header and by `list`, so it must be the real
+    /// `--manifest` argument rather than a default filename.
+    pub source_path: String,
 }
 
 #[derive(Debug, Clone)]
@@ -62,7 +66,7 @@ impl ManifestFragment {
     }
 }
 
-pub fn parse_manifest(content: &str) -> Result<Manifest> {
+pub fn parse_manifest(content: &str, source_path: &str) -> Result<Manifest> {
     let raw: ManifestYaml =
         serde_yaml::from_str(content).context("failed to parse manifest YAML")?;
 
@@ -88,6 +92,7 @@ pub fn parse_manifest(content: &str) -> Result<Manifest> {
         base,
         base_type: raw.base_type,
         fragments,
+        source_path: source_path.to_string(),
     })
 }
 
@@ -120,7 +125,7 @@ fragments:
 
     #[test]
     fn parse_minimal_manifest() {
-        let manifest = parse_manifest(MINIMAL_YAML).unwrap();
+        let manifest = parse_manifest(MINIMAL_YAML, "test-manifest.yaml").unwrap();
         assert_eq!(manifest.base, "registry.redhat.io/rhel10/rhel-bootc:10.0");
         assert_eq!(manifest.fragments.len(), 2);
         assert_eq!(manifest.fragments[0].packages, vec!["htop", "tmux"]);
@@ -129,7 +134,7 @@ fragments:
 
     #[test]
     fn parse_mirror_override() {
-        let manifest = parse_manifest(MIRROR_YAML).unwrap();
+        let manifest = parse_manifest(MIRROR_YAML, "test-manifest.yaml").unwrap();
         assert_eq!(
             manifest.fragments[0].mirror.as_deref(),
             Some("https://rpm-mirror.internal.corp/grafana/")
@@ -138,7 +143,7 @@ fragments:
 
     #[test]
     fn resolve_registry_source() {
-        let manifest = parse_manifest(MINIMAL_YAML).unwrap();
+        let manifest = parse_manifest(MINIMAL_YAML, "test-manifest.yaml").unwrap();
         let source = manifest.fragments[0].resolve_source().unwrap();
         assert!(matches!(source, FragmentSource::Registry { .. }));
     }
@@ -152,7 +157,7 @@ base: registry.redhat.io/rhel10/rhel-bootc:10.0
 fragments:
   - image: "dir:./examples/fragments/epel"
 "#;
-        let manifest = parse_manifest(dir_yaml).unwrap();
+        let manifest = parse_manifest(dir_yaml, "test-manifest.yaml").unwrap();
         let result = manifest.fragments[0].resolve_source();
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
@@ -168,7 +173,7 @@ kind: Composition
 fragments:
   - image: quay.io/test:1
 "#;
-        assert!(parse_manifest(bad).is_err());
+        assert!(parse_manifest(bad, "test-manifest.yaml").is_err());
     }
 
     #[test]
@@ -179,7 +184,7 @@ kind: Composition
 base: registry.redhat.io/rhel10/rhel-bootc:10.0
 fragments: []
 "#;
-        let result = parse_manifest(bad);
+        let result = parse_manifest(bad, "test-manifest.yaml");
         assert!(result.is_err());
     }
 
@@ -193,7 +198,7 @@ baseType: bootc
 fragments:
   - image: quay.io/test/epel:10
 "#;
-        let manifest = parse_manifest(yaml).unwrap();
+        let manifest = parse_manifest(yaml, "test-manifest.yaml").unwrap();
         assert_eq!(manifest.base_type, Some(BaseType::Bootc));
     }
 
@@ -207,13 +212,13 @@ baseType: container
 fragments:
   - image: quay.io/test/epel:10
 "#;
-        let manifest = parse_manifest(yaml).unwrap();
+        let manifest = parse_manifest(yaml, "test-manifest.yaml").unwrap();
         assert_eq!(manifest.base_type, Some(BaseType::Container));
     }
 
     #[test]
     fn parse_base_type_absent() {
-        let manifest = parse_manifest(MINIMAL_YAML).unwrap();
+        let manifest = parse_manifest(MINIMAL_YAML, "test-manifest.yaml").unwrap();
         assert_eq!(manifest.base_type, None);
     }
 
@@ -227,6 +232,6 @@ baseType: something-else
 fragments:
   - image: quay.io/test/epel:10
 "#;
-        assert!(parse_manifest(yaml).is_err());
+        assert!(parse_manifest(yaml, "test-manifest.yaml").is_err());
     }
 }

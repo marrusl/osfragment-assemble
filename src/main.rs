@@ -82,7 +82,7 @@ fn main() -> Result<()> {
         Some(Commands::List { manifest }) => {
             let content = std::fs::read_to_string(&manifest)
                 .with_context(|| format!("reading manifest {}", manifest.display()))?;
-            let manifest_data = parse_manifest(&content)?;
+            let manifest_data = parse_manifest(&content, &manifest.display().to_string())?;
 
             let mut fragments = Vec::new();
             let total = manifest_data.fragments.len();
@@ -110,7 +110,7 @@ fn main() -> Result<()> {
             // Default: assembly
             let content = std::fs::read_to_string(&cli.manifest)
                 .with_context(|| format!("reading manifest {}", cli.manifest.display()))?;
-            let manifest = parse_manifest(&content)?;
+            let manifest = parse_manifest(&content, &cli.manifest.display().to_string())?;
 
             let base_digest = if cli.pin_digests {
                 eprintln!("Resolving base image digest...");
