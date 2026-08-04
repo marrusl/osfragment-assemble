@@ -1,7 +1,23 @@
 # The `--rechunk` Flag
 
-**Status:** Proposed (revised after round 1 review)
+**Status:** Parked at spec (2026-08-03). Revised after review round 1; round 2
+deferred to revival. No implementation plan.
 **Date:** 2026-08-03
+
+**Why parked.** The builder floor below — buildah >= 1.44.0 server-side, i.e.
+podman 6.x — is in almost nobody's installed base yet, including the official
+`quay.io/podman/stable` and `quay.io/buildah/stable` images and the normal macOS
+podman install path. The feature is a frill until that changes. This is a
+timing call, not a dispute with the design: the floor is correct, the emission
+is correct, and the spec is complete as written.
+
+**Revive when** buildah >= 1.44 reaches the official podman/buildah images *and*
+the mainstream macOS podman install path. At that point: resume review round 2,
+and run the parked podman-6 sufficiency build, which closes five **Inferred**
+rows in the table below plus the zero-instruction-final-stage question.
+
+The body below is unchanged from the post-review revision and needs no rework to
+be picked up.
 
 An opt-in `--rechunk` flag on the default generate command. When set, the
 emitted Containerfile gains a rechunk phase: the assembled image is handed to
