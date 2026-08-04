@@ -98,6 +98,56 @@ Note the mirror is consulted, not enforced: if the local registry is missing
 the image, skopeo falls through to the real location and silently pulls the
 published (pre-change) fragment. Build and push before generating.
 
+## A stale local image silently shadows the published fragment
+
+`COPY --from=<ref>` and `RUN --mount=from=<ref>` both resolve against podman's
+local storage first. If a tag like `quay.io/marrusl2/fragments/grafana:11.0` is
+already present locally — which it always is after a rebuild-and-push script,
+because the script builds under the published name — podman never contacts the
+registry, and the build tests whatever that local copy happens to contain.
+
+This produced a build failure on 2026-08-04 that looked nothing like its cause:
+
+```
+STEP 9/13: RUN --mount=type=bind,from=quay.io/marrusl2/fragments/grafana:11.0,source=/fragment/hooks,...
+/bin/sh: line 1: /frag-hooks/entrypoint: No such file or directory
+Error: ... while running runtime: exit status 127
+```
+
+The published image had a perfectly good `/fragment/hooks/entrypoint`; the local
+one did not. Exit 127 with `No such file or directory` reads like a missing
+shebang interpreter, which sends you to inspect the script instead of the image
+resolution. Removing the tags and re-pulling fixed it with no other change.
+
+**Before any build meant to prove the published fragments work, force a refresh:**
+
+```bash
+for r in epel:10 grafana:11.0 awscli-zip:2.36.16; do
+    podman rmi -f "quay.io/marrusl2/fragments/$r" 2>/dev/null
+    podman pull "quay.io/marrusl2/fragments/$r"
+done
+```
+
+This is the inverse of the mirror trick above: mirroring makes a local image
+stand in for a published one deliberately, and this is the same substitution
+happening by accident.
+
+## The published fragment set is mixed-architecture
+
+Measured 2026-08-04: `epel:10`, `awscli-zip:2.36.16`, and
+`nvidia-driver-run:610.57.04` are `arm64`, while `grafana:11.0` and
+`cis-hardening:2.1` are `amd64` — the originals were pushed from a different
+machine than the later ones. Nothing breaks, because fragment payload is
+architecture-independent files, but every build on an arm64 host prints
+
+```
+WARNING: image platform (linux/amd64) does not match the expected platform (linux/arm64)
+```
+
+once per amd64 fragment, including during `COPY --from=`. Check with
+`skopeo inspect --format '{{.Architecture}}'` before assuming a fragment set is
+uniform, and expect the warning rather than treating it as a new fault.
+
 ## Never write non-trivial inline `python3 -c` in this pipeline
 
 Deriving annotation arguments from `fragment.toml`, or checking a manifest's
