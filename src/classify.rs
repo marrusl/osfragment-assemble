@@ -65,10 +65,7 @@ pub(crate) fn classify_base_with_probe(
 ///
 /// When `skopeo inspect` fails (network, auth), classifies as `Bootc`,
 /// warns on stderr, and continues.
-pub fn classify_base(
-    base_image: &str,
-    manifest_override: Option<&BaseType>,
-) -> CapabilitySet {
+pub fn classify_base(base_image: &str, manifest_override: Option<&BaseType>) -> CapabilitySet {
     if manifest_override.is_some() {
         return classify_base_with_probe(manifest_override, None);
     }

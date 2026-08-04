@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use std::path::{Path, PathBuf};
 
-use osfragment_assemble::classify::{classify_base, capabilities_for_base_type};
+use osfragment_assemble::classify::{capabilities_for_base_type, classify_base};
 use osfragment_assemble::generator::generate_containerfile;
 use osfragment_assemble::inspect::run_inspect;
 use osfragment_assemble::list::run_list;

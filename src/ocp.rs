@@ -18,10 +18,7 @@ pub fn generate_machine_os_config(containerfile: &str, pool: &str) -> Result<Str
     }
 
     let mut out = String::new();
-    writeln!(
-        out,
-        "apiVersion: machineconfiguration.openshift.io/v1"
-    )?;
+    writeln!(out, "apiVersion: machineconfiguration.openshift.io/v1")?;
     writeln!(out, "kind: MachineOSConfig")?;
     writeln!(out, "metadata:")?;
     writeln!(out, "  name: {pool}")?;

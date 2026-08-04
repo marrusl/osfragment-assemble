@@ -73,7 +73,6 @@ pub fn is_repo_path(path: &Path) -> bool {
     REPO_PREFIXES.iter().any(|prefix| s.starts_with(prefix))
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -212,10 +211,11 @@ requred = ["grafana"]
         let toml_path = Path::new("examples/fragments/postgresql/fragment.toml");
         let content =
             std::fs::read_to_string(toml_path).expect("postgresql example fragment should exist");
-        let frag =
-            parse_fragment_toml(&content).expect("postgresql example fragment should parse");
+        let frag = parse_fragment_toml(&content).expect("postgresql example fragment should parse");
         assert!(
-            frag.packages.required.contains(&"postgresql17-server".to_string()),
+            frag.packages
+                .required
+                .contains(&"postgresql17-server".to_string()),
             "postgresql must declare postgresql17-server as required"
         );
         assert!(
