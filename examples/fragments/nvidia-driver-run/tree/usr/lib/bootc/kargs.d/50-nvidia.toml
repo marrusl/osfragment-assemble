@@ -1,0 +1,8 @@
+# Kernel arguments delivered through bootc's own kargs.d mechanism, as plain
+# files. osfragment-assemble copies this verbatim and understands nothing about
+# it: it is not a format the tool parses, declares, or validates.
+kargs = [
+    "rd.driver.blacklist=nouveau",
+    "modprobe.blacklist=nouveau",
+    "nvidia-drm.modeset=1",
+]

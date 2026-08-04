@@ -1,0 +1,10 @@
+apiVersion: osfragment/v1alpha1
+kind: Composition
+
+# Unpinned on purpose: the fragment derives the kernel version from whatever
+# base it is assembled onto, so it adapts to a current base rather than
+# requiring one. Pin by digest if you want byte-reproducible rebuilds.
+base: quay.io/centos-bootc/centos-bootc:stream10
+
+fragments:
+  - image: quay.io/marrusl2/fragments/nvidia-driver-run:610.57.04

@@ -1,0 +1,17 @@
+[fragment]
+name = "nvidia-driver-run"
+version = "610.57.04"
+description = "NVIDIA driver from the vendor .run installer, built for the image's kernel"
+vendor = "NVIDIA Corporation"
+
+[fragment.conflicts]
+fragments = ["nvidia-driver-repo"]
+
+# No [fragment.packages] section on purpose.
+#
+# The build toolchain (gcc, make, binutils, elfutils-libelf-devel, and
+# kernel-devel matching the image's kernel) is installed AND removed inside
+# hooks/entrypoint, which is a single RUN. Declaring it as packages.required
+# would install it during the earlier batched dnf step, where a later removal
+# writes only a whiteout and the bytes stay recoverable in that layer forever.
+# See process-docs/skills/containerfile-layer-semantics.md.

@@ -1,0 +1,133 @@
+#!/bin/bash
+#
+# Install the NVIDIA driver from the vendor's .run self-extracting installer,
+# building the kernel modules for the IMAGE's kernel rather than the build
+# host's.
+#
+# This entire script runs inside ONE RUN instruction, with the fragment's
+# hooks/ directory bind-mounted at /frag-hooks. A bind mount is never committed
+# to a layer, so the ~300 MB installer contributes zero bytes to the built
+# image and there is nothing to clean up afterwards.
+#
+# The build toolchain is installed AND removed here for the same reason. It is
+# deliberately not declared as packages.required in fragment.toml: that would
+# install it during the earlier batched dnf step, where a later removal writes
+# only a whiteout and the bytes stay recoverable in that layer forever. See
+# process-docs/skills/containerfile-layer-semantics.md.
+#
+# Nothing here registers a module for later rebuilds. DKMS is deliberately
+# absent: on a running bootc system /usr is read-only, so a boot-time DKMS
+# rebuild would try to write modules into a read-only filesystem and fail. The
+# module is fully baked at build time for exactly one kernel version.
+#
+set -euo pipefail
+
+DRIVER_VERSION="610.57.04"
+BUILD_DEPS=(gcc make binutils elfutils-libelf-devel)
+
+# NVIDIA names its installers with the same architecture strings `uname -m`
+# reports, so one entrypoint serves every architecture the driver is published
+# for. `uname -m` is safe here because the build container's architecture is
+# the target image's architecture -- unlike `uname -r`, which reports the build
+# HOST's kernel and is never correct for this.
+RUN_FILE="/frag-hooks/NVIDIA-Linux-$(uname -m)-${DRIVER_VERSION}.run"
+if [[ ! -f "$RUN_FILE" ]]; then
+    echo "nvidia-driver-run: installer not found at ${RUN_FILE}" >&2
+    echo "nvidia-driver-run: run fetch-run-installer.sh before building the fragment image" >&2
+    exit 1
+fi
+
+# The image's kernel, not the build host's. Asserting a single match matters:
+# a base image carrying two kernels would otherwise silently build for whichever
+# one rpm happened to list first.
+KVER="$(rpm -q --qf '%{VERSION}-%{RELEASE}.%{ARCH}\n' kernel-core)"
+if [[ "$(wc -l <<<"$KVER")" -ne 1 ]]; then
+    echo "nvidia-driver-run: expected exactly one kernel-core, got:" >&2
+    echo "$KVER" >&2
+    exit 1
+fi
+
+echo "nvidia-driver-run: driver ${DRIVER_VERSION} for image kernel ${KVER}"
+
+# The archive's own integrity check. Turns a truncated download or a corrupt
+# layer into an early, legible failure instead of a confusing build error.
+sh "$RUN_FILE" --check
+
+dnf -y install "${BUILD_DEPS[@]}"
+
+# kernel-devel must match the image's kernel EXACTLY -- an out-of-tree module
+# built against different kernel headers will not load. If this fails, the base
+# image ships a kernel whose NVR its own configured repos no longer carry, which
+# is a property of the base image, not of this fragment. The remedy is a base
+# whose kernel is still carried; there is deliberately no fallback to an
+# out-of-band package source here.
+if ! dnf -y install "kernel-devel-${KVER}"; then
+    echo >&2
+    echo "nvidia-driver-run: kernel-devel-${KVER} is not available in this image's repos." >&2
+    echo "nvidia-driver-run: the base image's kernel is out of step with the repos it" >&2
+    echo "nvidia-driver-run: configures, so the matching kernel headers cannot be" >&2
+    echo "nvidia-driver-run: installed. Use a base image whose kernel NVR is still" >&2
+    echo "nvidia-driver-run: carried. Available kernel-devel builds right now:" >&2
+    dnf -q repoquery --showduplicates \
+        --qf 'nvidia-driver-run:   %{VERSION}-%{RELEASE}.%{ARCH}' kernel-devel >&2 || true
+    exit 1
+fi
+
+# --ui=none/--no-questions instead of --silent: --silent implies both and then
+#     suppresses all output but errors, which is not what you want in a build log.
+# --kernel-name: build for the image's kernel; also derives the module install
+#     and kernel source paths, so those need no separate flags.
+# --kernel-module-type: passed explicitly because auto-detection inspects
+#     attached GPUs, and a build container has none.
+# --no-disable-nouveau: the fragment's tree/ owns nouveau blacklisting, so the
+#     installer must not write its own modprobe.d file or rebuild the initramfs.
+# --skip-depmod: depmod is run explicitly below against ${KVER}, because whether
+#     the installer propagates --kernel-name to its internal depmod is unverified.
+# --accept-license is intentionally absent: it is obsolete and ignored by current
+#     nvidia-installer. Use of the driver implies acceptance of the LICENSE this
+#     fragment ships in hooks/ and in tree/usr/share/licenses/.
+# IGNORE_CC_MISMATCH: the live mechanism for a compiler mismatch between the
+#     image's gcc and the one the kernel was built with (--no-cc-version-check
+#     is deprecated and no longer does anything).
+IGNORE_CC_MISMATCH=1 sh "$RUN_FILE" \
+    --ui=none \
+    --no-questions \
+    --kernel-name="${KVER}" \
+    --kernel-module-type=open \
+    --no-x-check \
+    --no-nouveau-check \
+    --no-disable-nouveau \
+    --skip-module-load \
+    --no-rebuild-initramfs \
+    --no-backup \
+    --no-check-for-alternate-installs \
+    --skip-depmod \
+    --tmpdir=/var/tmp
+
+depmod -a "${KVER}"
+
+# Fail loudly rather than shipping an image that merely looks installed.
+MODULE_DIR="/usr/lib/modules/${KVER}"
+for mod in nvidia nvidia-modeset nvidia-drm nvidia-uvm; do
+    if ! find "$MODULE_DIR" -name "${mod}.ko*" -print -quit | grep -q .; then
+        echo "nvidia-driver-run: ${mod}.ko missing under ${MODULE_DIR}" >&2
+        exit 1
+    fi
+done
+if ! grep -q 'nvidia' "${MODULE_DIR}/modules.dep"; then
+    echo "nvidia-driver-run: depmod did not record the NVIDIA modules" >&2
+    exit 1
+fi
+
+# Same layer, so the toolchain leaves no recoverable bytes behind.
+dnf -y remove "${BUILD_DEPS[@]}" "kernel-devel-${KVER}"
+dnf clean all
+# /var/lib/nvidia is the installer's own uninstall bookkeeping, which an image
+# that is rebuilt rather than uninstalled in place never reads. Leaving it, or
+# any of the package-manager residue below, trips `bootc container lint`'s
+# var-tmpfiles and var-log checks.
+rm -rf /var/cache/libdnf5 /var/cache/dnf /var/lib/dnf /var/lib/nvidia \
+       /var/tmp/* /var/log/dnf*.log /var/log/hawkey.log \
+       /var/log/nvidia-installer.log
+
+echo "nvidia-driver-run: driver ${DRIVER_VERSION} installed for ${KVER}"

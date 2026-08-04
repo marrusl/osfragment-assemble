@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`nvidia-driver-run` example fragment** - Installs the NVIDIA driver from the vendor's `.run` self-extracting installer, compiling the kernel modules for the kernel of the image being built rather than the build host's. The first example whose `hooks/entrypoint` does real work, the first to carry a large binary payload as hook material, and the first to use `conflicts.fragments`. The ~350 MB installer is bind-mounted for one `RUN` and contributes zero bytes to the built image; the build toolchain is installed and removed inside that same `RUN` rather than declared as `packages.required`, so it leaves nothing recoverable in an earlier layer. The installer is never committed: `fetch-run-installer.sh` downloads it against a recorded sha256 and extracts the NVIDIA `LICENSE` that ships with it, and the blob is listed in `.gitignore`. Accompanied by `examples/manifests/nvidia-driver-run.yaml`.
+
 - **`--self-contained <dir>`** - Materializes fragment tree/hooks payload into a local build context whose `Containerfile` sits alongside the payload, then packages the result as a sibling `.tar.gz`. The output directory carries a `.osfragment-assemble` sentinel file that marks it as tool-generated and safe to regenerate. The emitted Containerfile references no registry image except the base. Mutually exclusive with `--ocp` and `--output`.
 
 ### Removed
