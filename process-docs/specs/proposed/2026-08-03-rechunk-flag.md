@@ -161,9 +161,9 @@ RUN --mount=from=assembled,src=/,target=/chunkah,ro \
       chunkah build \
         --prune /sysroot/ \
         --max-layers 128 \
-        --output oci:/run/src/out
+        --output oci:/run/src/rechunk.oci
 
-FROM --after=chunkah oci:out
+FROM --after=chunkah oci:rechunk.oci
 LABEL containers.bootc=1
 ```
 
@@ -185,11 +185,52 @@ accepts as an alias of `source=`. The hooks emission in the same file uses
 `source=`. The inconsistency is deliberate: the chunker line is copied verbatim
 from the upstream-verified pattern and should stay diffable against it.
 
+### The byproduct directory is named `rechunk.oci`
+
+Decided 2026-08-03. Upstream's examples write `out`, and this spec deliberately
+does not.
+
+**`out` is an example argument, not a protocol name.** An OCI layout is
+identified by its contents — `oci-layout` and `index.json` — never by its
+basename, and the verification that this pattern works covered the *mechanism*
+(a relative `oci:` path resolved against the build context), which applies to
+any relative path. There is nothing to be compatible with here.
+
+**Two reasons the distinctive name is better**, and the first is the one that
+matters:
+
+- **Collision.** The byproduct lands in whatever directory the user builds
+  from. In `--self-contained` mode that is the tool's own output directory; in
+  registry mode it is an arbitrary user directory, where a generic `out/` is at
+  its worst — that is exactly the name a user's own build output already has.
+  `rechunk.oci` collides with essentially nothing in either mode.
+- **Self-describing on disk.** Someone who finds it a week later can tell what
+  wrote it and why without reading the Containerfile.
+
+**Deliberately visible, not dot-hidden.** The directory is an image-sized copy
+of the rootfs. Something that large should not accumulate invisibly.
+
+Because it is visible and large, `--rechunk`'s `--help` and the README flag
+list say it exists: a build leaves a `rechunk.oci/` OCI layout in the build
+context, it is safe to delete, and it is not cleaned up automatically. The tool
+cannot remove it — the tool has exited long before the build runs.
+
+**Both emission sites change together** — the chunker's `--output` argument and
+the final stage's `FROM` — and both take the name from the same constant. They
+are the same path expressed from two sides of a bind mount, and a plan that
+changes one without the other produces a Containerfile that fails at the final
+`FROM` with a missing layout.
+
+One consequence to know rather than act on: `oci:` names a *directory* while
+the `.oci`/`.ociarchive` suffixes elsewhere in this ecosystem usually mark
+archive *files*. The name is still the right call; it just is not evidence
+about the transport.
+
 ### Mechanism, stated once
 
-`FROM --after=chunkah oci:out` is not a stylistic choice. `oci:out` is a local
-transport resolved relative to the build context, and buildah cannot infer that
-an earlier stage produces it. Without `--after`, the pattern requires the
+`FROM --after=chunkah oci:rechunk.oci` is not a stylistic choice.
+`oci:rechunk.oci` is a local transport resolved relative to the build context,
+and buildah cannot infer that an earlier stage produces it. Without `--after`, the pattern requires the
 *builder* to be invoked with `--skip-unused-stages=false` — a CLI flag a
 Containerfile cannot carry, which would make this feature depend on
 out-of-band instructions to the user. `--after` declares the dependency inside
@@ -200,16 +241,19 @@ rawhide, 2026-08-03) rather than inferred: an `--after`-referenced stage
 survives unused-stage pruning under a plain `buildah bud` with no extra flags
 (a genuinely unreferenced stage in the same file was pruned in the same run,
 as a control), and the same holds when the final `FROM` is the local-transport
-`oci:out` form, with the producer stage completing before the final `FROM` is
-evaluated.
+`oci:<dir>` form, with the producer stage completing before the final `FROM` is
+evaluated. The verification used `oci:out`; what it established is that a
+relative `oci:` path is resolved against the build context, which is a property
+of the transport and not of the basename.
 
 The final stage is not derived from the assembled image — it *is* the
 chunkah-produced image. That is the mechanism by which the chunked output
 becomes the build's result.
 
-`chunkah build` writes an OCI directory layout to `/run/src/out`, i.e. `out/`
-inside the build context. This leaves an `out/` directory behind after a build;
-see the `--self-contained` interaction below, where that has a consequence.
+`chunkah build` writes an OCI directory layout to `/run/src/rechunk.oci`, i.e.
+`rechunk.oci/` inside the build context. This leaves that directory behind
+after a build, in every mode; see the `--self-contained` interaction below,
+where it has a consequence.
 
 ### Named constants
 
@@ -284,12 +328,12 @@ base-image precedent.
 
 Two wrinkles, both real, both in `self_contained.rs`.
 
-**Wrinkle 1 — `oci:out` is excluded from context-path validation by accident,
-not by rule.** `context_paths_referenced` (`self_contained.rs:592-601`)
+**Wrinkle 1 — `oci:rechunk.oci` is excluded from context-path validation by
+accident, not by rule.** `context_paths_referenced` (`self_contained.rs:592-601`)
 collects build-context paths by taking every whitespace/comma-delimited token,
 stripping an optional `source=` prefix, and keeping those that begin
-`fragments/`. `oci:out` does not match that prefix and is silently ignored.
-That outcome is correct — `out/` is produced by the build, not by
+`fragments/`. `oci:rechunk.oci` does not match that prefix and is silently
+ignored. That outcome is correct — the layout is produced by the build, not by
 materialization, so demanding it on disk would be wrong — but it holds only
 because of the prefix filter. The hook-command scan in the same test
 (`self_contained.rs:742-768`) keys on `source=fragments/` and skips the
@@ -301,40 +345,57 @@ a `source=` at all.
 must be made explicit — at minimum a comment at the filter stating that
 build-produced paths are deliberately out of scope. Otherwise a later
 generalization of the helper (say, "collect every non-absolute path token")
-starts demanding `out/` on disk and fails for a reason nobody will recognize.
+starts demanding `rechunk.oci/` on disk and fails for a reason nobody will
+recognize.
 
-**Wrinkle 2 — a rechunk build leaves `out/` in the output directory, and the
-sentinel guard then refuses to regenerate into it.** In this mode the build
-context *is* `<dir>`, so `chunkah build --output oci:/run/src/out` writes
-`<dir>/out`. `TOOL_GENERATED_ENTRIES` (`self_contained.rs:33-38`) is exactly
-`Containerfile`, `manifest.yaml`, `fragments`, `.osfragment-assemble`, and
-`check_target_dir_safe` requires *every* entry in the directory to be
-recognized. So the next
-`osfragment-assemble --self-contained <dir> --rechunk` refuses with:
+**Wrinkle 2 — a rechunk build leaves `rechunk.oci/` in the output directory,
+and the sentinel guard then refuses to regenerate into it.** In this mode the
+build context *is* `<dir>`, so `chunkah build --output oci:/run/src/rechunk.oci`
+writes `<dir>/rechunk.oci`. `TOOL_GENERATED_ENTRIES` (`self_contained.rs:33-38`)
+is exactly `Containerfile`, `manifest.yaml`, `fragments`,
+`.osfragment-assemble`, and `check_target_dir_safe` requires *every* entry in
+the directory to be recognized. So the next
+`osfragment-assemble --self-contained <dir> --rechunk` refuses, and today it
+refuses with a message that names a cause that is not the cause:
 
 ```
 --self-contained target <dir> already exists and was not generated by this
 tool …
 ```
 
-The guard is behaving correctly — `out/` was not written by this tool — but the
-message names a cause that is not the cause, and the obvious build-then-
-regenerate loop hits it every time.
+The guard is behaving correctly — `rechunk.oci/` was not written by this tool —
+but the obvious build-then-regenerate loop hits this every time, and the
+message sends the user looking for a foreign directory rather than at their own
+last build.
 
-**Recommended resolution: extend the guard's error message to name build
-byproducts as a possible cause, and change nothing else.** The message becomes
-actionable (`remove <dir>/out, or point --self-contained at a new directory`)
-while the guard keeps the content-blind property that makes it trustworthy.
+**Resolution, decided 2026-08-03: extend the error message, change no
+behavior.** `check_target_dir_safe` still refuses in exactly the cases it
+refuses in today. When `rechunk.oci` is among the unrecognized entries, the
+message names it as a `--rechunk` build byproduct and tells the user to remove
+it and rerun:
 
-Rejected: adding `out` to `TOOL_GENERATED_ENTRIES`. That constant means
-"entries the tool itself may have written," and `out/` is not one. Adding it
-would make the tool silently delete a build artifact on *every* regeneration,
-not just rechunk ones, widening a deliberately narrow guard to cover something
-outside it.
+```
+--self-contained target <dir> already exists and was not generated by this
+tool (expected the .osfragment-assemble sentinel plus Containerfile,
+manifest.yaml, fragments/, and nothing else). It contains rechunk.oci/, the
+OCI layout a --rechunk build writes into its build context. Remove
+<dir>/rechunk.oci and re-run, or point --self-contained at a new directory.
+```
 
-**This one needs sign-off before implementation planning** — it is a change to
-a safety check outside the flag's obvious blast radius, and the alternative
-(leave it, document the `rm -rf <dir>/out` step) is defensible.
+The distinctive byproduct name is what makes this message possible: the guard
+can say what the entry is because only a rechunk build produces something by
+that name. With a generic `out/` the tool could only guess.
+
+This keeps the guard content-blind, which is the property that makes it
+trustworthy. It reads directory entries by name and authorizes nothing on the
+basis of what any file contains.
+
+**Rejected: adding `rechunk.oci` to `TOOL_GENERATED_ENTRIES`.** That constant
+means "entries the tool itself may have written," and this is not one — the
+builder wrote it, on a later and separate run. Adding it would make the tool
+silently delete an image-sized build artifact on *every* regeneration, not just
+rechunk ones, widening a deliberately narrow guard to cover something outside
+it. A loud refusal the user resolves with one `rm` is the better failure.
 
 ### Documentation wording
 
@@ -416,8 +477,16 @@ a manifest and fragments, call `generate_containerfile`, assert on the emitted
 string.
 
 - **Flag on, bootc base.** Output contains `FROM quay.io/coreos/chunkah:v0.6.0 AS chunkah`,
-  `FROM --after=chunkah oci:out`, `LABEL containers.bootc=1`, `--prune /sysroot/`,
-  `--max-layers 128`, and the base line carries `AS assembled`.
+  `FROM --after=chunkah oci:rechunk.oci`, `LABEL containers.bootc=1`,
+  `--prune /sysroot/`, `--max-layers 128`, and the base line carries
+  `AS assembled`.
+- **The byproduct path agrees on both sides.** The chunker's `--output`
+  argument and the final stage's `FROM` name the same layout — assert
+  `--output oci:/run/src/rechunk.oci` and `FROM --after=chunkah oci:rechunk.oci`
+  together, not each alone. They are one path expressed from two sides of a
+  bind mount, and a change to one without the other yields a Containerfile that
+  builds the chunker and then fails at the final `FROM`. Deriving both from the
+  same constant is what the test pins.
 - **Lint stays in the assembled stage.** `RUN bootc container lint` appears
   *after* the `AS assembled` line and *before* the chunker `FROM`. A
   `contains` assertion alone is not sufficient — it passes just as happily if
@@ -425,9 +494,9 @@ string.
 - **`ARG` placement.** `ARG CHUNKAH_CONFIG_STR` appears before the first `FROM`
   in the output. Assert on index, not presence: a correctly-spelled `ARG` in
   the wrong place is invisible to the chunker stage and produces no error.
-- **Flag off.** None of `chunkah`, `--after`, `oci:out`, `AS assembled` appear,
-  and every other assertion the existing suite makes still holds. This is what
-  keeps the flag genuinely opt-in.
+- **Flag off.** None of `chunkah`, `--after`, `rechunk.oci`, `AS assembled`
+  appear, and every other assertion the existing suite makes still holds. This
+  is what keeps the flag genuinely opt-in.
 - **Non-bootc base plus flag → error.** Empty capability set plus `--rechunk`
   returns `Err`, and the message names the flag and the base image.
 - **`--ocp` plus flag → error.** The refusal is a `main.rs` check, so extract it
@@ -438,9 +507,15 @@ string.
   `quay.io/coreos/chunkah@sha256:…` and the tag form
   `quay.io/coreos/chunkah:v0.6.0` is **absent**. Asserting only that the digest
   form is present would pass on output containing both.
-- **`--self-contained` plus flag.** The chunk phase is emitted, and `oci:out`
-  is not collected by `context_paths_referenced`. This test is what makes the
-  exclusion deliberate rather than incidental.
+- **`--self-contained` plus flag.** The chunk phase is emitted, and
+  `oci:rechunk.oci` is not collected by `context_paths_referenced`. This test
+  is what makes the exclusion deliberate rather than incidental.
+- **The guard names the byproduct.** A directory holding the sentinel, the
+  usual tool-generated entries, and a `rechunk.oci/` is refused by
+  `check_target_dir_safe`, and the error names `rechunk.oci` and the remedy.
+  Pair it with an unchanged-behavior control: a directory holding the sentinel
+  plus some *other* foreign entry is refused with the original message, which
+  is what proves the message branched and the guard did not.
 - **The floor comment is emitted.** The generated phase contains the
   podman/buildah floor line. Cheap, and it is the only thing standing between
   a future cleanup pass and a generated file that no longer documents its own
@@ -462,8 +537,14 @@ Under `### Added`, non-breaking: `--rechunk` emits a chunkah rechunk phase in
 the generated Containerfile; the assembled stage is named `assembled` and the
 chunked output becomes the final image. Note the builder floor
 (podman >= 6.0.0 / buildah >= 1.44.0), the consumer floor (bootc >= 1.1.3),
-the refusal with `--ocp`, and that under `--self-contained` a build now also
-pulls the chunkah image.
+the refusal with `--ocp`, that under `--self-contained` a build now also pulls
+the chunkah image, and that a build leaves a `rechunk.oci/` OCI layout in the
+build context which is safe to delete and is not cleaned up automatically.
+
+Under `### Changed`, if the guard message lands as its own change:
+`check_target_dir_safe` now names `rechunk.oci/` as a `--rechunk` build
+byproduct when it finds one, instead of reporting only that the directory was
+not tool-generated. No change to which directories it accepts.
 
 Nothing is breaking: with the flag off, emission is byte-identical to today.
 Shipped examples and generated documentation samples need no regeneration.
@@ -504,12 +585,12 @@ Shipped examples and generated documentation samples need no regeneration.
 - **Whether the `--ocp` refusal is a plain `bail!` in the assembly arm or an
   extracted predicate.** The tests above want it extracted; the plan confirms
   the shape.
-- **The `check_target_dir_safe` message change** (Wrinkle 2). Recommended, but
-  it touches a safety check outside this flag's blast radius and wants sign-off
-  before it lands.
 
 Settled, recorded here so the plan does not reopen them: the chunker image is
 pinned to `v0.6.0` and never `:latest`; `--max-layers` is 128 and the reason is
 the consumer bootc floor, not packing quality; `bootc container lint` does not
 move and is not duplicated; the builder floor is emitted as a comment and the
-consumer floor is not; and both refusals are errors rather than warnings.
+consumer floor is not; both refusals are errors rather than warnings; the
+byproduct directory is `rechunk.oci`, named from one constant used by both
+emission sites, visible rather than dot-hidden; and `check_target_dir_safe`
+keeps its current behavior exactly, gaining only a branch in its message text.
