@@ -126,8 +126,16 @@ dnf clean all
 # that is rebuilt rather than uninstalled in place never reads. Leaving it, or
 # any of the package-manager residue below, trips `bootc container lint`'s
 # var-tmpfiles and var-log checks.
+#
+# The rhsm and ldconfig paths are the non-obvious half: dnf's
+# subscription-manager plugin recreates /run/rhsm, /var/log/rhsm and
+# /var/lib/rhsm on every invocation, and ldconfig rewrites the aux-cache.
+# This hook is the last dnf caller in a composed image, so whatever it leaves
+# is what ships -- measured 2026-08-05, these four were the only warnings the
+# demo image had left once every earlier step was cleaned.
 rm -rf /var/cache/libdnf5 /var/cache/dnf /var/lib/dnf /var/lib/nvidia \
        /var/tmp/* /var/log/dnf*.log /var/log/hawkey.log \
-       /var/log/nvidia-installer.log
+       /var/log/nvidia-installer.log \
+       /run/rhsm /var/log/rhsm /var/lib/rhsm /var/cache/ldconfig/aux-cache
 
 echo "nvidia-driver-run: driver ${DRIVER_VERSION} installed for ${KVER}"
