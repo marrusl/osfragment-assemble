@@ -44,6 +44,21 @@ pub fn classify_base(_base_image: &str, manifest_override: Option<&BaseType>) ->
     }
 }
 
+/// One line describing a `baseType` override that changes what gets emitted,
+/// or `None` when there is nothing to report.
+///
+/// Only `container` qualifies: it drops the Systemd and Bootc capabilities, so
+/// the preset and lint steps disappear from the output. A declared `bootc` is
+/// the default, so announcing it would describe a change that did not happen.
+pub fn base_type_override_note(manifest_override: Option<&BaseType>) -> Option<&'static str> {
+    match manifest_override {
+        Some(BaseType::Container) => {
+            Some("Base type: container (manifest override); systemd preset and lint steps omitted")
+        }
+        Some(BaseType::Bootc) | None => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -82,5 +97,21 @@ mod tests {
         let caps = classify_base("nonexistent.invalid/no-such-image:1", None);
         assert!(caps.contains(&Capability::Bootc));
         assert!(caps.contains(&Capability::Systemd));
+    }
+
+    #[test]
+    fn container_override_is_worth_reporting() {
+        let note = base_type_override_note(Some(&BaseType::Container)).expect("expected a note");
+        assert!(note.contains("container"));
+    }
+
+    #[test]
+    fn declared_bootc_matches_the_default_so_there_is_nothing_to_report() {
+        assert!(base_type_override_note(Some(&BaseType::Bootc)).is_none());
+    }
+
+    #[test]
+    fn absent_base_type_reports_nothing() {
+        assert!(base_type_override_note(None).is_none());
     }
 }

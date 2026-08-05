@@ -2,7 +2,9 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use std::path::{Path, PathBuf};
 
-use osfragment_assemble::classify::{capabilities_for_base_type, classify_base};
+use osfragment_assemble::classify::{
+    base_type_override_note, capabilities_for_base_type, classify_base,
+};
 use osfragment_assemble::generator::generate_containerfile;
 use osfragment_assemble::inspect::run_inspect;
 use osfragment_assemble::list::run_list;
@@ -126,9 +128,13 @@ fn main() -> Result<()> {
             eprintln!("Validating composition...");
             validate_composition(&manifest, &fragments)?;
 
-            // Classify the base image
-            eprintln!("Classifying base image...");
+            // Classify the base image. Declared-or-default, so there is nothing
+            // to narrate unless the manifest asked for something that changes
+            // what gets emitted.
             let capabilities = classify_base(&manifest.base, manifest.base_type.as_ref());
+            if let Some(note) = base_type_override_note(manifest.base_type.as_ref()) {
+                eprintln!("{note}");
+            }
 
             if let Some(dir) = &cli.self_contained {
                 let containerfile = generate_containerfile(
