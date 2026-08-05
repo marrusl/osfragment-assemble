@@ -5,6 +5,11 @@
 /demo-context/
 /demo-context.tar.gz
 
+# Editor and OS incidentals
+.DS_Store
+._*
+.obsidian/
+
 # Build-time fragment material fetched by a fragment's own fetch script, never
 # committed: the NVIDIA installer is ~300 MB, and the LICENSE copies are
 # extracted from it so they always match the blob that ships alongside them.
