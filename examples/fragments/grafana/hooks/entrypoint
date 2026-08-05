@@ -1,3 +1,33 @@
 #!/bin/bash
 set -euo pipefail
+
+# Grafana ships two bundled datasource plugins (elasticsearch, zipkin) inside
+# the package directory, and the RPM's %post then moves them into the data
+# directory, working around https://github.com/grafana/grafana/issues/123110.
+#
+# That move puts them somewhere the server never looks. The bundled-plugins
+# path is derived from the *homepath*, not from default.paths.data: a server
+# started with the unit file's own arguments logs
+#   Path Plugins [/var/lib/grafana/plugins /usr/share/grafana/data/plugins-bundled]
+# with default.paths.data=/var/lib/grafana. So after %post the directory the
+# server reads is empty, and grafana quietly re-downloads both plugins from
+# grafana.com on first start (verified 2026-08-05 on grafana 13.1.1).
+#
+# Undoing the move fixes both halves of that: the plugins load from disk with
+# no network, and 23 read-only files stop riding in /var, where image mode
+# treats them as a first-boot seed that freezes instead of being versioned
+# with the image -- which `bootc container lint` reports, one warning per file.
+BUNDLED_PACKAGE_DIR=/usr/share/grafana/data/plugins-bundled
+BUNDLED_MOVED_DIR=/var/lib/grafana/plugins-bundled
+
+if [[ -d "$BUNDLED_MOVED_DIR" ]]; then
+    mkdir -p "$BUNDLED_PACKAGE_DIR"
+    cp -a "$BUNDLED_MOVED_DIR"/. "$BUNDLED_PACKAGE_DIR"/
+    rm -rf "$BUNDLED_MOVED_DIR"
+    # %post chowned these to grafana along with the rest of the data
+    # directory; back under /usr they are package content, which the server
+    # only ever reads.
+    chown -R root:root "$BUNDLED_PACKAGE_DIR"
+fi
+
 echo "Grafana fragment: configuration complete"
