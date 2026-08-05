@@ -122,6 +122,16 @@ A single `dnf` invocation inside a hook creates all of these on
 The first four must be removed in the same `RUN`, on top of the dnf caches and
 logs, or the build ships three extra lint warnings.
 
+**Only the last dnf caller's cleanup is visible in the finished image.** These
+paths are recreated by every `dnf` invocation and removed by whichever step
+cleans up after itself, so an earlier step's diligence proves nothing about what
+ships. On the demo composition the generator's package step and the `awscli-zip`
+hook both cleaned up correctly, and the image still carried all four warnings
+because the `nvidia-driver-run` hook — the last step to run `dnf` — did not
+(measured 2026-08-05). **Attribute this residue by walking the intermediate
+layers** (`podman run <layer-id> ls /run/rhsm`), never by reading the hooks:
+reading produced the wrong answer twice.
+
 **The trap:** the NVIDIA experiment recorded the rhsm paths as base artifacts.
 They are not. That run tested against a scaffold base which had itself run `dnf`
 to update the kernel, so the residue was already present before the fragment
