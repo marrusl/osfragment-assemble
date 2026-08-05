@@ -276,7 +276,16 @@ pub fn generate_containerfile(
         writeln!(out, "    && dnf clean all \\")?;
         writeln!(
             out,
-            "    && rm -rf /var/cache/dnf /var/log/dnf* /var/log/hawkey.log /var/lib/dnf/history.sqlite*"
+            "    && rm -rf /var/cache/dnf /var/log/dnf* /var/log/hawkey.log /var/lib/dnf/history.sqlite* \\"
+        )?;
+        // Residue from dnf's plugins rather than from dnf itself: the
+        // subscription-manager plugin writes /run/rhsm, /var/log/rhsm and
+        // /var/lib/rhsm on any invocation, the selinux-policy scriptlets write
+        // /run/selinux-policy, and ldconfig leaves an aux-cache behind. None
+        // exist in a stock bootc base and each one costs a lint warning.
+        writeln!(
+            out,
+            "    && rm -rf /run/rhsm /run/selinux-policy /var/log/rhsm /var/lib/rhsm /var/cache/ldconfig/aux-cache"
         )?;
         if !ocp {
             writeln!(out)?;
@@ -606,6 +615,35 @@ mod tests {
         .unwrap();
         assert!(output.contains("dnf install -y"));
         assert!(output.contains("htop"));
+    }
+
+    #[test]
+    fn package_step_cleans_up_dnf_plugin_residue() {
+        // dnf's subscription-manager plugin and the selinux-policy scriptlets
+        // write outside the dnf cache and log paths, and every one of those
+        // paths costs a `bootc container lint` warning if it ships.
+        let (epel, mf_epel) = make_repos_fragment("epel", "aaa111");
+        let manifest = Manifest {
+            base: "registry.redhat.io/rhel10/rhel-bootc:10.0".into(),
+            base_type: None,
+            source_path: "test-manifest.yaml".into(),
+            fragments: vec![mf_epel],
+        };
+        let output =
+            generate_containerfile(&manifest, &[epel], None, false, false, &bootc_caps()).unwrap();
+
+        for path in [
+            "/run/rhsm",
+            "/run/selinux-policy",
+            "/var/log/rhsm",
+            "/var/lib/rhsm",
+            "/var/cache/ldconfig/aux-cache",
+        ] {
+            assert!(
+                output.contains(path),
+                "package step must clean up {path}, got:\n{output}"
+            );
+        }
     }
 
     #[test]
@@ -2068,7 +2106,8 @@ COPY fragments/epel/tree/etc/pki/rpm-gpg/ /etc/pki/rpm-gpg/
 RUN dnf install -y \
         htop \
     && dnf clean all \
-    && rm -rf /var/cache/dnf /var/log/dnf* /var/log/hawkey.log /var/lib/dnf/history.sqlite*
+    && rm -rf /var/cache/dnf /var/log/dnf* /var/log/hawkey.log /var/lib/dnf/history.sqlite* \
+    && rm -rf /run/rhsm /run/selinux-policy /var/log/rhsm /var/lib/rhsm /var/cache/ldconfig/aux-cache
 
 # --- Config files ---
 COPY fragments/cis/tree/ /

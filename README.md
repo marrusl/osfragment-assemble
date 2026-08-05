@@ -84,7 +84,8 @@ RUN dnf install -y \
         htop \
         tmux \
     && dnf clean all \
-    && rm -rf /var/cache/dnf /var/log/dnf* /var/log/hawkey.log /var/lib/dnf/history.sqlite*
+    && rm -rf /var/cache/dnf /var/log/dnf* /var/log/hawkey.log /var/lib/dnf/history.sqlite* \
+    && rm -rf /run/rhsm /run/selinux-policy /var/log/rhsm /var/lib/rhsm /var/cache/ldconfig/aux-cache
 
 # --- Config files ---
 COPY --from=quay.io/marrusl2/fragments/cis-hardening:2.1 /fragment/tree/ /
