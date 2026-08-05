@@ -77,13 +77,13 @@ Config files land after package installation to ensure fragment-supplied configu
 If `/fragment/hooks/` contains any file, it must contain an executable regular file named `entrypoint`. That file is the only thing osfragment-assemble runs: once, as root, after packages are installed, with no arguments and no environment beyond what the build already provides. Fragment authors are responsible for setting the execute bit and for any required interpreters being available in the image at build time. The generated Containerfile bind-mounts the fragment's `hooks/` directory for the duration of a single `RUN` and invokes the entrypoint through it:
 
 ```dockerfile
-RUN --mount=type=bind,from=<fragment>,source=/fragment/hooks,target=/frag-hooks,bind-propagation=rshared,z \
+RUN --mount=type=bind,from=<fragment>,source=/fragment/hooks,target=/frag-hooks,z \
     /frag-hooks/entrypoint
 ```
 
 The hooks are never copied into the image. A bind mount is not committed to a layer, so no hook bytes remain in the built image and there is nothing to clean up afterwards. Copying the directory and deleting it in a later `RUN` would not achieve this: the delete only writes a whiteout, and the bytes stay recoverable in the `COPY` layer.
 
-Under `--self-contained` the hooks are mounted from the build context instead of the fragment image, as `source=fragments/<name>/hooks`, with no `from=` and no `bind-propagation`.
+Under `--self-contained` the hooks are mounted from the build context instead of the fragment image, as `source=fragments/<name>/hooks`, with no `from=`. The mount is otherwise identical to the form above.
 
 ### Rules
 

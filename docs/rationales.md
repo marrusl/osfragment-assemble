@@ -168,7 +168,7 @@ Between fragments the rule is different and deliberately simple: fragments apply
 Hooks are build inputs, not delivered payload. The tool emits `RUN --mount=type=bind` to execute hooks without copying their bytes into the image:
 
 ```dockerfile
-RUN --mount=type=bind,from=<fragment>,source=/fragment/hooks,target=/frag-hooks,bind-propagation=rshared,z \
+RUN --mount=type=bind,from=<fragment>,source=/fragment/hooks,target=/frag-hooks,z \
     /frag-hooks/entrypoint
 ```
 
