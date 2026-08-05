@@ -190,13 +190,12 @@ List fragments in manifest order (the order they'll appear in the generated Cont
 
 osfragment-assemble classifies the base image to determine which build steps to include in the generated Containerfile. Bootc-compatible images get `systemctl preset-all` and `bootc container lint` steps; plain container images do not.
 
-Classification signals, checked in order:
+Classification is declared-or-default:
 
-1. **Manifest `baseType` field** -- When present (`bootc` or `container`), this is authoritative. No image inspection happens.
-2. **`containers.bootc` image label** -- The tool runs `skopeo inspect` on the base image and checks for the `containers.bootc` label. If the label exists and is non-empty, the image is classified as bootc.
-3. **Default: `bootc`** -- When the label is absent or the lookup fails (network error, authentication failure), the image is classified as bootc. This preserves current behavior and fails loudly (via `bootc container lint`) rather than silently dropping steps.
+1. **Manifest `baseType` field** -- When present (`bootc` or `container`), this is authoritative.
+2. **Default: `bootc`** -- When `baseType` is absent, the base is classified as bootc. A base that is not bootc-compatible fails loudly (via `bootc container lint`) rather than silently dropping steps, so declaring `baseType: container` is the way to say so.
 
-When `skopeo inspect` fails, a warning is printed to stderr with the base image name and the failure reason. Assembly continues with bootc classification.
+**The base image is never inspected.** Classification requires no registry access, so generation works against a base that exists only in local storage, or with no network at all. Earlier versions probed the base's `containers.bootc` label over the network first; that probe was removed because it could not change the answer -- a present label, an absent label, and a failed lookup all classified as bootc, leaving the manifest override as the only path to any other result.
 
 MachineOSConfig output (`--ocp`) always uses the full bootc step set regardless of classification, since MachineOSConfig targets bootc images by definition.
 

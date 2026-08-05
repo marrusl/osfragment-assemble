@@ -19,6 +19,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
+- **Base image `containers.bootc` label probe** - `classify_base` no longer runs `skopeo inspect` against the base; classification is now the manifest's `baseType` when declared, and `bootc` otherwise. The probe could not change the answer: a present label, an absent label, and a failed lookup all classified as `bootc`, so the manifest override was already the only route to any other result, and it skipped the probe entirely. Behaviour is therefore unchanged for every manifest, while generation loses its last base-side network dependency — a base that exists only in local storage now assembles with no registry involved and no stderr warning. `BaseType`, `capabilities_for_base_type`, and the override path are unchanged.
+
 - **`phase` in `fragment.toml`** - The field and its `com.github.marrusl.osfragment.phase` annotation are gone, along with the `repos`-phase content restriction that forbade hooks and non-repo tree paths. It never decided placement: where a file lands has always been determined by its path, so a `config` fragment's repo definitions were hoisted ahead of the package install just like a `repos` fragment's. What it did do was sort fragments by phase weight before emission, which silently overrode manifest order and could decide which fragment won a path collision. Emission is now pure manifest order, matching the documented contract that manifest order is user intent. Stale `phase` keys are ignored rather than rejected, in the TOML and in the annotations, so previously published fragments keep resolving without a rebuild; rebuild them to drop the dead key.
 
 ### Changed
