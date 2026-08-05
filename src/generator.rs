@@ -1210,6 +1210,55 @@ mod tests {
     }
 
     #[test]
+    fn single_fragment_carrying_repos_config_and_hooks_is_placed_by_section() {
+        // Before the phase field was removed, a repos-providing fragment
+        // carrying anything else was rejected outright. Placement now gates
+        // on paths alone, so one fragment's content is split across sections:
+        // repo files hoisted before the package install, the tree copied
+        // after it, and the hook run last. The shipped grafana fragment has
+        // exactly this shape.
+        let (mut mixed, mf_mixed) = make_repos_fragment("mixed", "abc123");
+        mixed
+            .tree_paths
+            .push(PathBuf::from("tree/usr/lib/sysctl.d/99-mixed.conf"));
+        mixed.hook_paths = vec![PathBuf::from("entrypoint")];
+        mixed.fragment.packages.required = vec!["mixed-pkg".into()];
+        let manifest = Manifest {
+            base: "registry.redhat.io/rhel10/rhel-bootc:10.0".into(),
+            base_type: None,
+            source_path: "test-manifest.yaml".into(),
+            fragments: vec![mf_mixed],
+        };
+        let output = generate_containerfile(
+            &manifest,
+            &[mixed],
+            Some("sha256:base123"),
+            false,
+            false,
+            &bootc_caps(),
+        )
+        .unwrap();
+
+        let repo_copy = output
+            .find("COPY --from=frag-mixed /fragment/tree/etc/yum.repos.d/ /etc/yum.repos.d/")
+            .expect("missing repo COPY");
+        let dnf_install = output.find("dnf install -y").expect("missing dnf install");
+        let tree_copy = output
+            .find("COPY --from=frag-mixed /fragment/tree/ /")
+            .expect("missing tree COPY");
+        let hook_mount = output
+            .find("RUN --mount=type=bind,from=frag-mixed")
+            .expect("missing hook RUN --mount");
+        assert!(
+            repo_copy < dnf_install && dnf_install < tree_copy && tree_copy < hook_mount,
+            "one fragment's content must land section by section:\n{}",
+            output
+        );
+        assert!(output.contains("mixed-pkg"));
+        assert!(output.contains(HOOK_INVOCATION));
+    }
+
+    #[test]
     fn overlapping_tree_paths_produce_collision_comment() {
         let shared_path = PathBuf::from("tree/etc/sysctl.d/99-net.conf");
         let (mut frag_a, mf_a) = make_config_fragment("net-tuning", "aaa");

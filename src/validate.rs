@@ -198,4 +198,29 @@ mod tests {
             err
         );
     }
+
+    /// The repos-phase content restriction went with the phase field: a
+    /// fragment providing repos may also carry hooks and non-repo tree
+    /// paths, and composition validation has nothing to say about content
+    /// mix. Placement is the generator's concern, gated on paths.
+    #[test]
+    fn repos_provider_carrying_hooks_and_config_passes_validation() {
+        let mut frag = test_fragment("mixed", vec!["mixed-repo"], vec![]);
+        frag.tree_paths = vec![
+            std::path::PathBuf::from("tree/etc/yum.repos.d/mixed.repo"),
+            std::path::PathBuf::from("tree/usr/lib/sysctl.d/99-mixed.conf"),
+        ];
+        frag.hook_paths = vec![std::path::PathBuf::from("entrypoint")];
+        let manifest = Manifest {
+            base: "registry.redhat.io/rhel10/rhel-bootc:10.0".into(),
+            base_type: None,
+            source_path: "test-manifest.yaml".into(),
+            fragments: vec![crate::manifest::ManifestFragment {
+                image: "quay.io/test/mixed:1.0".into(),
+                packages: vec![],
+                mirror: None,
+            }],
+        };
+        assert!(validate_composition(&manifest, &[frag]).is_ok());
+    }
 }
