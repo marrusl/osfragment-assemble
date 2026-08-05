@@ -21,7 +21,7 @@ pub fn run_inspect(target: &str) -> Result<()> {
         let mut hook_list = Vec::new();
         collect_display_paths(path, "hooks", &mut hook_list)?;
         if !hook_list.is_empty() {
-            validate_hooks_entrypoint(&frag.name, local_entrypoint_mode(path))?;
+            validate_hooks_entrypoint(frag.name.as_str(), local_entrypoint_mode(path))?;
         }
 
         (frag, paths, hook_list)

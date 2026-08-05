@@ -74,7 +74,7 @@ pub fn check_repo_conflicts(fragments: &[LoadedFragment]) -> Result<()> {
             repo_providers
                 .entry(repo_id.clone())
                 .or_default()
-                .push((&f.fragment.name, content_hash));
+                .push((f.fragment.name.as_str(), content_hash));
         }
     }
 
@@ -107,7 +107,7 @@ mod tests {
     fn test_fragment(name: &str, repos: Vec<&str>, conflicts: Vec<&str>) -> LoadedFragment {
         LoadedFragment {
             fragment: crate::fragment::Fragment {
-                name: name.to_string(),
+                name: FragmentName::new(name).expect("test fragment name must be valid"),
                 version: "1.0".into(),
                 description: "test".into(),
                 vendor: None,

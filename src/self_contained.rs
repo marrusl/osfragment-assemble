@@ -401,10 +401,12 @@ mod tests {
     }
 
     fn test_loaded_fragment(name: &str) -> LoadedFragment {
-        use crate::fragment::{Fragment, FragmentConflicts, FragmentPackages, FragmentProvides};
+        use crate::fragment::{
+            Fragment, FragmentConflicts, FragmentName, FragmentPackages, FragmentProvides,
+        };
         LoadedFragment {
             fragment: Fragment {
-                name: name.to_string(),
+                name: FragmentName::new(name).expect("test fragment name must be valid"),
                 version: "1".into(),
                 description: "test".into(),
                 vendor: None,
@@ -1304,6 +1306,52 @@ mod tests {
             err.to_string().contains("is a symlink"),
             "error must name the symlink case, got: {err}"
         );
+    }
+
+    /// Every fragment directory this function creates must be a direct child
+    /// of `fragments/`. That holds because `fragment.name` is a
+    /// `FragmentName`, whose grammar admits no separator and no `..`, so the
+    /// join below cannot leave the staged tree. Before that type existed, a
+    /// fragment named `../../escape` materialized into a sibling of the
+    /// output directory entirely.
+    ///
+    /// The escape is now unrepresentable rather than merely unreached, so
+    /// this test states the property the type is carrying; the rejection
+    /// itself is pinned in `src/fragment.rs`.
+    #[test]
+    fn materialized_fragment_dirs_stay_inside_the_output_tree() {
+        let workdir = tempfile::tempdir().unwrap();
+        let dir = workdir.path().join("ctx");
+        let manifest_path = workdir.path().join("osfragment-assemble.yaml");
+        fs::write(&manifest_path, "base: example\n").unwrap();
+
+        let fragments = vec![test_loaded_fragment("epel"), test_loaded_fragment("cis")];
+        let staged_dests = std::cell::RefCell::new(Vec::new());
+        write_output_with(
+            &dir,
+            &manifest_path,
+            "FROM example\n",
+            &fragments,
+            |_r, d| {
+                staged_dests.borrow_mut().push(d.to_path_buf());
+                fs::create_dir_all(d).map_err(Into::into)
+            },
+        )
+        .unwrap();
+
+        for dest in staged_dests.borrow().iter() {
+            assert_eq!(
+                dest.parent().and_then(Path::file_name),
+                Some(std::ffi::OsStr::new("fragments")),
+                "{} is not a direct child of fragments/",
+                dest.display()
+            );
+            assert!(
+                !dest.to_string_lossy().contains(".."),
+                "{} contains a traversal component",
+                dest.display()
+            );
+        }
     }
 
     #[test]

@@ -3,7 +3,7 @@ use flate2::read::GzDecoder;
 use std::path::{Path, PathBuf};
 
 use crate::fragment::{
-    is_repo_path, parse_fragment_toml, Fragment, FragmentConflicts, FragmentPackages,
+    is_repo_path, parse_fragment_toml, Fragment, FragmentConflicts, FragmentName, FragmentPackages,
     FragmentProvides,
 };
 use crate::generator::split_image_ref;
@@ -108,7 +108,22 @@ pub fn validate_hooks_entrypoint(fragment_name: &str, entrypoint_mode: Option<u3
 
 /// Shared validation for tar entries across all extraction functions.
 /// Rejects path traversal, absolute paths outside /fragment/, and symlinks/hardlinks.
-fn validate_tar_entry(path_str: &str, entry_type: tar::EntryType) -> Result<()> {
+///
+/// Returns the entry's path in the one canonical form every matcher in this
+/// module compares against: relative, with a leading `/` and any `.`
+/// component removed. Tar archives legitimately carry the same member as
+/// `fragment/hooks/entrypoint`, `./fragment/hooks/entrypoint`, or
+/// `/fragment/hooks/entrypoint` depending on the builder that produced the
+/// layer, and matching the raw path saw only the first: a fragment whose
+/// hooks arrived in either other form had them silently dropped from
+/// detection, which skipped the entrypoint check while the files still
+/// landed in the built image.
+///
+/// The checks run on the raw path, before normalization, so stripping the
+/// leading `/` here cannot defeat the absolute-path check above it.
+/// Returning the normalized path rather than `()` is what keeps callers
+/// from reaching for the raw one by accident.
+fn validate_tar_entry(path_str: &str, entry_type: tar::EntryType) -> Result<PathBuf> {
     if path_str.contains("..") {
         bail!("path traversal detected in fragment layer: {}", path_str);
     }
@@ -124,7 +139,12 @@ fn validate_tar_entry(path_str: &str, entry_type: tar::EntryType) -> Result<()> 
             path_str
         );
     }
-    Ok(())
+    // `..` is already rejected above, so keeping only `Normal` components
+    // drops exactly the leading `.` that `Components` preserves.
+    Ok(Path::new(path_str.trim_start_matches('/'))
+        .components()
+        .filter(|c| matches!(c, std::path::Component::Normal(_)))
+        .collect())
 }
 
 pub fn extract_fragment_toml_from_bytes(compressed: &[u8]) -> Result<String> {
@@ -135,12 +155,10 @@ pub fn extract_fragment_toml_from_bytes(compressed: &[u8]) -> Result<String> {
 
     for entry_result in archive.entries().context("reading tar entries")? {
         let mut entry = entry_result.context("reading tar entry")?;
-        let path = entry.path().context("reading entry path")?;
-        let path_str = path.to_string_lossy();
+        let path = entry.path().context("reading entry path")?.to_path_buf();
+        let path = validate_tar_entry(&path.to_string_lossy(), entry.header().entry_type())?;
 
-        validate_tar_entry(&path_str, entry.header().entry_type())?;
-
-        if path_str == FRAGMENT_TOML_PATH {
+        if path == Path::new(FRAGMENT_TOML_PATH) {
             if found.is_some() {
                 bail!("duplicate fragment.toml entries in layer");
             }
@@ -179,15 +197,13 @@ fn extract_tree_paths_from_bytes(compressed: &[u8]) -> Result<(Vec<PathBuf>, Opt
 
     for entry_result in archive.entries()? {
         let entry = entry_result?;
-        let path = entry.path()?;
-        let path_str = path.to_string_lossy();
-
-        validate_tar_entry(&path_str, entry.header().entry_type())?;
+        let path = entry.path()?.to_path_buf();
+        let path = validate_tar_entry(&path.to_string_lossy(), entry.header().entry_type())?;
         if entry.header().entry_type().is_file() {
-            if path_str == HOOKS_ENTRYPOINT_TAR_PATH {
+            if path == Path::new(HOOKS_ENTRYPOINT_TAR_PATH) {
                 entrypoint_mode = Some(entry.header().mode()?);
             }
-            paths.push(path.to_path_buf());
+            paths.push(path);
         }
     }
     Ok((paths, entrypoint_mode))
@@ -202,15 +218,12 @@ fn extract_repo_file_contents_from_bytes(
 
     for entry_result in archive.entries()? {
         let mut entry = entry_result?;
-        let path = entry.path()?;
-        let path_str = path.to_string_lossy().to_string();
-
-        validate_tar_entry(&path_str, entry.header().entry_type())?;
+        let path = entry.path()?.to_path_buf();
+        let path = validate_tar_entry(&path.to_string_lossy(), entry.header().entry_type())?;
+        let path_str = path.to_string_lossy();
 
         if path_str.contains("yum.repos.d/") && path_str.ends_with(".repo") {
-            let filename = Path::new(&path_str)
-                .file_name()
-                .map(|f| f.to_string_lossy().to_string());
+            let filename = path.file_name().map(|f| f.to_string_lossy().to_string());
             if let Some(filename) = filename {
                 let mut content = String::new();
                 use std::io::Read;
@@ -242,9 +255,7 @@ pub(crate) fn extract_fragment_payload_to_disk(compressed: &[u8], dest_dir: &Pat
     for entry_result in archive.entries().context("reading tar entries")? {
         let mut entry = entry_result.context("reading tar entry")?;
         let path = entry.path().context("reading entry path")?.to_path_buf();
-        let path_str = path.to_string_lossy().to_string();
-
-        validate_tar_entry(&path_str, entry.header().entry_type())?;
+        let path = validate_tar_entry(&path.to_string_lossy(), entry.header().entry_type())?;
 
         let entry_type = entry.header().entry_type();
         if !entry_type.is_file() && !entry_type.is_dir() {
@@ -313,8 +324,12 @@ fn try_annotation_fast_path(image_ref: &str) -> Result<Option<Fragment>> {
 }
 
 /// Map an OCI manifest `annotations` object onto a `Fragment`.
-/// Returns `None` when a required key is missing; the caller falls back
-/// to layer extraction.
+/// Returns `None` when a required key is missing or when the annotated name
+/// does not satisfy the fragment-name grammar; the caller falls back to
+/// layer extraction. Falling back rather than failing is deliberate: the
+/// annotations are a cache of the in-layer `fragment.toml`, which is
+/// authoritative, so a bad annotation costs a layer pull and then either
+/// resolves against the real name or is rejected there.
 fn fragment_from_annotations(annotations: &serde_json::Value) -> Option<Fragment> {
     // Check for required annotation fields
     let name = annotations
@@ -351,7 +366,7 @@ fn fragment_from_annotations(annotations: &serde_json::Value) -> Option<Fragment
         .map(String::from);
 
     Some(Fragment {
-        name: name.to_string(),
+        name: FragmentName::new(name).ok()?,
         version: version.to_string(),
         description: description.to_string(),
         vendor,
@@ -484,7 +499,7 @@ fn fragment_from_layers(layer_bytes_list: &[Vec<u8>]) -> Result<LayeredMetadata>
     all_hook_paths.sort();
 
     if !all_hook_paths.is_empty() {
-        validate_hooks_entrypoint(&fragment.name, entrypoint_mode)?;
+        validate_hooks_entrypoint(fragment.name.as_str(), entrypoint_mode)?;
     }
 
     Ok(LayeredMetadata {
@@ -622,6 +637,13 @@ mod layer_tests {
         entry_type: tar::EntryType,
     }
 
+    /// Writes each entry's path verbatim into the raw header name field
+    /// rather than going through `tar::Header::set_path`. `set_path` is not
+    /// path-transparent: it normalizes a leading `./` away and rejects both
+    /// `..` components and absolute paths. Real layers carry all three forms,
+    /// so a fixture built through `set_path` cannot express them, and a test
+    /// written against one silently asserts about the normalized path instead
+    /// of the one it names.
     fn create_test_tarball_with_modes(entries: &[RawEntry]) -> Vec<u8> {
         let mut buf = Vec::new();
         {
@@ -630,13 +652,11 @@ mod layer_tests {
             for entry in entries {
                 let mut header = tar::Header::new_gnu();
                 header.set_entry_type(entry.entry_type);
-                if header.set_path(entry.path).is_err() {
-                    let name = &mut header.as_old_mut().name;
-                    name.fill(0);
-                    let path_bytes = entry.path.as_bytes();
-                    let len = path_bytes.len().min(name.len());
-                    name[..len].copy_from_slice(&path_bytes[..len]);
-                }
+                let name = &mut header.as_old_mut().name;
+                name.fill(0);
+                let path_bytes = entry.path.as_bytes();
+                let len = path_bytes.len().min(name.len());
+                name[..len].copy_from_slice(&path_bytes[..len]);
                 header.set_size(entry.data.len() as u64);
                 header.set_mode(entry.mode);
                 header.set_cksum();
@@ -757,6 +777,30 @@ description = "test fragment"
                     err
                 );
             }
+        }
+    }
+
+    /// The canonical form `validate_tar_entry` hands every matcher. Pinned
+    /// directly, so a change to the normalization shows up here rather than
+    /// only as a downstream detection failure.
+    #[test]
+    fn validate_tar_entry_returns_a_canonical_relative_path() {
+        let cases = [
+            ("fragment/hooks/entrypoint", "fragment/hooks/entrypoint"),
+            ("./fragment/hooks/entrypoint", "fragment/hooks/entrypoint"),
+            ("/fragment/hooks/entrypoint", "fragment/hooks/entrypoint"),
+            ("./fragment/tree/etc/app.conf", "fragment/tree/etc/app.conf"),
+            ("/fragment/tree/", "fragment/tree"),
+            ("fragment/./hooks/entrypoint", "fragment/hooks/entrypoint"),
+        ];
+        for (raw, expected) in cases {
+            let normalized = validate_tar_entry(raw, tar::EntryType::Regular)
+                .unwrap_or_else(|e| panic!("{raw} must validate: {e}"));
+            assert_eq!(
+                normalized,
+                PathBuf::from(expected),
+                "{raw} normalized wrong"
+            );
         }
     }
 
@@ -1042,6 +1086,160 @@ description = "test fragment"
         );
     }
 
+    /// The three forms a tar archive can carry the same member as. A layer
+    /// built by one tool arrives unprefixed, another emits `./`, and
+    /// `validate_tar_entry` has always permitted `/fragment/...` outright.
+    const LAYER_PATH_PREFIXES: [&str; 3] = ["", "./", "/"];
+
+    /// Hook detection must not depend on which of the three forms the layer
+    /// uses. Before normalization, `./` and `/` prefixed hooks were dropped
+    /// from `hook_paths` entirely, so the entrypoint contract was never
+    /// evaluated: a fragment with a non-executable entrypoint (or none at
+    /// all) loaded clean while its hooks still landed in the built image.
+    #[test]
+    fn hook_detection_is_prefix_independent() {
+        for prefix in LAYER_PATH_PREFIXES {
+            let entrypoint = format!("{prefix}fragment/hooks/entrypoint");
+            let helper = format!("{prefix}fragment/hooks/lib/helper.sh");
+
+            // A non-executable entrypoint must be rejected in every form.
+            let layers = fragment_layers(vec![hook_entry(&entrypoint, 0o644)]);
+            let err = fragment_from_layers(&layers)
+                .expect_err(&format!("prefix {prefix:?}: must be rejected"))
+                .to_string();
+            assert!(
+                err.contains("hooks/entrypoint is not executable"),
+                "prefix {prefix:?}: wrong error: {err}"
+            );
+
+            // Hooks with no entrypoint at all must be rejected in every form.
+            let layers = fragment_layers(vec![hook_entry(&helper, 0o644)]);
+            let err = fragment_from_layers(&layers)
+                .expect_err(&format!("prefix {prefix:?}: must be rejected"))
+                .to_string();
+            assert!(
+                err.contains("no executable hooks/entrypoint"),
+                "prefix {prefix:?}: wrong error: {err}"
+            );
+
+            // A well-formed fragment must load, with hooks listed under the
+            // same canonical names regardless of the form they arrived in.
+            let layers = fragment_layers(vec![
+                hook_entry(&entrypoint, 0o755),
+                hook_entry(&helper, 0o644),
+            ]);
+            let metadata = fragment_from_layers(&layers)
+                .unwrap_or_else(|e| panic!("prefix {prefix:?}: must load: {e}"));
+            let names: Vec<String> = metadata
+                .hook_paths
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect();
+            assert_eq!(
+                names,
+                vec!["entrypoint", "lib/helper.sh"],
+                "prefix {prefix:?}: hook paths must be canonical"
+            );
+        }
+    }
+
+    /// `fragment.toml` discovery and tree-path collection go through the same
+    /// matcher, so they carry the same prefix sensitivity. A `/`-prefixed
+    /// layer previously failed with "no layer containing fragment/fragment.toml
+    /// found in image" even though the file was right there.
+    #[test]
+    fn toml_and_tree_paths_are_prefix_independent() {
+        for prefix in LAYER_PATH_PREFIXES {
+            let toml_path = format!("{prefix}fragment/fragment.toml");
+            let conf_path = format!("{prefix}fragment/tree/etc/app.conf");
+            let repo_path = format!("{prefix}fragment/tree/etc/yum.repos.d/epel.repo");
+            let layers = vec![create_test_tarball_with_modes(&[
+                RawEntry {
+                    path: &toml_path,
+                    data: TEST_FRAGMENT_TOML,
+                    mode: 0o644,
+                    entry_type: tar::EntryType::Regular,
+                },
+                RawEntry {
+                    path: &conf_path,
+                    data: b"key=value\n",
+                    mode: 0o644,
+                    entry_type: tar::EntryType::Regular,
+                },
+                RawEntry {
+                    path: &repo_path,
+                    data: b"[epel]\nbaseurl=https://example.com/epel/\n",
+                    mode: 0o644,
+                    entry_type: tar::EntryType::Regular,
+                },
+            ])];
+
+            let metadata = fragment_from_layers(&layers)
+                .unwrap_or_else(|e| panic!("prefix {prefix:?}: must load: {e}"));
+            assert_eq!(metadata.fragment.name, "nvidia-driver");
+
+            let mut tree: Vec<String> = metadata
+                .tree_paths
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect();
+            tree.sort();
+            // fragment.toml rides along in tree_paths (consumers filter on
+            // the `tree/` prefix); the point here is that every entry is
+            // remapped to the same canonical form whatever the layer used.
+            assert_eq!(
+                tree,
+                vec![
+                    "fragment.toml",
+                    "tree/etc/app.conf",
+                    "tree/etc/yum.repos.d/epel.repo"
+                ],
+                "prefix {prefix:?}: tree paths must be canonical"
+            );
+            assert!(
+                metadata.repo_file_contents.contains_key("epel.repo"),
+                "prefix {prefix:?}: repo file contents must be collected"
+            );
+        }
+    }
+
+    /// Materialization shares the matcher, so a prefixed layer previously
+    /// wrote nothing to disk at all: every entry fell through the
+    /// `strip_prefix` chain to `continue`.
+    #[test]
+    fn payload_extraction_is_prefix_independent() {
+        for prefix in LAYER_PATH_PREFIXES {
+            let conf_path = format!("{prefix}fragment/tree/etc/app.conf");
+            let hook_path = format!("{prefix}fragment/hooks/entrypoint");
+            let tarball = create_test_tarball_with_modes(&[
+                RawEntry {
+                    path: &conf_path,
+                    data: b"key=value\n",
+                    mode: 0o644,
+                    entry_type: tar::EntryType::Regular,
+                },
+                RawEntry {
+                    path: &hook_path,
+                    data: b"#!/bin/sh\necho hook\n",
+                    mode: 0o755,
+                    entry_type: tar::EntryType::Regular,
+                },
+            ]);
+
+            let workdir = tempfile::tempdir().unwrap();
+            extract_fragment_payload_to_disk(&tarball, workdir.path()).unwrap();
+            assert_eq!(
+                std::fs::read(workdir.path().join("tree/etc/app.conf")).unwrap(),
+                b"key=value\n",
+                "prefix {prefix:?}: tree file must be materialized"
+            );
+            assert!(
+                workdir.path().join("hooks/entrypoint").exists(),
+                "prefix {prefix:?}: hook must be materialized"
+            );
+        }
+    }
+
     #[test]
     fn annotations_populate_fragment_from_project_namespace() {
         let annotations = serde_json::json!({
@@ -1076,6 +1274,24 @@ description = "test fragment"
         let frag = fragment_from_annotations(&annotations)
             .expect("stale phase key must not block resolution");
         assert_eq!(frag.name, "epel");
+    }
+
+    /// The annotation fast path is the second place a name enters the tool,
+    /// and it bypasses `fragment.toml` entirely. A name that fails the
+    /// grammar must not satisfy it: the caller then falls back to layer
+    /// extraction, where the authoritative name is parsed and validated.
+    #[test]
+    fn path_unsafe_annotation_name_does_not_satisfy_fast_path() {
+        for bad in ["../../escape", "a/b", "", "EPEL"] {
+            let annotations = serde_json::json!({
+                "com.github.marrusl.osfragment.name": bad,
+                "com.github.marrusl.osfragment.version": "1.0",
+            });
+            assert!(
+                fragment_from_annotations(&annotations).is_none(),
+                "annotated name '{bad}' must not satisfy the fast path"
+            );
+        }
     }
 
     #[test]
