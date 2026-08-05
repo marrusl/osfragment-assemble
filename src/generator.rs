@@ -1865,7 +1865,7 @@ mod tests {
         let standalone_caps = empty_caps();
         let standalone = generate_containerfile(
             &manifest,
-            &[epel.clone()],
+            std::slice::from_ref(&epel),
             None,
             false,
             false,
