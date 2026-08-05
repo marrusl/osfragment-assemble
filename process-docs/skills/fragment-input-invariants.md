@@ -19,8 +19,13 @@ Lowercase ASCII letters and digits, optionally separated by `.`, `-`, or `_`,
 starting and ending with a letter or digit.
 
 **Where it is enforced:** `FragmentName::new`, in `src/fragment.rs`. The inner
-`String` is private to that module, so `FragmentName` cannot be constructed
-anywhere else. There are exactly two construction sites:
+`String` is private, so `FragmentName` cannot be constructed outside
+`src/fragment.rs`. Rust field privacy is module-scoped, not type-scoped: every
+use site (`loader.rs`, `generator.rs`, `self_contained.rs`, `validate.rs`,
+`inspect.rs`) is in another module and so holding one is proof the grammar ran,
+but code added inside `src/fragment.rs`, including its `mod tests`, can write
+`FragmentName("../../escape".to_string())` and the compiler will accept it. Do
+not add a bypass constructor there. There are exactly two construction sites:
 
 - `parse_fragment_toml` — the authoritative path, returns `Err`.
 - `fragment_from_annotations` in `src/loader.rs` — the OCI annotation fast
@@ -72,6 +77,16 @@ absolute-path-outside-`/fragment/` checks run on the **raw** path, before
 normalization. Stripping the leading `/` first would defeat the absolute-path
 check.
 
+A tar member name is arbitrary bytes on Unix, so `validate_tar_entry` takes a
+`&Path` and rejects a name that is not valid UTF-8 rather than converting it
+lossily. The returned path has to be a faithful rendering of the entry name,
+not merely a plausible one, because `extract_fragment_payload_to_disk` derives
+the file it writes from it: under a lossy conversion two entries differing only
+in invalid bytes collapse onto one destination with last-write-wins, and every
+other such name materializes with replacement characters. Both are silent.
+Rejecting is the same reject-never-sanitize posture the rest of this module
+takes.
+
 **What went wrong before this existed:** every matcher compared against the
 literal `fragment/` prefix, so only the unprefixed form matched, even though
 `validate_tar_entry` had always explicitly permitted `/fragment/...`. A
@@ -93,7 +108,31 @@ wrong reason. This cost a full debugging cycle: the first reproduction attempt
 
 `create_test_tarball_with_modes` in `src/loader.rs` therefore writes every
 entry's path verbatim into the raw header name field and never calls
-`set_path`. Keep it that way, and if you add another fixture builder, do the
-same. When writing a test for a path-matching bug, assert on what the archive
-actually carries (read the entries back and print them) before trusting that
-the fixture says what you wrote.
+`set_path`. It is the module's **only** fixture builder: `create_test_tarball`
+is a thin wrapper over it for the regular-file-at-0o644 case. When writing a
+test for a path-matching bug, assert on what the archive actually carries (read
+the entries back and print them) before trusting that the fixture says what you
+wrote.
+
+**Do not add a second fixture builder, and do not let this one start
+normalizing.** This codebase has produced that defect twice. A builder that
+silently rewrites its input yields tests that pass while proving nothing, and
+the failure is invisible: the test is green, names the case it means to cover,
+and does not cover it. The second occurrence was worse than the first, because
+that builder called `set_path` and fell back to a raw write only when
+`set_path` **errored**. `set_path` errors on `..` and on absolute paths but
+succeeds on `./x` and `x/./y`, quietly normalizing both. So the traversal tests
+looked honest while any assertion about a `./` prefix was vacuous. Partial
+transparency is worse than none, because it survives a spot check.
+
+Two ways a fixture lies, both now closed:
+
+- **Normalization.** Closed by never calling `set_path`.
+- **Truncation.** The old-style ustar header name field is 100 bytes
+  (`USTAR_NAME_FIELD_BYTES`). A raw write past it is truncated with no error
+  from the header, so the builder asserts instead. Nothing in the suite is
+  close today, but a realistic path is not far off:
+  `fragment/tree/usr/lib/systemd/system/some.service.d/override.conf` is
+  already most of the budget. A test that crossed the line would assert about
+  the truncated path, most likely asserting a rejection that fired for the
+  wrong reason.

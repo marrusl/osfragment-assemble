@@ -107,7 +107,8 @@ pub fn validate_hooks_entrypoint(fragment_name: &str, entrypoint_mode: Option<u3
 }
 
 /// Shared validation for tar entries across all extraction functions.
-/// Rejects path traversal, absolute paths outside /fragment/, and symlinks/hardlinks.
+/// Rejects path traversal, absolute paths outside /fragment/, non-UTF-8
+/// entry names, and symlinks/hardlinks.
 ///
 /// Returns the entry's path in the one canonical form every matcher in this
 /// module compares against: relative, with a leading `/` and any `.`
@@ -119,11 +120,27 @@ pub fn validate_hooks_entrypoint(fragment_name: &str, entrypoint_mode: Option<u3
 /// detection, which skipped the entrypoint check while the files still
 /// landed in the built image.
 ///
+/// The returned path is a faithful rendering of the entry name, not merely
+/// a plausible one, which is why a non-UTF-8 name is rejected rather than
+/// converted lossily. `extract_fragment_payload_to_disk` derives the file
+/// it writes from this value: under a lossy conversion two entries
+/// differing only in invalid bytes would land on one destination, last
+/// write winning, and every other such name would materialize with
+/// replacement characters. Rejecting matches how this function already
+/// treats `..` and absolute paths, and keeps what the fragment author wrote
+/// the same as what lands on disk.
+///
 /// The checks run on the raw path, before normalization, so stripping the
 /// leading `/` here cannot defeat the absolute-path check above it.
 /// Returning the normalized path rather than `()` is what keeps callers
 /// from reaching for the raw one by accident.
-fn validate_tar_entry(path_str: &str, entry_type: tar::EntryType) -> Result<PathBuf> {
+fn validate_tar_entry(path: &Path, entry_type: tar::EntryType) -> Result<PathBuf> {
+    let path_str = path.to_str().ok_or_else(|| {
+        anyhow::anyhow!(
+            "non-UTF-8 entry name rejected in fragment layer: {}",
+            path.to_string_lossy().escape_debug()
+        )
+    })?;
     if path_str.contains("..") {
         bail!("path traversal detected in fragment layer: {}", path_str);
     }
@@ -156,7 +173,7 @@ pub fn extract_fragment_toml_from_bytes(compressed: &[u8]) -> Result<String> {
     for entry_result in archive.entries().context("reading tar entries")? {
         let mut entry = entry_result.context("reading tar entry")?;
         let path = entry.path().context("reading entry path")?.to_path_buf();
-        let path = validate_tar_entry(&path.to_string_lossy(), entry.header().entry_type())?;
+        let path = validate_tar_entry(&path, entry.header().entry_type())?;
 
         if path == Path::new(FRAGMENT_TOML_PATH) {
             if found.is_some() {
@@ -198,7 +215,7 @@ fn extract_tree_paths_from_bytes(compressed: &[u8]) -> Result<(Vec<PathBuf>, Opt
     for entry_result in archive.entries()? {
         let entry = entry_result?;
         let path = entry.path()?.to_path_buf();
-        let path = validate_tar_entry(&path.to_string_lossy(), entry.header().entry_type())?;
+        let path = validate_tar_entry(&path, entry.header().entry_type())?;
         if entry.header().entry_type().is_file() {
             if path == Path::new(HOOKS_ENTRYPOINT_TAR_PATH) {
                 entrypoint_mode = Some(entry.header().mode()?);
@@ -219,7 +236,7 @@ fn extract_repo_file_contents_from_bytes(
     for entry_result in archive.entries()? {
         let mut entry = entry_result?;
         let path = entry.path()?.to_path_buf();
-        let path = validate_tar_entry(&path.to_string_lossy(), entry.header().entry_type())?;
+        let path = validate_tar_entry(&path, entry.header().entry_type())?;
         let path_str = path.to_string_lossy();
 
         if path_str.contains("yum.repos.d/") && path_str.ends_with(".repo") {
@@ -255,7 +272,7 @@ pub(crate) fn extract_fragment_payload_to_disk(compressed: &[u8], dest_dir: &Pat
     for entry_result in archive.entries().context("reading tar entries")? {
         let mut entry = entry_result.context("reading tar entry")?;
         let path = entry.path().context("reading entry path")?.to_path_buf();
-        let path = validate_tar_entry(&path.to_string_lossy(), entry.header().entry_type())?;
+        let path = validate_tar_entry(&path, entry.header().entry_type())?;
 
         let entry_type = entry.header().entry_type();
         if !entry_type.is_file() && !entry_type.is_dir() {
@@ -600,42 +617,38 @@ mod tests {
 mod layer_tests {
     use super::*;
 
+    /// Regular files at 0o644, the default every path-only fixture wants.
+    /// Delegates so there is exactly one fixture builder, and therefore
+    /// exactly one path-transparency guarantee, in this module.
     fn create_test_tarball(entries: &[(&str, &[u8])]) -> Vec<u8> {
-        let mut buf = Vec::new();
-        {
-            let enc = flate2::write::GzEncoder::new(&mut buf, flate2::Compression::default());
-            let mut tar = tar::Builder::new(enc);
-            for (path, data) in entries {
-                let mut header = tar::Header::new_gnu();
-                // tar::Header::set_path rejects paths with ".." components.
-                // For testing malicious tarballs, write the path directly
-                // into the raw header name field to bypass that validation.
-                if header.set_path(path).is_err() {
-                    let name = &mut header.as_old_mut().name;
-                    name.fill(0);
-                    let path_bytes = path.as_bytes();
-                    let len = path_bytes.len().min(name.len());
-                    name[..len].copy_from_slice(&path_bytes[..len]);
-                }
-                header.set_size(data.len() as u64);
-                header.set_mode(0o644);
-                header.set_cksum();
-                tar.append(&header, &data[..]).unwrap();
-            }
-            tar.into_inner().unwrap().finish().unwrap();
-        }
-        buf
+        let raw: Vec<RawEntry> = entries
+            .iter()
+            .map(|&(path, data)| RawEntry {
+                path: path.as_bytes(),
+                data,
+                mode: 0o644,
+                entry_type: tar::EntryType::Regular,
+            })
+            .collect();
+        create_test_tarball_with_modes(&raw)
     }
 
-    /// A tar entry with an explicit mode and entry type, for tests that
-    /// need directory entries or non-default permission bits —
-    /// `create_test_tarball` above always writes regular files at 0o644.
+    /// A tar entry with an explicit mode and entry type.
+    ///
+    /// `path` is bytes rather than `&str` because a tar member name is
+    /// arbitrary bytes on Unix, and the rejection of non-UTF-8 names is
+    /// only testable by a fixture that can write one.
     struct RawEntry<'a> {
-        path: &'a str,
+        path: &'a [u8],
         data: &'a [u8],
         mode: u32,
         entry_type: tar::EntryType,
     }
+
+    /// The old-style ustar header's name field. A raw write past this length
+    /// is truncated with no error from the header, so the builder below
+    /// refuses rather than letting a test assert about a truncated path.
+    const USTAR_NAME_FIELD_BYTES: usize = 100;
 
     /// Writes each entry's path verbatim into the raw header name field
     /// rather than going through `tar::Header::set_path`. `set_path` is not
@@ -650,13 +663,20 @@ mod layer_tests {
             let enc = flate2::write::GzEncoder::new(&mut buf, flate2::Compression::default());
             let mut tar = tar::Builder::new(enc);
             for entry in entries {
+                assert!(
+                    entry.path.len() <= USTAR_NAME_FIELD_BYTES,
+                    "fixture path {:?} is {} bytes; the ustar header name field holds {}. \
+                     A longer path is silently truncated by this raw write, so the test \
+                     would assert about the truncated path rather than the one it names.",
+                    String::from_utf8_lossy(entry.path),
+                    entry.path.len(),
+                    USTAR_NAME_FIELD_BYTES
+                );
                 let mut header = tar::Header::new_gnu();
                 header.set_entry_type(entry.entry_type);
                 let name = &mut header.as_old_mut().name;
                 name.fill(0);
-                let path_bytes = entry.path.as_bytes();
-                let len = path_bytes.len().min(name.len());
-                name[..len].copy_from_slice(&path_bytes[..len]);
+                name[..entry.path.len()].copy_from_slice(entry.path);
                 header.set_size(entry.data.len() as u64);
                 header.set_mode(entry.mode);
                 header.set_cksum();
@@ -759,7 +779,7 @@ description = "test fragment"
             ),
         ];
         for (path, entry_type, should_pass, expected_err) in &cases {
-            let result = validate_tar_entry(path, *entry_type);
+            let result = validate_tar_entry(Path::new(path), *entry_type);
             if *should_pass {
                 assert!(
                     result.is_ok(),
@@ -794,7 +814,7 @@ description = "test fragment"
             ("fragment/./hooks/entrypoint", "fragment/hooks/entrypoint"),
         ];
         for (raw, expected) in cases {
-            let normalized = validate_tar_entry(raw, tar::EntryType::Regular)
+            let normalized = validate_tar_entry(Path::new(raw), tar::EntryType::Regular)
                 .unwrap_or_else(|e| panic!("{raw} must validate: {e}"));
             assert_eq!(
                 normalized,
@@ -873,10 +893,44 @@ description = "test fragment"
         assert!(result.unwrap_err().to_string().contains("traversal"));
     }
 
+    /// A tar member name is arbitrary bytes on Unix. Deriving the write
+    /// destination from a lossy UTF-8 conversion collapsed two distinct
+    /// entries onto one path, last write winning, and materialized any other
+    /// non-UTF-8 name with replacement characters. Both are silent. Rejecting
+    /// keeps the guarantee that what the fragment author wrote is what lands
+    /// on disk.
+    #[test]
+    fn non_utf8_entry_names_are_rejected_rather_than_materialized_lossily() {
+        // Two distinct names differing only in bytes that are not valid
+        // UTF-8. A lossy conversion maps both to `.../a<U+FFFD>.conf`.
+        let tarball = create_test_tarball_with_modes(&[
+            RawEntry {
+                path: b"fragment/tree/etc/a\xff.conf",
+                data: b"first",
+                mode: 0o644,
+                entry_type: tar::EntryType::Regular,
+            },
+            RawEntry {
+                path: b"fragment/tree/etc/a\xfe.conf",
+                data: b"second",
+                mode: 0o644,
+                entry_type: tar::EntryType::Regular,
+            },
+        ]);
+
+        let workdir = tempfile::tempdir().unwrap();
+        let err = extract_fragment_payload_to_disk(&tarball, workdir.path())
+            .expect_err("a non-UTF-8 entry name must be rejected, not mangled onto disk");
+        assert!(
+            err.to_string().contains("non-UTF-8"),
+            "wrong error for a non-UTF-8 entry name: {err}"
+        );
+    }
+
     #[test]
     fn empty_tree_directory_and_directory_mode_survive_extraction() {
         let tarball = create_test_tarball_with_modes(&[RawEntry {
-            path: "fragment/tree/etc/empty-dir",
+            path: b"fragment/tree/etc/empty-dir",
             data: b"",
             mode: 0o700,
             entry_type: tar::EntryType::Directory,
@@ -910,7 +964,7 @@ description = "test fragment"
     /// for driving `fragment_from_layers` without a registry.
     fn fragment_layers(entries: Vec<RawEntry>) -> Vec<Vec<u8>> {
         let mut all = vec![RawEntry {
-            path: FRAGMENT_TOML_PATH,
+            path: FRAGMENT_TOML_PATH.as_bytes(),
             data: TEST_FRAGMENT_TOML,
             mode: 0o644,
             entry_type: tar::EntryType::Regular,
@@ -921,7 +975,7 @@ description = "test fragment"
 
     fn hook_entry<'a>(path: &'a str, mode: u32) -> RawEntry<'a> {
         RawEntry {
-            path,
+            path: path.as_bytes(),
             data: b"#!/bin/sh\necho hook\n",
             mode,
             entry_type: tar::EntryType::Regular,
@@ -982,7 +1036,7 @@ description = "test fragment"
             (
                 "zero hook files",
                 vec![RawEntry {
-                    path: "fragment/tree/etc/foo.conf",
+                    path: b"fragment/tree/etc/foo.conf",
                     data: b"data",
                     mode: 0o644,
                     entry_type: tar::EntryType::Regular,
@@ -1005,7 +1059,7 @@ description = "test fragment"
                 vec![
                     hook_entry("fragment/hooks/entrypoint", 0o755),
                     RawEntry {
-                        path: "fragment/hooks/lib",
+                        path: b"fragment/hooks/lib",
                         data: b"",
                         mode: 0o755,
                         entry_type: tar::EntryType::Directory,
@@ -1056,7 +1110,7 @@ description = "test fragment"
     fn entrypoint_as_a_directory_is_rejected() {
         let layers = fragment_layers(vec![
             RawEntry {
-                path: "fragment/hooks/entrypoint",
+                path: b"fragment/hooks/entrypoint",
                 data: b"",
                 mode: 0o755,
                 entry_type: tar::EntryType::Directory,
@@ -1155,19 +1209,19 @@ description = "test fragment"
             let repo_path = format!("{prefix}fragment/tree/etc/yum.repos.d/epel.repo");
             let layers = vec![create_test_tarball_with_modes(&[
                 RawEntry {
-                    path: &toml_path,
+                    path: toml_path.as_bytes(),
                     data: TEST_FRAGMENT_TOML,
                     mode: 0o644,
                     entry_type: tar::EntryType::Regular,
                 },
                 RawEntry {
-                    path: &conf_path,
+                    path: conf_path.as_bytes(),
                     data: b"key=value\n",
                     mode: 0o644,
                     entry_type: tar::EntryType::Regular,
                 },
                 RawEntry {
-                    path: &repo_path,
+                    path: repo_path.as_bytes(),
                     data: b"[epel]\nbaseurl=https://example.com/epel/\n",
                     mode: 0o644,
                     entry_type: tar::EntryType::Regular,
@@ -1213,13 +1267,13 @@ description = "test fragment"
             let hook_path = format!("{prefix}fragment/hooks/entrypoint");
             let tarball = create_test_tarball_with_modes(&[
                 RawEntry {
-                    path: &conf_path,
+                    path: conf_path.as_bytes(),
                     data: b"key=value\n",
                     mode: 0o644,
                     entry_type: tar::EntryType::Regular,
                 },
                 RawEntry {
-                    path: &hook_path,
+                    path: hook_path.as_bytes(),
                     data: b"#!/bin/sh\necho hook\n",
                     mode: 0o755,
                     entry_type: tar::EntryType::Regular,
