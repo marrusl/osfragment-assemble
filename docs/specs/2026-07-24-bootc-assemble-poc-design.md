@@ -1,5 +1,10 @@
 # osfragment-assemble POC Design Spec
 
+> **Historical record.** This document records the POC design as of 2026-07-24. It has drifted
+> from current behavior on at least: hooks, `phase`, `packages.required`, the annotation
+> namespace, and hook package-management rules. It is retained for historical reference only.
+> For current behavior, see `README.md` and `docs/fragment-format.md`.
+
 ## Overview
 
 `osfragment-assemble` is a CLI tool that reads a YAML manifest of fragment OCI images and generates a multi-stage Containerfile for building bootc/RHCOS images. Fragments are a packaging convention — standard OCI images carrying any combination of repo configs, hooks, config files, systemd units, and filesystem overlays. The tool is codegen on top of existing build tooling: it generates Containerfiles that buildah/podman build consumes. No new image format, no new builder, no new package manager.

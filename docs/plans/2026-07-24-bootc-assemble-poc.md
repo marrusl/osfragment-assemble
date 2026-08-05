@@ -1,5 +1,10 @@
 # osfragment-assemble POC Implementation Plan
 
+> **Historical record.** This document records the POC plan as of 2026-07-24. It has drifted
+> from current behavior on at least: hooks, `phase`, `packages.required`, the annotation
+> namespace, and hook package-management rules. It is retained for historical reference only.
+> For current behavior, see `README.md` and `docs/fragment-format.md`.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Build a working POC of `osfragment-assemble` — a Rust CLI that reads a YAML manifest of fragment OCI images and generates a multi-stage Containerfile for bootc/RHCOS image builds, with 8 example fragments using real freely-available content.

@@ -159,7 +159,7 @@ fragments:
     packages: [htop, tmux]
   - image: quay.io/example/tailscale:1.82.0
     packages: [tailscale]
-    mirror: s/download.tailscale.com/mirror.internal.corp/g
+    mirror: https://mirror.internal.corp/tailscale
 ```
 
 ### Fields
@@ -167,16 +167,16 @@ fragments:
 - `apiVersion`: Must be `osfragment/v1alpha1`
 - `kind`: Must be `Composition`
 - `base`: Required. Base bootc or RHCOS image reference.
-- `baseType`: Optional. Overrides automatic base image classification. Values: `bootc` or `container`.
-  When set, skips label inspection entirely. When absent, the tool inspects the base image's
-  `containers.bootc` label to determine classification. See README for the full classification order.
+- `baseType`: Optional. Classification is declared-or-default: when set, it decides directly;
+  when absent, the base is treated as `bootc`. The base image is never inspected. See README
+  for the full classification order and rationale.
   - `bootc`: Base image is bootc-compatible. The generated Containerfile includes `systemctl preset-all`
     and `bootc container lint` steps.
   - `container`: Base image is a plain container. These steps are omitted.
 - `fragments`: Required. Array of at least one fragment.
   - `image`: Required. OCI image reference (`registry/repo:tag`) or digest (`registry/repo@sha256:...`).
   - `packages`: Optional. Array of package names to install from this fragment's repos. Defaults to `[]`.
-  - `mirror`: Optional. `sed` expression to rewrite repo baseurl/metalink in this fragment's `.repo` files (e.g., `s/cdn.redhat.com/satellite.corp/g`).
+  - `mirror`: Optional. A base URL to rewrite this fragment's `.repo` files against: `baseurl` is replaced with the given URL, and any `metalink`/`mirrorlist` lines are commented out (e.g., `https://satellite.corp/repo`).
 
 Package installation is deduplicated across all fragments; if multiple fragments request the same package, it's installed once.
 
