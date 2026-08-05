@@ -24,7 +24,7 @@ A fragment is an OCI image with this directory structure under `/fragment/`:
 
 ```toml
 [fragment]
-name = "tailscale"                    # Required: unique identifier (ASCII, no spaces)
+name = "tailscale"                    # Required: unique identifier (lowercase, see Field Constraints)
 version = "1.82.0"                    # Required: semantic version or date
 description = "Tailscale VPN client"  # Required: one-line summary
 vendor = "Tailscale Inc."             # Optional: provider name
@@ -40,7 +40,9 @@ required = ["tailscale"]
 
 ### Field Constraints
 
-- `name`: Must be unique within a manifest. Used for conflict detection and stage naming.
+- `name`: Must match `[a-z0-9]([a-z0-9._-]*[a-z0-9])?`, 1 to 64 characters: lowercase ASCII letters and digits, optionally separated by `.`, `-`, or `_`, starting and ending with a letter or digit. Must be unique within a manifest. Used for conflict detection, the fragment's directory name under `fragments/` in `--self-contained` output, and stage naming (the tool emits `--from=frag-<name>` into the generated Containerfile).
+
+  A name that doesn't match the grammar is rejected, not rewritten: silently rewriting it into something safe would produce a build that doesn't match what the fragment author wrote. Uppercase is rejected deliberately, not just as a byproduct of the character set: Containerfile stage names are case-insensitive to the builder, so `Foo` and `foo` in one manifest would otherwise collide into a single stage. Rejecting uppercase closes that collision and matches the lowercase convention already used throughout OCI naming.
 - `version`: Any string. Not validated, purely informational.
 - `description`: Single-line text. Displayed by `inspect` and `list`.
 - `vendor`: Optional. Identifies the fragment publisher.

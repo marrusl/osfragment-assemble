@@ -120,6 +120,8 @@ my-fragment/
 
 The `tree/` directory mirrors the target filesystem layout. Files are copied verbatim.
 
+`name` in `fragment.toml` must be lowercase letters, digits, `.`, `-`, or `_` (1 to 64 characters, starting and ending with a letter or digit), because it becomes both a directory name and a Containerfile stage name. Names that don't match are rejected rather than rewritten. See [Fragment Format](docs/fragment-format.md#fragmenttoml-schema) for the full grammar.
+
 If `hooks/` contains any file, it must contain an executable file named `entrypoint`, and that is the only file osfragment-assemble runs, after package installation, with no arguments. Anything else under `hooks/` is support material the entrypoint can reach at `/frag-hooks/`, at any depth, and the tool never invokes it. A fragment with hooks and no executable `hooks/entrypoint` fails to load. Fragment authors are responsible for setting the execute bit and for any required interpreters being available in the image at build time.
 
 ## Building your own fragments
