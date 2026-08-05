@@ -6,9 +6,9 @@ kind: Composition
 # Pin by digest if you want byte-reproducible rebuilds.
 base: quay.io/centos-bootc/centos-bootc:stream10
 
-# One of each shape the format supports, composed into a single image:
+# One of each kind of fragment the format supports, composed into a single image:
 #   epel              — repo-only fragment, packages chosen by the consumer
-#   grafana           — repo + tree + preset, the full declarative shape
+#   grafana           — repo + tree + preset, all the declarative pieces
 #   awscli-zip        — hook-only fragment carrying a vendor zip
 #   nvidia-driver-run — hook + tree fragment carrying a vendor .run installer
 fragments:
