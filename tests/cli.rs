@@ -28,6 +28,22 @@ fn inspect_tailscale_shows_hook() {
 }
 
 #[test]
+fn inspect_grafana_shows_declarative_account_and_state() {
+    // The grafana fragment declares its service account and state
+    // directories as sysusers.d/tmpfiles.d tree content rather than
+    // relying on the RPM's %post. Inspect must list both files, and
+    // succeeding at all means the fragment satisfies the hooks
+    // entrypoint contract.
+    let mut cmd = Command::cargo_bin("osfragment-assemble").unwrap();
+    cmd.args(["inspect", "examples/fragments/grafana"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("usr/lib/sysusers.d/grafana.conf"))
+        .stdout(predicate::str::contains("usr/lib/tmpfiles.d/grafana.conf"))
+        .stdout(predicate::str::contains("entrypoint"));
+}
+
+#[test]
 fn self_contained_conflicts_with_ocp() {
     let mut cmd = Command::cargo_bin("osfragment-assemble").unwrap();
     cmd.args(["--self-contained", "out", "--ocp"])
