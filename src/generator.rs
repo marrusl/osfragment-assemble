@@ -333,7 +333,7 @@ pub fn generate_containerfile(
                 let source = copy_from_source(loaded, use_named_stages);
                 writeln!(
                     out,
-                    "RUN --mount=type=bind,from={},source=/fragment/hooks,target=/frag-hooks,bind-propagation=rshared,z \\",
+                    "RUN --mount=type=bind,from={},source=/fragment/hooks,target=/frag-hooks,z \\",
                     source
                 )?;
             }
@@ -924,7 +924,7 @@ mod tests {
         let output =
             generate_containerfile(&manifest, &[cis], None, false, false, &bootc_caps()).unwrap();
         assert!(
-            output.contains("RUN --mount=type=bind,from=quay.io/test/cis:2.1,source=/fragment/hooks,target=/frag-hooks,bind-propagation=rshared,z"),
+            output.contains("RUN --mount=type=bind,from=quay.io/test/cis:2.1,source=/fragment/hooks,target=/frag-hooks,z"),
             "expected bind mount with inline image ref:\n{}",
             output
         );
@@ -1219,7 +1219,7 @@ mod tests {
             generate_containerfile(&manifest, &[cis], None, true, false, &bootc_caps()).unwrap();
         // Hooks should use bind mount in OCP output, in the registry form
         assert!(
-            output.contains("RUN --mount=type=bind,from=quay.io/test/cis:2.1,source=/fragment/hooks,target=/frag-hooks,bind-propagation=rshared,z"),
+            output.contains("RUN --mount=type=bind,from=quay.io/test/cis:2.1,source=/fragment/hooks,target=/frag-hooks,z"),
             "expected the registry mount form in OCP output:\n{}",
             output
         );
@@ -1369,7 +1369,7 @@ mod tests {
     }
 
     #[test]
-    fn bind_mount_carries_mco_options() {
+    fn bind_mount_omits_propagation_in_every_mode() {
         let (mut cis, mf_cis) = make_unpinned_config_fragment("cis");
         cis.manifest_index = 0;
         let manifest = Manifest {
@@ -1384,8 +1384,15 @@ mod tests {
             generate_containerfile(&manifest, &[cis.clone()], None, false, false, &bootc_caps())
                 .unwrap();
         assert!(
-            standalone.contains("bind-propagation=rshared,z"),
-            "standalone output must carry MCO mount options:\n{}",
+            standalone.contains(
+                "RUN --mount=type=bind,from=quay.io/test/cis:2.1,source=/fragment/hooks,target=/frag-hooks,z \\"
+            ),
+            "standalone output must emit the unified flagless mount form:\n{}",
+            standalone
+        );
+        assert!(
+            !standalone.contains("bind-propagation"),
+            "standalone output must not carry bind-propagation:\n{}",
             standalone
         );
 
@@ -1393,8 +1400,15 @@ mod tests {
         let ocp =
             generate_containerfile(&manifest, &[cis], None, true, false, &bootc_caps()).unwrap();
         assert!(
-            ocp.contains("bind-propagation=rshared,z"),
-            "OCP output must carry MCO mount options:\n{}",
+            ocp.contains(
+                "RUN --mount=type=bind,from=quay.io/test/cis:2.1,source=/fragment/hooks,target=/frag-hooks,z \\"
+            ),
+            "OCP output must emit the same flagless mount form as standalone:\n{}",
+            ocp
+        );
+        assert!(
+            !ocp.contains("bind-propagation"),
+            "OCP output must not carry bind-propagation:\n{}",
             ocp
         );
     }
@@ -1851,7 +1865,7 @@ mod tests {
         let standalone_caps = empty_caps();
         let standalone = generate_containerfile(
             &manifest,
-            &[epel.clone()],
+            std::slice::from_ref(&epel),
             None,
             false,
             false,
