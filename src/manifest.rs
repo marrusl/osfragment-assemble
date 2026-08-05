@@ -141,6 +141,16 @@ fragments:
         );
     }
 
+    /// The generated Containerfile's `# Manifest:` header and `list`'s
+    /// `Manifest:` line both report provenance from this field, and both
+    /// were once hardcoded to the default path. It must carry whatever
+    /// path the manifest was actually read from.
+    #[test]
+    fn parsed_manifest_records_its_source_path() {
+        let manifest = parse_manifest(MINIMAL_YAML, "configs/edge-lab.yaml").unwrap();
+        assert_eq!(manifest.source_path, "configs/edge-lab.yaml");
+    }
+
     #[test]
     fn resolve_registry_source() {
         let manifest = parse_manifest(MINIMAL_YAML, "test-manifest.yaml").unwrap();
