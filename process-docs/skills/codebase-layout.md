@@ -10,6 +10,7 @@ there are no sub-crates. Every module is one file directly under `src/`.
 
 ```
 /
+├── .github/          # GitHub Actions workflows
 ├── src/              # The whole crate: one file per module
 ├── tests/            # Integration tests (cli.rs)
 ├── examples/         # Example fragments and manifests
@@ -148,8 +149,11 @@ listed there is invisible to future sessions.
 - **Fragment-supplied values reach filesystem paths.** Where each one is
   checked, and what to accept as a parameter type when you add a path join, is
   in [fragment-input-invariants.md](fragment-input-invariants.md).
-- **No CI configuration exists in this repo.** `cargo clippy -- -D
-  clippy::all` and `cargo fmt --check` are run locally and gate commits.
+- **CI runs the same three gates you run locally.** `.github/workflows/ci.yml`
+  runs `cargo fmt --check`, `cargo clippy --all-targets -- -D clippy::all`,
+  and `cargo test` on push and pull request. It uses the runner's preinstalled
+  Rust because the crate declares no MSRV, and it installs no `skopeo`: the
+  whole suite is offline, and a test that needed a registry would fail there.
 - **`tmp/` is gitignored.** So is `/target`, a `/Containerfile` generated at
   the repo root, `/demo-context/` and its tarball, and the vendor blobs under
   `examples/fragments/nvidia-driver-run/hooks/` and

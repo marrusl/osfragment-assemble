@@ -1,0 +1,25 @@
+name: CI
+
+on: [push, pull_request]
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      # Rust comes preinstalled on the runner, with rustfmt and clippy. The
+      # crate declares no MSRV, so whatever stable the image ships is what it
+      # needs. A repo that does pin one should install that toolchain here
+      # instead of relying on the image.
+      - uses: actions/checkout@v7
+
+      - name: Format
+        run: cargo fmt --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D clippy::all
+
+      - name: Test
+        run: cargo test
