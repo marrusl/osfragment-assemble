@@ -15,7 +15,9 @@ pub enum Capability {
     Systemd,
 }
 
-/// The set of capabilities detected for a given base image.
+/// The set of capabilities a base image is taken to provide. Derived from
+/// the manifest's declared `baseType`, or from the `Bootc` default when the
+/// manifest declares none. Nothing inspects the image itself.
 pub type CapabilitySet = HashSet<Capability>;
 
 /// Build the capability set for a given base type classification.
