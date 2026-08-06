@@ -126,18 +126,28 @@ process-docs/
 ├── specs/
 │   ├── proposed/
 │   └── implemented/
-└── plans/            # Implementation plans, flat, no proposed/implemented split
+└── plans/
+    ├── proposed/
+    └── implemented/
 ```
 
 `process-docs/skills/index.md` is the entry point. A skill file that is not
 listed there is invisible to future sessions.
 
+Specs and plans use the same two subdirectories, and in both cases
+`implemented/` means the work is in the code. Changelog and roadmap
+maintenance read from it, so file a plan by what the code does, not by
+whether the document is finished.
+
 ## Gotchas
 
 - **`implemented/` means the work shipped, not that the document is current.**
-  Several specs there describe behavior later changes superseded, and the
-  POC-era design spec carries a banner saying so. Read it as a record of what
-  landed, and check `README.md` for what the code does now.
+  Several specs and plans there describe behavior that later changes
+  superseded, and the POC-era pair carries a banner saying so. The
+  conditional-bootc-steps plan is the sharpest case: the conditional emission
+  it delivers is in the code and tested, but the label probe its steps build
+  was removed afterward. Read these as records of what landed, and check
+  `README.md` for what the code does now.
 - **`src/generator.rs` is mostly tests.** The emitting code ends around line
   385; everything after that is one inline test module. The same pattern
   applies to `src/loader.rs` and `src/self_contained.rs`, where the test
