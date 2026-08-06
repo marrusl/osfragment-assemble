@@ -34,10 +34,9 @@ when they disagree.
 |------|----------------|
 | `src/main.rs` | `clap` CLI definition and subcommand dispatch, nothing else. No logic and no tests live here |
 | `src/lib.rs` | Module declarations only, no logic |
-| `src/manifest.rs` | Parses the composition YAML into `Manifest` and `ManifestFragment`. Owns `BaseType` and `FragmentSource` |
+| `src/manifest.rs` | Parses the composition YAML into `Manifest` and `ManifestFragment`, rejecting unknown top-level keys. Owns `FragmentSource` |
 | `src/fragment.rs` | The `fragment.toml` data model and parser. Owns the `FragmentName` newtype, `REPO_PREFIXES`, and `is_repo_path` |
 | `src/loader.rs` | Pulls fragment images via `skopeo`, reads metadata from OCI annotations or by walking layers, validates tar entries, and materializes fragment payload to disk. Produces `LoadedFragment`. Also loads a whole manifest's worth in order (`load_all_fragments`) and decides whether digests survive that load (`should_keep_fragment_digests`) |
-| `src/classify.rs` | Turns the base image's declared `baseType` into a `CapabilitySet` of `Capability::Bootc` and `Capability::Systemd`. Declared-or-default, no network |
 | `src/validate.rs` | Composition checks across loaded fragments: duplicate names, declared conflicts, repo file collisions |
 | `src/generator.rs` | `generate_containerfile`: emits the Containerfile. Also `split_image_ref` |
 | `src/self_contained.rs` | `--self-contained` output mode: sentinel-guarded target checks, staged and atomic materialization into a build context, sibling tarball packaging |
@@ -47,8 +46,8 @@ when they disagree.
 
 **Dependency direction:** `main.rs` drives everything. `generator.rs` and
 `self_contained.rs` consume `loader.rs`, which consumes `fragment.rs`.
-`validate.rs` consumes `loader.rs`. `classify.rs` consumes only `manifest.rs`.
-Nothing in the library depends on `main.rs`.
+`validate.rs` consumes `loader.rs`. Nothing in the library depends on
+`main.rs`.
 
 **Where the network is touched:** only `src/loader.rs`, and only through
 `std::process::Command::new("skopeo")`. Three call sites: digest resolution,
@@ -83,8 +82,9 @@ Flags on the assembly path:
 **Containerfile section order** (`generate_containerfile` in
 `src/generator.rs`) is fixed, and each section is preceded by a banner
 comment: fragment stages, base, repo files, packages, config files, hooks,
-systemd preset application, then bootc validation. The last two are emitted
-only when the capability set from `src/classify.rs` includes them. Fragments
+systemd preset application, then bootc validation. The last two are always
+emitted: every base this tool targets is a bootc image, and the lint step is
+what fails the build when one is not. Fragments
 are emitted in manifest order throughout. What the emitted directives actually
 guarantee is covered in
 [containerfile-layer-semantics.md](containerfile-layer-semantics.md).
@@ -144,9 +144,10 @@ whether the document is finished.
 - **`implemented/` means the work shipped, not that the document is current.**
   Several specs and plans there describe behavior that later changes
   superseded, and the POC-era pair carries a banner saying so. The
-  conditional-bootc-steps plan is the sharpest case: the conditional emission
-  it delivers is in the code and tested, but the label probe its steps build
-  was removed afterward. Read these as records of what landed, and check
+  conditional-bootc-steps plan is the sharpest case: what it delivered
+  shipped, then left entirely when non-bootc bases left the tool's scope, so
+  today's code has no `baseType`, no classification, and unconditional
+  preset and lint emission. Read these as records of what landed, and check
   `README.md` for what the code does now.
 - **`src/generator.rs` is mostly tests.** The emitting code ends around line
   385; everything after that is one inline test module. The same pattern

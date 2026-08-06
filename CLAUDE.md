@@ -10,7 +10,6 @@ Key modules:
 - `src/manifest.rs` — YAML manifest parsing and data structures
 - `src/loader.rs` — pulls fragment images, extracts metadata and tree/hooks content
 - `src/generator.rs` — emits Containerfile from loaded fragments
-- `src/classify.rs` — determines base image type (bootc vs. plain container)
 - `src/ocp.rs` — MachineOSConfig YAML generation for OpenShift on-cluster layering
 - `src/inspect.rs`, `src/list.rs`, `src/validate.rs` — CLI subcommands
 - `src/self_contained.rs` — `--self-contained` output mode: sentinel-guarded target checks, staged/atomic materialization into a build context, sibling tar.gz packaging

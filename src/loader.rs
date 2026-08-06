@@ -680,7 +680,6 @@ mod tests {
         use crate::manifest::ManifestFragment;
         Manifest {
             base: "quay.io/test/base:1".into(),
-            base_type: None,
             fragments: images
                 .iter()
                 .map(|image| ManifestFragment {

@@ -1,4 +1,3 @@
-pub mod classify;
 pub mod fragment;
 pub mod generator;
 pub mod inspect;

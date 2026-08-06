@@ -1,13 +1,6 @@
 use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum BaseType {
-    Bootc,
-    Container,
-}
-
 #[derive(Debug, Clone)]
 pub enum FragmentSource {
     Registry { image_ref: String },
@@ -16,15 +9,18 @@ pub enum FragmentSource {
 // ManifestYaml fields are read during serde deserialization but not
 // accessed directly after parse_manifest transforms them into Manifest.
 // The dead_code warning is expected and does not indicate unused code.
+//
+// deny_unknown_fields: the manifest is user-authored external input, and a
+// misspelled or removed key (baseType, once a real field) must fail the
+// parse rather than be silently ignored.
 #[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ManifestYaml {
     #[serde(rename = "apiVersion")]
     api_version: String,
     kind: String,
     base: Option<String>,
-    #[serde(default, rename = "baseType")]
-    base_type: Option<BaseType>,
     #[serde(default)]
     fragments: Vec<ManifestFragmentYaml>,
 }
@@ -40,7 +36,6 @@ struct ManifestFragmentYaml {
 #[derive(Debug, Clone)]
 pub struct Manifest {
     pub base: String,
-    pub base_type: Option<BaseType>,
     pub fragments: Vec<ManifestFragment>,
     /// Path the manifest was read from, as the user wrote it. Reported in the
     /// generated Containerfile header and by `list`, so it must be the real
@@ -90,7 +85,6 @@ pub fn parse_manifest(content: &str, source_path: &str) -> Result<Manifest> {
 
     Ok(Manifest {
         base,
-        base_type: raw.base_type,
         fragments,
         source_path: source_path.to_string(),
     })
@@ -198,50 +192,54 @@ fragments: []
         assert!(result.is_err());
     }
 
+    /// `baseType` is no longer a manifest field: the tool targets bootc
+    /// bases only, so there is no classification to override. The values it
+    /// used to accept must fail the parse like any other unknown key, not
+    /// be silently ignored.
     #[test]
-    fn parse_base_type_bootc() {
-        let yaml = r#"
+    fn base_type_is_rejected_as_an_unknown_field() {
+        let values = ["bootc", "container", "something-else"];
+        for value in values {
+            let yaml = format!(
+                r#"
 apiVersion: osfragment/v1alpha1
 kind: Composition
-base: registry.redhat.io/rhel10/rhel-bootc:10.0
-baseType: bootc
+base: quay.io/centos-bootc/centos-bootc:stream10
+baseType: {value}
 fragments:
   - image: quay.io/test/epel:10
-"#;
-        let manifest = parse_manifest(yaml, "test-manifest.yaml").unwrap();
-        assert_eq!(manifest.base_type, Some(BaseType::Bootc));
+"#
+            );
+            let err = parse_manifest(&yaml, "test-manifest.yaml")
+                .expect_err("baseType must fail the parse")
+                .to_string();
+            let full = format!(
+                "{:#}",
+                parse_manifest(&yaml, "test-manifest.yaml").unwrap_err()
+            );
+            assert!(
+                full.contains("baseType"),
+                "error for baseType: {value} must name the field, got: {err} / {full}"
+            );
+        }
     }
 
     #[test]
-    fn parse_base_type_container() {
+    fn unknown_manifest_field_is_rejected() {
         let yaml = r#"
 apiVersion: osfragment/v1alpha1
 kind: Composition
-base: quay.io/fedora/fedora:41
-baseType: container
-fragments:
+base: quay.io/centos-bootc/centos-bootc:stream10
+fragmnets:
   - image: quay.io/test/epel:10
 "#;
-        let manifest = parse_manifest(yaml, "test-manifest.yaml").unwrap();
-        assert_eq!(manifest.base_type, Some(BaseType::Container));
-    }
-
-    #[test]
-    fn parse_base_type_absent() {
-        let manifest = parse_manifest(MINIMAL_YAML, "test-manifest.yaml").unwrap();
-        assert_eq!(manifest.base_type, None);
-    }
-
-    #[test]
-    fn parse_base_type_invalid_rejected() {
-        let yaml = r#"
-apiVersion: osfragment/v1alpha1
-kind: Composition
-base: quay.io/fedora/fedora:41
-baseType: something-else
-fragments:
-  - image: quay.io/test/epel:10
-"#;
-        assert!(parse_manifest(yaml, "test-manifest.yaml").is_err());
+        let full = format!(
+            "{:#}",
+            parse_manifest(yaml, "test-manifest.yaml").unwrap_err()
+        );
+        assert!(
+            full.contains("fragmnets"),
+            "a typo'd key must fail the parse naming the key, got: {full}"
+        );
     }
 }

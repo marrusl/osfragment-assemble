@@ -1,7 +1,6 @@
 use anyhow::Result;
 use std::fmt::Write;
 
-use crate::classify::{Capability, CapabilitySet};
 use crate::fragment::is_repo_path;
 use crate::loader::LoadedFragment;
 use crate::manifest::{FragmentSource, Manifest};
@@ -49,7 +48,6 @@ pub fn generate_containerfile(
     base_digest: Option<&str>,
     ocp: bool,
     self_contained: bool,
-    capabilities: &CapabilitySet,
 ) -> Result<String> {
     let mut out = String::new();
     let use_named_stages = fragments.iter().any(|f| f.resolved_digest.is_some());
@@ -358,27 +356,25 @@ pub fn generate_containerfile(
         }
     }
 
-    // Phase: preset-apply (35) — requires systemd capability
-    if capabilities.contains(&Capability::Systemd) {
-        if !ocp {
-            writeln!(out, "# Apply systemd presets from fragments")?;
-        }
-        writeln!(
-            out,
-            "RUN systemctl preset-all --preset-mode=enable-only 2>/dev/null || true"
-        )?;
-        if !ocp {
-            writeln!(out)?;
-        }
+    // Phase: preset-apply (35). Unconditional: every base this tool targets
+    // is a bootc image, which carries systemd.
+    if !ocp {
+        writeln!(out, "# Apply systemd presets from fragments")?;
+    }
+    writeln!(
+        out,
+        "RUN systemctl preset-all --preset-mode=enable-only 2>/dev/null || true"
+    )?;
+    if !ocp {
+        writeln!(out)?;
     }
 
-    // Phase: validation (90) — requires bootc capability
-    if capabilities.contains(&Capability::Bootc) {
-        if !ocp {
-            writeln!(out, "# --- Phase: validation (90) ---")?;
-        }
-        writeln!(out, "RUN bootc container lint")?;
+    // Phase: validation (90). Unconditional: on a base without bootc this
+    // step fails the build, which is the supported way to find out.
+    if !ocp {
+        writeln!(out, "# --- Phase: validation (90) ---")?;
     }
+    writeln!(out, "RUN bootc container lint")?;
 
     Ok(out)
 }
@@ -386,26 +382,13 @@ pub fn generate_containerfile(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashSet;
     use std::path::PathBuf;
 
-    use crate::classify::{Capability, CapabilitySet};
     use crate::fragment::{
         Fragment, FragmentConflicts, FragmentName, FragmentPackages, FragmentProvides,
     };
     use crate::loader::LoadedFragment;
     use crate::manifest::{FragmentSource, Manifest, ManifestFragment};
-
-    fn bootc_caps() -> CapabilitySet {
-        let mut set = HashSet::new();
-        set.insert(Capability::Bootc);
-        set.insert(Capability::Systemd);
-        set
-    }
-
-    fn empty_caps() -> CapabilitySet {
-        HashSet::new()
-    }
 
     fn make_repos_fragment(name: &str, digest: &str) -> (LoadedFragment, ManifestFragment) {
         let loaded = LoadedFragment {
@@ -534,19 +517,12 @@ mod tests {
         let (epel, mf_epel) = make_repos_fragment("epel", "aaa111");
         let manifest = Manifest {
             base: "registry.redhat.io/rhel10/rhel-bootc:10.0".into(),
-            base_type: None,
             source_path: "test-manifest.yaml".into(),
             fragments: vec![mf_epel],
         };
-        let output = generate_containerfile(
-            &manifest,
-            &[epel],
-            Some("sha256:base123"),
-            false,
-            false,
-            &bootc_caps(),
-        )
-        .unwrap();
+        let output =
+            generate_containerfile(&manifest, &[epel], Some("sha256:base123"), false, false)
+                .unwrap();
         assert!(output.contains("@sha256:aaa111"));
         assert!(output.contains("@sha256:base123"));
         assert!(!output.contains("FROM quay.io/test/epel:10 AS"));
@@ -557,12 +533,10 @@ mod tests {
         let (epel, mf_epel) = make_repos_fragment("epel", "aaa111");
         let manifest = Manifest {
             base: "registry.redhat.io/rhel10/rhel-bootc:10.0".into(),
-            base_type: None,
             source_path: "examples/manifests/demo.yaml".into(),
             fragments: vec![mf_epel],
         };
-        let output =
-            generate_containerfile(&manifest, &[epel], None, false, false, &bootc_caps()).unwrap();
+        let output = generate_containerfile(&manifest, &[epel], None, false, false).unwrap();
         assert!(output.contains("# Manifest: examples/manifests/demo.yaml"));
         assert!(!output.contains("# Manifest: osfragment-assemble.yaml"));
     }
@@ -574,7 +548,6 @@ mod tests {
         cis.manifest_index = 1;
         let manifest = Manifest {
             base: "registry.redhat.io/rhel10/rhel-bootc:10.0".into(),
-            base_type: None,
             source_path: "test-manifest.yaml".into(),
             fragments: vec![mf_epel, mf_cis],
         };
@@ -584,7 +557,6 @@ mod tests {
             Some("sha256:base123"),
             false,
             false,
-            &bootc_caps(),
         )
         .unwrap();
         let repo_pos = output.find("Repo files").unwrap();
@@ -605,19 +577,12 @@ mod tests {
         let (epel, mf_epel) = make_repos_fragment("epel", "aaa111");
         let manifest = Manifest {
             base: "registry.redhat.io/rhel10/rhel-bootc:10.0".into(),
-            base_type: None,
             source_path: "test-manifest.yaml".into(),
             fragments: vec![mf_epel],
         };
-        let output = generate_containerfile(
-            &manifest,
-            &[epel],
-            Some("sha256:base123"),
-            false,
-            false,
-            &bootc_caps(),
-        )
-        .unwrap();
+        let output =
+            generate_containerfile(&manifest, &[epel], Some("sha256:base123"), false, false)
+                .unwrap();
         assert!(output.contains("dnf install -y"));
         assert!(output.contains("htop"));
     }
@@ -630,12 +595,10 @@ mod tests {
         let (epel, mf_epel) = make_repos_fragment("epel", "aaa111");
         let manifest = Manifest {
             base: "registry.redhat.io/rhel10/rhel-bootc:10.0".into(),
-            base_type: None,
             source_path: "test-manifest.yaml".into(),
             fragments: vec![mf_epel],
         };
-        let output =
-            generate_containerfile(&manifest, &[epel], None, false, false, &bootc_caps()).unwrap();
+        let output = generate_containerfile(&manifest, &[epel], None, false, false).unwrap();
 
         for path in [
             "/run/rhsm",
@@ -657,19 +620,12 @@ mod tests {
         cis.manifest_index = 0;
         let manifest = Manifest {
             base: "registry.redhat.io/rhel10/rhel-bootc:10.0".into(),
-            base_type: None,
             source_path: "test-manifest.yaml".into(),
             fragments: vec![mf_cis],
         };
-        let output = generate_containerfile(
-            &manifest,
-            &[cis],
-            Some("sha256:base123"),
-            false,
-            false,
-            &bootc_caps(),
-        )
-        .unwrap();
+        let output =
+            generate_containerfile(&manifest, &[cis], Some("sha256:base123"), false, false)
+                .unwrap();
         assert!(output.contains("systemctl preset-all --preset-mode=enable-only"));
     }
 
@@ -679,19 +635,12 @@ mod tests {
         cis.manifest_index = 0;
         let manifest = Manifest {
             base: "registry.redhat.io/rhel10/rhel-bootc:10.0".into(),
-            base_type: None,
             source_path: "test-manifest.yaml".into(),
             fragments: vec![mf_cis],
         };
-        let output = generate_containerfile(
-            &manifest,
-            &[cis],
-            Some("sha256:base123"),
-            false,
-            false,
-            &bootc_caps(),
-        )
-        .unwrap();
+        let output =
+            generate_containerfile(&manifest, &[cis], Some("sha256:base123"), false, false)
+                .unwrap();
         assert!(output.contains("bootc container lint"));
     }
 
@@ -701,19 +650,12 @@ mod tests {
         cis.manifest_index = 0;
         let manifest = Manifest {
             base: "registry.redhat.io/rhel10/rhel-bootc:10.0".into(),
-            base_type: None,
             source_path: "test-manifest.yaml".into(),
             fragments: vec![mf_cis],
         };
-        let output = generate_containerfile(
-            &manifest,
-            &[cis],
-            Some("sha256:base123"),
-            false,
-            false,
-            &bootc_caps(),
-        )
-        .unwrap();
+        let output =
+            generate_containerfile(&manifest, &[cis], Some("sha256:base123"), false, false)
+                .unwrap();
         assert!(!output.contains("dnf install"));
     }
 
@@ -723,19 +665,12 @@ mod tests {
         mf_epel.mirror = Some("https://mirror.corp/epel/".into());
         let manifest = Manifest {
             base: "registry.redhat.io/rhel10/rhel-bootc:10.0".into(),
-            base_type: None,
             source_path: "test-manifest.yaml".into(),
             fragments: vec![mf_epel],
         };
-        let output = generate_containerfile(
-            &manifest,
-            &[epel],
-            Some("sha256:base123"),
-            false,
-            false,
-            &bootc_caps(),
-        )
-        .unwrap();
+        let output =
+            generate_containerfile(&manifest, &[epel], Some("sha256:base123"), false, false)
+                .unwrap();
         assert!(output.contains("sed"));
         assert!(output.contains("https://mirror.corp/epel/"));
     }
@@ -750,7 +685,6 @@ mod tests {
         node_exp.manifest_index = 1;
         let manifest = Manifest {
             base: "registry.redhat.io/rhel10/rhel-bootc:10.0".into(),
-            base_type: None,
             source_path: "test-manifest.yaml".into(),
             fragments: vec![mf_epel, mf_node],
         };
@@ -760,7 +694,6 @@ mod tests {
             Some("sha256:base123"),
             false,
             false,
-            &bootc_caps(),
         )
         .unwrap();
         assert!(
@@ -841,19 +774,12 @@ mod tests {
         let (epel, mf_epel) = make_repos_fragment("epel", "aaa111");
         let manifest = Manifest {
             base: "localhost:5000/rhel-bootc:10.0".into(),
-            base_type: None,
             source_path: "test-manifest.yaml".into(),
             fragments: vec![mf_epel],
         };
-        let output = generate_containerfile(
-            &manifest,
-            &[epel],
-            Some("sha256:base123"),
-            false,
-            false,
-            &bootc_caps(),
-        )
-        .unwrap();
+        let output =
+            generate_containerfile(&manifest, &[epel], Some("sha256:base123"), false, false)
+                .unwrap();
         // Must preserve the port in the pinned ref
         assert!(output.contains("FROM localhost:5000/rhel-bootc@sha256:base123"));
     }
@@ -928,12 +854,10 @@ mod tests {
         let (epel, mf_epel) = make_unpinned_repos_fragment("epel");
         let manifest = Manifest {
             base: "registry.redhat.io/rhel10/rhel-bootc:10.0".into(),
-            base_type: None,
             source_path: "test-manifest.yaml".into(),
             fragments: vec![mf_epel],
         };
-        let output =
-            generate_containerfile(&manifest, &[epel], None, false, false, &bootc_caps()).unwrap();
+        let output = generate_containerfile(&manifest, &[epel], None, false, false).unwrap();
         // Inline image ref in COPY for repo files, no named FROM stage
         assert!(output.contains("COPY --from=quay.io/test/epel:10 /fragment/tree/etc/yum.repos.d/"));
         assert!(!output.contains("AS frag-epel"));
@@ -944,12 +868,10 @@ mod tests {
         let (epel, mf_epel) = make_unpinned_repos_fragment("epel");
         let manifest = Manifest {
             base: "registry.redhat.io/rhel10/rhel-bootc:10.0".into(),
-            base_type: None,
             source_path: "test-manifest.yaml".into(),
             fragments: vec![mf_epel],
         };
-        let output =
-            generate_containerfile(&manifest, &[epel], None, false, false, &bootc_caps()).unwrap();
+        let output = generate_containerfile(&manifest, &[epel], None, false, false).unwrap();
         assert!(output.contains("FROM registry.redhat.io/rhel10/rhel-bootc:10.0"));
         assert!(!output.contains("@sha256:"));
     }
@@ -960,12 +882,10 @@ mod tests {
         cis.manifest_index = 0;
         let manifest = Manifest {
             base: "registry.redhat.io/rhel10/rhel-bootc:10.0".into(),
-            base_type: None,
             source_path: "test-manifest.yaml".into(),
             fragments: vec![mf_cis],
         };
-        let output =
-            generate_containerfile(&manifest, &[cis], None, false, false, &bootc_caps()).unwrap();
+        let output = generate_containerfile(&manifest, &[cis], None, false, false).unwrap();
         assert!(
             output.contains("RUN --mount=type=bind,from=quay.io/test/cis:2.1,source=/fragment/hooks,target=/frag-hooks,z"),
             "expected bind mount with inline image ref:\n{}",
@@ -994,19 +914,12 @@ mod tests {
         let (epel, mf_epel) = make_repos_fragment("epel", "aaa111");
         let manifest = Manifest {
             base: "registry.redhat.io/rhel10/rhel-bootc:10.0".into(),
-            base_type: None,
             source_path: "test-manifest.yaml".into(),
             fragments: vec![mf_epel],
         };
-        let output = generate_containerfile(
-            &manifest,
-            &[epel],
-            Some("sha256:base123"),
-            false,
-            false,
-            &bootc_caps(),
-        )
-        .unwrap();
+        let output =
+            generate_containerfile(&manifest, &[epel], Some("sha256:base123"), false, false)
+                .unwrap();
         // Named FROM stage and named COPY ref for repo files
         assert!(output.contains("FROM quay.io/test/epel@sha256:aaa111 AS frag-epel"));
         assert!(output.contains("COPY --from=frag-epel /fragment/tree/etc/yum.repos.d/"));
@@ -1019,12 +932,10 @@ mod tests {
         let (epel, mf_epel) = make_unpinned_repos_fragment("epel");
         let manifest = Manifest {
             base: "registry.redhat.io/rhel10/rhel-bootc:10.0".into(),
-            base_type: None,
             source_path: "test-manifest.yaml".into(),
             fragments: vec![mf_epel],
         };
-        let output =
-            generate_containerfile(&manifest, &[epel], None, true, false, &bootc_caps()).unwrap();
+        let output = generate_containerfile(&manifest, &[epel], None, true, false).unwrap();
         assert!(output.contains("FROM configs AS final"));
         // Must not contain the standalone base image
         assert!(!output.contains("FROM registry.redhat.io"));
@@ -1035,12 +946,10 @@ mod tests {
         let (epel, mf_epel) = make_unpinned_repos_fragment("epel");
         let manifest = Manifest {
             base: "registry.redhat.io/rhel10/rhel-bootc:10.0".into(),
-            base_type: None,
             source_path: "test-manifest.yaml".into(),
             fragments: vec![mf_epel],
         };
-        let output =
-            generate_containerfile(&manifest, &[epel], None, true, false, &bootc_caps()).unwrap();
+        let output = generate_containerfile(&manifest, &[epel], None, true, false).unwrap();
         assert!(!output.contains("# Generated by"));
         assert!(!output.contains("# Fragments:"));
         assert!(!output.contains("# Override summary"));
@@ -1051,12 +960,10 @@ mod tests {
         let (epel, mf_epel) = make_unpinned_repos_fragment("epel");
         let manifest = Manifest {
             base: "registry.redhat.io/rhel10/rhel-bootc:10.0".into(),
-            base_type: None,
             source_path: "test-manifest.yaml".into(),
             fragments: vec![mf_epel],
         };
-        let output =
-            generate_containerfile(&manifest, &[epel], None, true, false, &bootc_caps()).unwrap();
+        let output = generate_containerfile(&manifest, &[epel], None, true, false).unwrap();
         assert!(!output.contains("# ---"));
     }
 
@@ -1065,12 +972,10 @@ mod tests {
         let (epel, mf_epel) = make_unpinned_repos_fragment("epel");
         let manifest = Manifest {
             base: "registry.redhat.io/rhel10/rhel-bootc:10.0".into(),
-            base_type: None,
             source_path: "test-manifest.yaml".into(),
             fragments: vec![mf_epel],
         };
-        let output =
-            generate_containerfile(&manifest, &[epel], None, true, false, &bootc_caps()).unwrap();
+        let output = generate_containerfile(&manifest, &[epel], None, true, false).unwrap();
         assert!(output.contains("COPY --from=quay.io/test/epel:10 /fragment/tree/etc/yum.repos.d/"));
         assert!(!output.contains("AS frag-"));
     }
@@ -1080,19 +985,12 @@ mod tests {
         let (epel, mf_epel) = make_repos_fragment("epel", "aaa111");
         let manifest = Manifest {
             base: "registry.redhat.io/rhel10/rhel-bootc:10.0".into(),
-            base_type: None,
             source_path: "test-manifest.yaml".into(),
             fragments: vec![mf_epel],
         };
-        let output = generate_containerfile(
-            &manifest,
-            &[epel],
-            Some("sha256:base123"),
-            true,
-            false,
-            &bootc_caps(),
-        )
-        .unwrap();
+        let output =
+            generate_containerfile(&manifest, &[epel], Some("sha256:base123"), true, false)
+                .unwrap();
         // Named stages before FROM configs AS final
         assert!(output.contains("FROM quay.io/test/epel@sha256:aaa111 AS frag-epel"));
         assert!(output.contains("FROM configs AS final"));
@@ -1108,12 +1006,10 @@ mod tests {
         let (epel, mf_epel) = make_unpinned_repos_fragment("epel");
         let manifest = Manifest {
             base: "registry.redhat.io/rhel10/rhel-bootc:10.0".into(),
-            base_type: None,
             source_path: "test-manifest.yaml".into(),
             fragments: vec![mf_epel],
         };
-        let output =
-            generate_containerfile(&manifest, &[epel], None, true, false, &bootc_caps()).unwrap();
+        let output = generate_containerfile(&manifest, &[epel], None, true, false).unwrap();
         assert!(output.contains("systemctl preset-all"));
         assert!(output.contains("bootc container lint"));
     }
@@ -1125,13 +1021,10 @@ mod tests {
         loaded.manifest_index = 0;
         let manifest = Manifest {
             base: "registry.redhat.io/rhel10/rhel-bootc:10.0".into(),
-            base_type: None,
             source_path: "test-manifest.yaml".into(),
             fragments: vec![manifest_frag],
         };
-        let output =
-            generate_containerfile(&manifest, &[loaded], None, false, false, &bootc_caps())
-                .unwrap();
+        let output = generate_containerfile(&manifest, &[loaded], None, false, false).unwrap();
 
         // One mount for the fragment, and the entrypoint is the only path
         // under the mount target that the output names.
@@ -1158,19 +1051,12 @@ mod tests {
         ));
         let manifest = Manifest {
             base: "registry.redhat.io/rhel10/rhel-bootc:10.0".into(),
-            base_type: None,
             source_path: "test-manifest.yaml".into(),
             fragments: vec![mf_cis],
         };
-        let output = generate_containerfile(
-            &manifest,
-            &[cis],
-            Some("sha256:base123"),
-            false,
-            false,
-            &bootc_caps(),
-        )
-        .unwrap();
+        let output =
+            generate_containerfile(&manifest, &[cis], Some("sha256:base123"), false, false)
+                .unwrap();
         assert!(
             output.contains("COPY --from=frag-cis /fragment/tree/ /"),
             "expected config COPY line in output:\n{}",
@@ -1185,7 +1071,6 @@ mod tests {
         cis.manifest_index = 1;
         let manifest = Manifest {
             base: "registry.redhat.io/rhel10/rhel-bootc:10.0".into(),
-            base_type: None,
             source_path: "test-manifest.yaml".into(),
             fragments: vec![mf_epel, mf_cis],
         };
@@ -1195,7 +1080,6 @@ mod tests {
             Some("sha256:base123"),
             false,
             false,
-            &bootc_caps(),
         )
         .unwrap();
         // Verify full content ordering: repo COPY -> dnf install -> config COPY -> hook RUN --mount
@@ -1230,19 +1114,12 @@ mod tests {
         mixed.fragment.packages.required = vec!["mixed-pkg".into()];
         let manifest = Manifest {
             base: "registry.redhat.io/rhel10/rhel-bootc:10.0".into(),
-            base_type: None,
             source_path: "test-manifest.yaml".into(),
             fragments: vec![mf_mixed],
         };
-        let output = generate_containerfile(
-            &manifest,
-            &[mixed],
-            Some("sha256:base123"),
-            false,
-            false,
-            &bootc_caps(),
-        )
-        .unwrap();
+        let output =
+            generate_containerfile(&manifest, &[mixed], Some("sha256:base123"), false, false)
+                .unwrap();
 
         let repo_copy = output
             .find("COPY --from=frag-mixed /fragment/tree/etc/yum.repos.d/ /etc/yum.repos.d/")
@@ -1275,7 +1152,6 @@ mod tests {
         frag_b.manifest_index = 1;
         let manifest = Manifest {
             base: "registry.redhat.io/rhel10/rhel-bootc:10.0".into(),
-            base_type: None,
             source_path: "test-manifest.yaml".into(),
             fragments: vec![mf_a, mf_b],
         };
@@ -1285,7 +1161,6 @@ mod tests {
             Some("sha256:base123"),
             false,
             false,
-            &bootc_caps(),
         )
         .unwrap();
         assert!(
@@ -1303,12 +1178,10 @@ mod tests {
         cis.manifest_index = 0;
         let manifest = Manifest {
             base: "registry.redhat.io/rhel10/rhel-bootc:10.0".into(),
-            base_type: None,
             source_path: "test-manifest.yaml".into(),
             fragments: vec![mf_cis],
         };
-        let output =
-            generate_containerfile(&manifest, &[cis], None, true, false, &bootc_caps()).unwrap();
+        let output = generate_containerfile(&manifest, &[cis], None, true, false).unwrap();
         // Hooks should use bind mount in OCP output, in the registry form
         assert!(
             output.contains("RUN --mount=type=bind,from=quay.io/test/cis:2.1,source=/fragment/hooks,target=/frag-hooks,z"),
@@ -1336,13 +1209,11 @@ mod tests {
         cis.manifest_index = 0;
         let manifest = Manifest {
             base: "registry.redhat.io/rhel10/rhel-bootc:10.0".into(),
-            base_type: None,
             source_path: "test-manifest.yaml".into(),
             fragments: vec![mf_cis.clone()],
         };
         let standalone =
-            generate_containerfile(&manifest, &[cis.clone()], None, false, false, &bootc_caps())
-                .unwrap();
+            generate_containerfile(&manifest, &[cis.clone()], None, false, false).unwrap();
         for line in standalone.lines() {
             if line.starts_with("COPY") {
                 assert!(
@@ -1354,8 +1225,7 @@ mod tests {
         }
 
         // Unpinned OCP
-        let ocp_output =
-            generate_containerfile(&manifest, &[cis], None, true, false, &bootc_caps()).unwrap();
+        let ocp_output = generate_containerfile(&manifest, &[cis], None, true, false).unwrap();
         for line in ocp_output.lines() {
             if line.starts_with("COPY") {
                 assert!(
@@ -1371,7 +1241,6 @@ mod tests {
         pinned_cis.manifest_index = 0;
         let pinned_manifest = Manifest {
             base: "registry.redhat.io/rhel10/rhel-bootc:10.0".into(),
-            base_type: None,
             source_path: "test-manifest.yaml".into(),
             fragments: vec![mf_pinned],
         };
@@ -1381,7 +1250,6 @@ mod tests {
             Some("sha256:base123"),
             false,
             false,
-            &bootc_caps(),
         )
         .unwrap();
         for line in pinned_output.lines() {
@@ -1402,19 +1270,12 @@ mod tests {
         cis.manifest_index = 0;
         let manifest = Manifest {
             base: "registry.redhat.io/rhel10/rhel-bootc:10.0".into(),
-            base_type: None,
             source_path: "test-manifest.yaml".into(),
             fragments: vec![mf_cis],
         };
-        let output = generate_containerfile(
-            &manifest,
-            &[cis],
-            Some("sha256:base123"),
-            false,
-            false,
-            &bootc_caps(),
-        )
-        .unwrap();
+        let output =
+            generate_containerfile(&manifest, &[cis], Some("sha256:base123"), false, false)
+                .unwrap();
         assert!(
             output.contains("COPY --from=frag-cis /fragment/tree/ /"),
             "expected named stage in tree COPY:\n{}",
@@ -1435,19 +1296,12 @@ mod tests {
             .push(PathBuf::from("tree/usr/lib/sysctl.d/99-hardening.conf"));
         let unpinned_manifest = Manifest {
             base: "registry.redhat.io/rhel10/rhel-bootc:10.0".into(),
-            base_type: None,
             source_path: "test-manifest.yaml".into(),
             fragments: vec![mf_unpinned],
         };
-        let unpinned_output = generate_containerfile(
-            &unpinned_manifest,
-            &[unpinned_cis],
-            None,
-            false,
-            false,
-            &bootc_caps(),
-        )
-        .unwrap();
+        let unpinned_output =
+            generate_containerfile(&unpinned_manifest, &[unpinned_cis], None, false, false)
+                .unwrap();
         assert!(
             unpinned_output.contains("COPY --from=quay.io/test/cis:2.1 /fragment/tree/ /"),
             "expected inline ref in tree COPY:\n{}",
@@ -1466,15 +1320,13 @@ mod tests {
         cis.manifest_index = 0;
         let manifest = Manifest {
             base: "registry.redhat.io/rhel10/rhel-bootc:10.0".into(),
-            base_type: None,
             source_path: "test-manifest.yaml".into(),
             fragments: vec![mf_cis],
         };
 
         // Standalone
         let standalone =
-            generate_containerfile(&manifest, &[cis.clone()], None, false, false, &bootc_caps())
-                .unwrap();
+            generate_containerfile(&manifest, &[cis.clone()], None, false, false).unwrap();
         assert!(
             standalone.contains(
                 "RUN --mount=type=bind,from=quay.io/test/cis:2.1,source=/fragment/hooks,target=/frag-hooks,z \\"
@@ -1489,8 +1341,7 @@ mod tests {
         );
 
         // OCP
-        let ocp =
-            generate_containerfile(&manifest, &[cis], None, true, false, &bootc_caps()).unwrap();
+        let ocp = generate_containerfile(&manifest, &[cis], None, true, false).unwrap();
         assert!(
             ocp.contains(
                 "RUN --mount=type=bind,from=quay.io/test/cis:2.1,source=/fragment/hooks,target=/frag-hooks,z \\"
@@ -1512,16 +1363,13 @@ mod tests {
         cis.hook_paths = vec![PathBuf::from("entrypoint"), PathBuf::from("lib/helper.sh")];
         let manifest = Manifest {
             base: "registry.redhat.io/rhel10/rhel-bootc:10.0".into(),
-            base_type: None,
             source_path: "test-manifest.yaml".into(),
             fragments: vec![mf_cis],
         };
 
         let standalone =
-            generate_containerfile(&manifest, &[cis.clone()], None, false, false, &bootc_caps())
-                .unwrap();
-        let ocp =
-            generate_containerfile(&manifest, &[cis], None, true, false, &bootc_caps()).unwrap();
+            generate_containerfile(&manifest, &[cis.clone()], None, false, false).unwrap();
+        let ocp = generate_containerfile(&manifest, &[cis], None, true, false).unwrap();
 
         // Extract the RUN --mount lines from each
         let standalone_mount: Vec<&str> = standalone
@@ -1564,20 +1412,12 @@ mod tests {
 
         let manifest = Manifest {
             base: "registry.redhat.io/rhel10/rhel-bootc:10.0".into(),
-            base_type: None,
             source_path: "test-manifest.yaml".into(),
             fragments: vec![mf_multi, mf_single],
         };
         let base_digest = pinned.then_some("sha256:base123");
-        let output = generate_containerfile(
-            &manifest,
-            &[multi, single],
-            base_digest,
-            false,
-            false,
-            &bootc_caps(),
-        )
-        .unwrap();
+        let output =
+            generate_containerfile(&manifest, &[multi, single], base_digest, false, false).unwrap();
 
         // Two fragments with hooks -> exactly two RUN --mount instructions
         let mount_count = output.matches("RUN --mount=type=bind").count();
@@ -1628,19 +1468,11 @@ mod tests {
         single.manifest_index = 1;
         let manifest = Manifest {
             base: "registry.redhat.io/rhel10/rhel-bootc:10.0".into(),
-            base_type: None,
             source_path: "test-manifest.yaml".into(),
             fragments: vec![mf_multi, mf_single],
         };
-        let output = generate_containerfile(
-            &manifest,
-            &[multi, single],
-            None,
-            false,
-            true,
-            &bootc_caps(),
-        )
-        .unwrap();
+        let output =
+            generate_containerfile(&manifest, &[multi, single], None, false, true).unwrap();
 
         for name in ["multi-file", "single-file"] {
             assert!(
@@ -1674,19 +1506,12 @@ mod tests {
         mf_epel.packages = vec![]; // no manifest-selected packages
         let manifest = Manifest {
             base: "registry.redhat.io/rhel10/rhel-bootc:10.0".into(),
-            base_type: None,
             source_path: "test-manifest.yaml".into(),
             fragments: vec![mf_epel],
         };
-        let output = generate_containerfile(
-            &manifest,
-            &[epel],
-            Some("sha256:base123"),
-            false,
-            false,
-            &bootc_caps(),
-        )
-        .unwrap();
+        let output =
+            generate_containerfile(&manifest, &[epel], Some("sha256:base123"), false, false)
+                .unwrap();
         assert!(
             output.contains("htop") && output.contains("tmux"),
             "expected required packages in output:\n{}",
@@ -1706,19 +1531,12 @@ mod tests {
         mf_epel.packages = vec!["htop".into(), "jq".into()]; // htop duplicated
         let manifest = Manifest {
             base: "registry.redhat.io/rhel10/rhel-bootc:10.0".into(),
-            base_type: None,
             source_path: "test-manifest.yaml".into(),
             fragments: vec![mf_epel],
         };
-        let output = generate_containerfile(
-            &manifest,
-            &[epel],
-            Some("sha256:base123"),
-            false,
-            false,
-            &bootc_caps(),
-        )
-        .unwrap();
+        let output =
+            generate_containerfile(&manifest, &[epel], Some("sha256:base123"), false, false)
+                .unwrap();
         // htop should appear exactly once
         let htop_count = output.matches("htop").count();
         assert_eq!(
@@ -1746,7 +1564,6 @@ mod tests {
         cis.manifest_index = 1;
         let manifest = Manifest {
             base: "registry.redhat.io/rhel10/rhel-bootc:10.0".into(),
-            base_type: None,
             source_path: "test-manifest.yaml".into(),
             fragments: vec![mf_epel, mf_cis],
         };
@@ -1756,7 +1573,6 @@ mod tests {
             Some("sha256:base123"),
             false,
             false,
-            &bootc_caps(),
         )
         .unwrap();
         let dep_count = output.matches("shared-dep").count();
@@ -1780,7 +1596,6 @@ mod tests {
         epel.manifest_index = 1;
         let manifest = Manifest {
             base: "registry.redhat.io/rhel10/rhel-bootc:10.0".into(),
-            base_type: None,
             source_path: "test-manifest.yaml".into(),
             fragments: vec![mf_cis, mf_epel],
         };
@@ -1791,7 +1606,6 @@ mod tests {
             Some("sha256:base123"),
             false,
             false,
-            &bootc_caps(),
         )
         .unwrap();
 
@@ -1812,19 +1626,12 @@ mod tests {
         mf_epel.packages = vec!["unrelated-tool".into()];
         let manifest = Manifest {
             base: "registry.redhat.io/rhel10/rhel-bootc:10.0".into(),
-            base_type: None,
             source_path: "test-manifest.yaml".into(),
             fragments: vec![mf_epel],
         };
-        let output = generate_containerfile(
-            &manifest,
-            &[epel],
-            Some("sha256:base123"),
-            false,
-            false,
-            &bootc_caps(),
-        )
-        .unwrap();
+        let output =
+            generate_containerfile(&manifest, &[epel], Some("sha256:base123"), false, false)
+                .unwrap();
         assert!(
             output.contains("unrelated-tool"),
             "manifest-selected package should appear even when no fragment declares it:\n{}",
@@ -1840,7 +1647,6 @@ mod tests {
         // manifest selects no packages for postgresql
         let manifest = Manifest {
             base: "registry.redhat.io/rhel10/rhel-bootc:10.0".into(),
-            base_type: None,
             source_path: "test-manifest.yaml".into(),
             fragments: vec![ManifestFragment {
                 image: "quay.io/test/postgresql:17".into(),
@@ -1848,15 +1654,8 @@ mod tests {
                 mirror: None,
             }],
         };
-        let output = generate_containerfile(
-            &manifest,
-            &[pg],
-            Some("sha256:base123"),
-            false,
-            false,
-            &bootc_caps(),
-        )
-        .unwrap();
+        let output =
+            generate_containerfile(&manifest, &[pg], Some("sha256:base123"), false, false).unwrap();
         assert!(
             output.contains("postgresql17-server"),
             "expected postgresql17-server in output:\n{}",
@@ -1874,142 +1673,31 @@ mod tests {
         );
     }
 
+    /// Every output mode targets a bootc base, so both tool-managed steps are
+    /// always emitted: the preset application, and the lint step that fails
+    /// the build on a base without bootc.
     #[test]
-    fn container_base_omits_bootc_steps() {
-        let (epel, mf_epel) = make_unpinned_repos_fragment("epel");
-        let manifest = Manifest {
-            base: "quay.io/fedora/fedora:41".into(),
-            base_type: None,
-            source_path: "test-manifest.yaml".into(),
-            fragments: vec![mf_epel],
-        };
-        let output =
-            generate_containerfile(&manifest, &[epel], None, false, false, &empty_caps()).unwrap();
-        assert!(!output.contains("systemctl preset-all"));
-        assert!(!output.contains("bootc container lint"));
-        // Other content still present
-        assert!(output.contains("COPY --from="));
-    }
-
-    #[test]
-    fn bootc_base_preserves_both_steps() {
-        let (epel, mf_epel) = make_unpinned_repos_fragment("epel");
-        let manifest = Manifest {
-            base: "registry.redhat.io/rhel10/rhel-bootc:10.0".into(),
-            base_type: None,
-            source_path: "test-manifest.yaml".into(),
-            fragments: vec![mf_epel],
-        };
-        let output =
-            generate_containerfile(&manifest, &[epel], None, false, false, &bootc_caps()).unwrap();
-        assert!(output.contains("systemctl preset-all"));
-        assert!(output.contains("bootc container lint"));
-    }
-
-    #[test]
-    fn systemd_only_emits_preset_but_not_lint() {
-        let mut caps = HashSet::new();
-        caps.insert(Capability::Systemd);
-        let (epel, mf_epel) = make_unpinned_repos_fragment("epel");
-        let manifest = Manifest {
-            base: "quay.io/some/image:1".into(),
-            base_type: None,
-            source_path: "test-manifest.yaml".into(),
-            fragments: vec![mf_epel],
-        };
-        let output = generate_containerfile(&manifest, &[epel], None, false, false, &caps).unwrap();
-        assert!(output.contains("systemctl preset-all"));
-        assert!(!output.contains("bootc container lint"));
-    }
-
-    #[test]
-    fn ocp_always_emits_bootc_steps_regardless_of_caps() {
-        // Even with empty capabilities, OCP mode forces bootc steps
-        // because MachineOSConfig always targets bootc.
-        // This test verifies the *caller* pattern: main.rs always passes
-        // bootc_caps() for OCP. The generator itself is capability-gated.
-        let (epel, mf_epel) = make_unpinned_repos_fragment("epel");
-        let manifest = Manifest {
-            base: "quay.io/fedora/fedora:41".into(),
-            base_type: Some(crate::manifest::BaseType::Container),
-            source_path: "test-manifest.yaml".into(),
-            fragments: vec![mf_epel],
-        };
-        // OCP caller always passes full bootc caps
-        let ocp_caps = bootc_caps();
-        let output =
-            generate_containerfile(&manifest, &[epel], None, true, false, &ocp_caps).unwrap();
-        assert!(output.contains("systemctl preset-all"));
-        assert!(output.contains("bootc container lint"));
-    }
-
-    #[test]
-    fn container_base_with_ocp_produces_divergent_outputs() {
-        let (epel, mf_epel) = make_unpinned_repos_fragment("epel");
-        let manifest = Manifest {
-            base: "quay.io/fedora/fedora:41".into(),
-            base_type: Some(crate::manifest::BaseType::Container),
-            source_path: "test-manifest.yaml".into(),
-            fragments: vec![mf_epel.clone()],
-        };
-
-        // Standalone: container capabilities (empty set)
-        let standalone_caps = empty_caps();
-        let standalone = generate_containerfile(
-            &manifest,
-            std::slice::from_ref(&epel),
-            None,
-            false,
-            false,
-            &standalone_caps,
-        )
-        .unwrap();
-
-        // OCP: always bootc capabilities
-        let ocp_caps = bootc_caps();
-        let ocp = generate_containerfile(&manifest, &[epel], None, true, false, &ocp_caps).unwrap();
-
-        // Standalone omits bootc steps
-        assert!(!standalone.contains("systemctl preset-all"));
-        assert!(!standalone.contains("bootc container lint"));
-
-        // OCP includes bootc steps
-        assert!(ocp.contains("systemctl preset-all"));
-        assert!(ocp.contains("bootc container lint"));
-    }
-
-    #[test]
-    fn no_base_type_with_bootc_caps_preserves_current_output() {
-        // Simulates: no manifest override, label absent -> default bootc
-        let (epel, mf_epel) = make_unpinned_repos_fragment("epel");
-        let manifest = Manifest {
-            base: "registry.redhat.io/rhel10/rhel-bootc:10.0".into(),
-            base_type: None,
-            source_path: "test-manifest.yaml".into(),
-            fragments: vec![mf_epel],
-        };
-        let output =
-            generate_containerfile(&manifest, &[epel], None, false, false, &bootc_caps()).unwrap();
-        // Same as pre-change output — both steps present
-        assert!(output.contains("systemctl preset-all"));
-        assert!(output.contains("bootc container lint"));
-    }
-
-    #[test]
-    fn manifest_override_container_omits_steps() {
-        // baseType: container in manifest -> no bootc steps
-        // regardless of what label inspection would return
-        let (epel, mf_epel) = make_unpinned_repos_fragment("epel");
-        let manifest = Manifest {
-            base: "registry.redhat.io/rhel10/rhel-bootc:10.0".into(),
-            base_type: Some(crate::manifest::BaseType::Container),
-            source_path: "test-manifest.yaml".into(),
-            fragments: vec![mf_epel],
-        };
-        let output =
-            generate_containerfile(&manifest, &[epel], None, false, false, &empty_caps()).unwrap();
-        assert!(!output.contains("systemctl preset-all"));
-        assert!(!output.contains("bootc container lint"));
+    fn bootc_steps_emitted_in_every_mode() {
+        // (ocp, self_contained)
+        let modes = [(false, false), (true, false), (false, true)];
+        for (ocp, self_contained) in modes {
+            let (epel, mf_epel) = make_unpinned_repos_fragment("epel");
+            let manifest = Manifest {
+                base: "quay.io/centos-bootc/centos-bootc:stream10".into(),
+                source_path: "test-manifest.yaml".into(),
+                fragments: vec![mf_epel],
+            };
+            let output =
+                generate_containerfile(&manifest, &[epel], None, ocp, self_contained).unwrap();
+            assert!(
+                output.contains("systemctl preset-all"),
+                "preset-all missing (ocp={ocp}, self_contained={self_contained}):\n{output}"
+            );
+            assert!(
+                output.contains("RUN bootc container lint"),
+                "lint missing (ocp={ocp}, self_contained={self_contained}):\n{output}"
+            );
+        }
     }
 
     #[test]
@@ -2019,13 +1707,10 @@ mod tests {
         cis.manifest_index = 1;
         let manifest = Manifest {
             base: "registry.redhat.io/rhel10/rhel-bootc:10.0".into(),
-            base_type: None,
             source_path: "test-manifest.yaml".into(),
             fragments: vec![mf_epel, mf_cis],
         };
-        let output =
-            generate_containerfile(&manifest, &[epel, cis], None, false, true, &bootc_caps())
-                .unwrap();
+        let output = generate_containerfile(&manifest, &[epel, cis], None, false, true).unwrap();
 
         assert!(output.contains("COPY fragments/epel/tree/etc/yum.repos.d/ /etc/yum.repos.d/"));
         assert!(output.contains("COPY fragments/epel/tree/etc/pki/rpm-gpg/ /etc/pki/rpm-gpg/"));
@@ -2067,19 +1752,12 @@ mod tests {
         cis.manifest_index = 1;
         let manifest = Manifest {
             base: "registry.redhat.io/rhel10/rhel-bootc:10.0".into(),
-            base_type: None,
             source_path: "test-manifest.yaml".into(),
             fragments: vec![mf_epel, mf_cis],
         };
-        let output = generate_containerfile(
-            &manifest,
-            &[epel, cis],
-            Some("sha256:base123"),
-            false,
-            true,
-            &bootc_caps(),
-        )
-        .unwrap();
+        let output =
+            generate_containerfile(&manifest, &[epel, cis], Some("sha256:base123"), false, true)
+                .unwrap();
 
         let from_lines: Vec<&str> = output.lines().filter(|l| l.starts_with("FROM")).collect();
         assert_eq!(
@@ -2128,12 +1806,10 @@ mod tests {
         };
         let manifest = Manifest {
             base: "registry.redhat.io/rhel10/rhel-bootc:10.0".into(),
-            base_type: None,
             source_path: "test-manifest.yaml".into(),
             fragments: vec![manifest_frag],
         };
-        let output =
-            generate_containerfile(&manifest, &[loaded], None, false, true, &bootc_caps()).unwrap();
+        let output = generate_containerfile(&manifest, &[loaded], None, false, true).unwrap();
 
         assert!(!output.contains("COPY fragments/hooks-only/tree"));
         assert!(output.contains(
@@ -2182,13 +1858,10 @@ RUN bootc container lint
         cis.manifest_index = 1;
         let manifest = Manifest {
             base: "registry.redhat.io/rhel10/rhel-bootc:10.0".into(),
-            base_type: None,
             source_path: "test-manifest.yaml".into(),
             fragments: vec![mf_epel, mf_cis],
         };
-        let output =
-            generate_containerfile(&manifest, &[epel, cis], None, false, true, &bootc_caps())
-                .unwrap();
+        let output = generate_containerfile(&manifest, &[epel, cis], None, false, true).unwrap();
 
         assert_eq!(output, EXPECTED);
     }

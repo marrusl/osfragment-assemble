@@ -154,7 +154,6 @@ apiVersion: osfragment/v1alpha1
 kind: Composition
 
 base: quay.io/centos-bootc/centos-bootc:stream10
-baseType: bootc  # Optional: override automatic base image classification
 
 fragments:
   - image: quay.io/example/epel:10
@@ -168,17 +167,14 @@ fragments:
 
 - `apiVersion`: Must be `osfragment/v1alpha1`
 - `kind`: Must be `Composition`
-- `base`: Required. Base bootc or RHCOS image reference.
-- `baseType`: Optional. Classification is declared-or-default: when set, it decides directly;
-  when absent, the base is treated as `bootc`. The base image is never inspected. See README
-  for the full classification order and rationale.
-  - `bootc`: Base image is bootc-compatible. The generated Containerfile includes `systemctl preset-all`
-    and `bootc container lint` steps.
-  - `container`: Base image is a plain container. These steps are omitted.
+- `base`: Required. Base bootc image reference (RHCOS included). The base is never inspected;
+  the generated Containerfile validates it at build time via `bootc container lint`.
 - `fragments`: Required. Array of at least one fragment.
   - `image`: Required. OCI image reference (`registry/repo:tag`) or digest (`registry/repo@sha256:...`).
   - `packages`: Optional. Array of package names to install from this fragment's repos. Defaults to `[]`.
   - `mirror`: Optional. A base URL to rewrite this fragment's `.repo` files against: `baseurl` is replaced with the given URL, and any `metalink`/`mirrorlist` lines are commented out (e.g., `https://satellite.corp/repo`).
+
+Unknown top-level manifest keys are rejected as parse errors, so a misspelled field fails the parse instead of being silently ignored.
 
 Package installation is deduplicated across all fragments; if multiple fragments request the same package, it's installed once.
 

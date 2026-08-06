@@ -189,30 +189,11 @@ osfragment-assemble list --manifest <path>
 
 List fragments in manifest order (the order they'll appear in the generated Containerfile).
 
-## Base image classification
+## Base images
 
-osfragment-assemble classifies the base image to determine which build steps to include in the generated Containerfile. Bootc-compatible images get `systemctl preset-all` and `bootc container lint` steps; plain container images do not.
+osfragment-assemble composes build inputs for bootc image builds. Every generated Containerfile applies systemd presets (`systemctl preset-all`) and validates the result (`bootc container lint`); on a base without bootc, the lint step fails the build. MachineOSConfig output (`--ocp`) is a bootc target too: it builds OpenShift node OS images through the Machine Config Operator.
 
-Classification is declared-or-default:
-
-1. **Manifest `baseType` field** -- When present (`bootc` or `container`), this is authoritative.
-2. **Default: `bootc`** -- When `baseType` is absent, the base is classified as bootc. A base that is not bootc-compatible fails loudly (via `bootc container lint`) rather than silently dropping steps, so declaring `baseType: container` is the way to say so.
-
-**The base image is never inspected.** Classification requires no registry access, so generation works against a base that exists only in local storage, or with no network at all. Earlier versions probed the base's `containers.bootc` label over the network first; that probe was removed because it could not change the answer -- a present label, an absent label, and a failed lookup all classified as bootc, leaving the manifest override as the only path to any other result.
-
-MachineOSConfig output (`--ocp`) always uses the full bootc step set regardless of classification, since MachineOSConfig targets bootc images by definition.
-
-Example with explicit classification:
-
-```yaml
-apiVersion: osfragment/v1alpha1
-kind: Composition
-base: quay.io/fedora/fedora:41
-baseType: container
-fragments:
-  - image: quay.io/example/epel:10
-    packages: [htop]
-```
+**The base image is never inspected.** Generation requires no registry access for the base, so it works against a base that exists only in local storage, or with no network at all.
 
 ## Example fragments
 

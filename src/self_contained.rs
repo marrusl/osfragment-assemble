@@ -653,7 +653,6 @@ mod tests {
 
         let manifest = crate::manifest::Manifest {
             base: "registry.example/base:1".into(),
-            base_type: None,
             source_path: "test-manifest.yaml".into(),
             fragments: vec![
                 crate::manifest::ManifestFragment {
@@ -673,15 +672,9 @@ mod tests {
                 },
             ],
         };
-        let containerfile = crate::generator::generate_containerfile(
-            &manifest,
-            &fragments,
-            None,
-            false,
-            true,
-            &crate::classify::CapabilitySet::new(),
-        )
-        .unwrap();
+        let containerfile =
+            crate::generator::generate_containerfile(&manifest, &fragments, None, false, true)
+                .unwrap();
 
         let workdir = tempfile::tempdir().unwrap();
         let dir = workdir.path().join("ctx");

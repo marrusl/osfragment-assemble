@@ -213,7 +213,6 @@ mod tests {
         frag.hook_paths = vec![std::path::PathBuf::from("entrypoint")];
         let manifest = Manifest {
             base: "registry.redhat.io/rhel10/rhel-bootc:10.0".into(),
-            base_type: None,
             source_path: "test-manifest.yaml".into(),
             fragments: vec![crate::manifest::ManifestFragment {
                 image: "quay.io/test/mixed:1.0".into(),
