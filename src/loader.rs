@@ -7,7 +7,7 @@ use crate::fragment::{
     FragmentProvides,
 };
 use crate::generator::split_image_ref;
-use crate::manifest::FragmentSource;
+use crate::manifest::{FragmentSource, Manifest};
 
 #[derive(Debug, Clone)]
 pub struct LoadedFragment {
@@ -584,6 +584,67 @@ pub fn load_registry_fragment_metadata_only(image_ref: &str) -> Result<LoadedFra
     load_registry_fragment(image_ref)
 }
 
+/// Whether fragment digests (and the digest-pinned `FragmentSource`) should
+/// survive [`load_all_fragments`] for use downstream.
+///
+/// `--pin-digests` keeps them for default mode's named-stage emission and
+/// digest comments. `--self-contained` also needs them kept, independently
+/// of `--pin-digests`: materialization must pull exactly the digest that was
+/// validated, even though the emitted Containerfile never exposes that digest
+/// (see generator.rs's self-contained suppression).
+pub fn should_keep_fragment_digests(pin_digests: bool, self_contained: Option<&Path>) -> bool {
+    pin_digests || self_contained.is_some()
+}
+
+/// Load every fragment the manifest names, in manifest order.
+///
+/// `keep_digests`: whether to leave each fragment's digest-pinned
+/// `FragmentSource`/`resolved_digest` in place. See
+/// [`should_keep_fragment_digests`] for why this isn't simply `pin_digests`.
+pub fn load_all_fragments(manifest: &Manifest, keep_digests: bool) -> Result<Vec<LoadedFragment>> {
+    load_all_fragments_with(manifest, keep_digests, load_registry_fragment)
+}
+
+/// [`load_all_fragments`] with the per-fragment registry load injected.
+///
+/// Everything this function decides (manifest ordering, `manifest_index`
+/// assignment, digest stripping, and which errors abort the run) is
+/// registry-independent, but the real loader shells out to skopeo for every
+/// fragment, so none of it was reachable from a test while the two were
+/// welded together. Splitting them follows the
+/// `write_output`/`write_output_with` precedent in `self_contained.rs`.
+fn load_all_fragments_with(
+    manifest: &Manifest,
+    keep_digests: bool,
+    load: impl Fn(&str) -> Result<LoadedFragment>,
+) -> Result<Vec<LoadedFragment>> {
+    let mut fragments = Vec::new();
+    let total = manifest.fragments.len();
+
+    for (idx, mf) in manifest.fragments.iter().enumerate() {
+        let source = mf.resolve_source()?;
+        let FragmentSource::Registry { ref image_ref } = source;
+        eprintln!("Loading fragment {}/{}: {}...", idx + 1, total, image_ref);
+        let mut loaded = load(image_ref)?;
+        if !keep_digests {
+            // Use the manifest's declared image ref, not the digest-pinned ref
+            loaded.source = FragmentSource::Registry {
+                image_ref: image_ref.clone(),
+            };
+            loaded.resolved_digest = None;
+        }
+        eprintln!(
+            "  {} ({})",
+            loaded.fragment.name, loaded.fragment.description
+        );
+        loaded.manifest_index = idx;
+        fragments.push(loaded);
+    }
+
+    // No reordering: emission follows manifest order, which is user intent.
+    Ok(fragments)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -610,6 +671,189 @@ mod tests {
         let (repo, config) = split_tree_paths(&paths);
         assert_eq!(repo.len(), 2);
         assert_eq!(config.len(), 1);
+    }
+
+    /// Digest a stub load reports, standing in for what skopeo would resolve.
+    const TEST_DIGEST: &str = "sha256:0123456789abcdef";
+
+    fn test_manifest(images: &[&str]) -> Manifest {
+        use crate::manifest::ManifestFragment;
+        Manifest {
+            base: "quay.io/test/base:1".into(),
+            base_type: None,
+            fragments: images
+                .iter()
+                .map(|image| ManifestFragment {
+                    image: (*image).into(),
+                    packages: vec![],
+                    mirror: None,
+                })
+                .collect(),
+            source_path: "test-manifest.yaml".into(),
+        }
+    }
+
+    /// Stands in for `load_registry_fragment`, returning what a real registry
+    /// load returns: a digest-pinned source and a resolved digest, so the
+    /// stripping branch has something to strip.
+    fn stub_loaded(image_ref: &str) -> LoadedFragment {
+        use crate::fragment::{
+            Fragment, FragmentConflicts, FragmentName, FragmentPackages, FragmentProvides,
+        };
+        let (name, _tag) = split_image_ref(image_ref);
+        let short = name.rsplit('/').next().unwrap_or("frag");
+        LoadedFragment {
+            fragment: Fragment {
+                name: FragmentName::new(short).expect("test fragment name must be valid"),
+                version: "1".into(),
+                description: "test".into(),
+                vendor: None,
+                provides: FragmentProvides { repos: vec![] },
+                packages: FragmentPackages { required: vec![] },
+                conflicts: FragmentConflicts { fragments: vec![] },
+            },
+            tree_paths: vec![],
+            hook_paths: vec![],
+            source: FragmentSource::Registry {
+                image_ref: format!("{}@{}", name, TEST_DIGEST),
+            },
+            resolved_digest: Some(TEST_DIGEST.into()),
+            manifest_index: 0,
+            repo_file_contents: std::collections::HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn keep_fragment_digests_cases() {
+        // (pin_digests, self_contained, expected)
+        let cases = [
+            (false, None, false),
+            (false, Some(Path::new("out")), true),
+            (true, None, true),
+            (true, Some(Path::new("out")), true),
+        ];
+        for (pin_digests, self_contained, expected) in cases {
+            assert_eq!(
+                should_keep_fragment_digests(pin_digests, self_contained),
+                expected,
+                "pin_digests={pin_digests}, self_contained={self_contained:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn load_all_fragments_digest_retention_tracks_keep_digests() {
+        // (keep_digests, digest survives the load)
+        let cases = [(true, true), (false, false)];
+        for (keep_digests, survives) in cases {
+            let manifest = test_manifest(&["quay.io/test/epel:10"]);
+            let loaded = load_all_fragments_with(&manifest, keep_digests, |r| Ok(stub_loaded(r)))
+                .expect("stub load cannot fail");
+            let FragmentSource::Registry { image_ref } = &loaded[0].source;
+
+            assert_eq!(
+                loaded[0].resolved_digest.is_some(),
+                survives,
+                "resolved_digest must track keep_digests={keep_digests}"
+            );
+            assert_eq!(
+                image_ref.contains('@'),
+                survives,
+                "source ref pinning must track keep_digests={keep_digests}"
+            );
+            if !survives {
+                assert_eq!(
+                    image_ref, "quay.io/test/epel:10",
+                    "stripping restores the manifest's declared ref, tag included"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn load_all_fragments_indexes_and_orders_by_manifest_position() {
+        let manifest = test_manifest(&[
+            "quay.io/test/epel:10",
+            "quay.io/test/nginx:1",
+            "quay.io/test/grafana:11",
+        ]);
+        let loaded = load_all_fragments_with(&manifest, true, |r| Ok(stub_loaded(r)))
+            .expect("stub load cannot fail");
+
+        let indices: Vec<usize> = loaded.iter().map(|f| f.manifest_index).collect();
+        assert_eq!(
+            indices,
+            vec![0, 1, 2],
+            "manifest_index is the slice position"
+        );
+
+        let names: Vec<String> = loaded.iter().map(|f| f.fragment.name.to_string()).collect();
+        assert_eq!(
+            names,
+            vec!["epel", "nginx", "grafana"],
+            "emission order is manifest order, never sorted or grouped"
+        );
+    }
+
+    #[test]
+    fn load_all_fragments_on_empty_manifest_loads_nothing() {
+        let manifest = test_manifest(&[]);
+        let calls = std::cell::Cell::new(0);
+        let loaded = load_all_fragments_with(&manifest, true, |r| {
+            calls.set(calls.get() + 1);
+            Ok(stub_loaded(r))
+        })
+        .expect("an empty manifest is not an error");
+
+        assert!(loaded.is_empty());
+        assert_eq!(
+            calls.get(),
+            0,
+            "an empty manifest must not reach a registry"
+        );
+    }
+
+    #[test]
+    fn load_all_fragments_rejects_dir_source_before_loading() {
+        let manifest = test_manifest(&["dir:./local-fragment"]);
+        let calls = std::cell::Cell::new(0);
+        let err = load_all_fragments_with(&manifest, true, |r| {
+            calls.set(calls.get() + 1);
+            Ok(stub_loaded(r))
+        })
+        .expect_err("dir: sources are unsupported");
+
+        assert!(err.to_string().contains("dir:"), "got: {err}");
+        assert_eq!(
+            calls.get(),
+            0,
+            "a dir: source must fail before any load is attempted"
+        );
+    }
+
+    #[test]
+    fn load_all_fragments_aborts_at_the_first_failing_fragment() {
+        let manifest = test_manifest(&[
+            "quay.io/test/epel:10",
+            "quay.io/test/broken:1",
+            "quay.io/test/nginx:1",
+        ]);
+        let calls = std::cell::Cell::new(0);
+        let err = load_all_fragments_with(&manifest, true, |r| {
+            calls.set(calls.get() + 1);
+            if r.contains("broken") {
+                bail!("simulated registry failure");
+            }
+            Ok(stub_loaded(r))
+        })
+        .expect_err("a failing fragment fails the run");
+
+        assert!(err.to_string().contains("simulated registry failure"));
+        assert_eq!(
+            calls.get(),
+            2,
+            "the run stops at the failing fragment rather than continuing to the third"
+        );
     }
 }
 

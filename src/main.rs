@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use osfragment_assemble::classify::{
     base_type_override_note, capabilities_for_base_type, classify_base,
@@ -9,7 +9,8 @@ use osfragment_assemble::generator::generate_containerfile;
 use osfragment_assemble::inspect::run_inspect;
 use osfragment_assemble::list::run_list;
 use osfragment_assemble::loader::{
-    load_registry_fragment, load_registry_fragment_metadata_only, resolve_digest,
+    load_all_fragments, load_registry_fragment_metadata_only, resolve_digest,
+    should_keep_fragment_digests,
 };
 use osfragment_assemble::manifest::{parse_manifest, BaseType};
 use osfragment_assemble::ocp::generate_machine_os_config;
@@ -223,63 +224,4 @@ fn main() -> Result<()> {
     }
 
     Ok(())
-}
-
-/// `keep_digests`: whether to leave each fragment's digest-pinned
-/// `FragmentSource`/`resolved_digest` in place. See
-/// `should_keep_fragment_digests` for why this isn't simply `pin_digests`.
-fn load_all_fragments(
-    manifest: &osfragment_assemble::manifest::Manifest,
-    keep_digests: bool,
-) -> Result<Vec<osfragment_assemble::loader::LoadedFragment>> {
-    let mut fragments = Vec::new();
-    let total = manifest.fragments.len();
-
-    for (idx, mf) in manifest.fragments.iter().enumerate() {
-        let source = mf.resolve_source()?;
-        let osfragment_assemble::manifest::FragmentSource::Registry { ref image_ref } = source;
-        eprintln!("Loading fragment {}/{}: {}...", idx + 1, total, image_ref);
-        let mut loaded = load_registry_fragment(image_ref)?;
-        if !keep_digests {
-            // Use the manifest's declared image ref, not the digest-pinned ref
-            loaded.source = osfragment_assemble::manifest::FragmentSource::Registry {
-                image_ref: image_ref.clone(),
-            };
-            loaded.resolved_digest = None;
-        }
-        eprintln!(
-            "  {} ({})",
-            loaded.fragment.name, loaded.fragment.description
-        );
-        loaded.manifest_index = idx;
-        fragments.push(loaded);
-    }
-
-    // No reordering: emission follows manifest order, which is user intent.
-    Ok(fragments)
-}
-
-/// Whether fragment digests (and the digest-pinned `FragmentSource`) should
-/// survive `load_all_fragments` for use downstream.
-///
-/// `--pin-digests` keeps them for default mode's named-stage emission and
-/// digest comments, as before. `--self-contained` also needs them kept,
-/// independently of `--pin-digests`: materialization must pull exactly the
-/// digest that was validated, even though the emitted Containerfile never
-/// exposes that digest (see generator.rs's self-contained suppression).
-fn should_keep_fragment_digests(pin_digests: bool, self_contained: Option<&Path>) -> bool {
-    pin_digests || self_contained.is_some()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn keep_fragment_digests_cases() {
-        assert!(!should_keep_fragment_digests(false, None));
-        assert!(should_keep_fragment_digests(false, Some(Path::new("out"))));
-        assert!(should_keep_fragment_digests(true, None));
-        assert!(should_keep_fragment_digests(true, Some(Path::new("out"))));
-    }
 }

@@ -31,11 +31,11 @@ when they disagree.
 
 | File | Responsibility |
 |------|----------------|
-| `src/main.rs` | `clap` CLI definition, subcommand dispatch, and the two helpers `load_all_fragments` and `should_keep_fragment_digests` |
+| `src/main.rs` | `clap` CLI definition and subcommand dispatch, nothing else. No logic and no tests live here |
 | `src/lib.rs` | Module declarations only, no logic |
 | `src/manifest.rs` | Parses the composition YAML into `Manifest` and `ManifestFragment`. Owns `BaseType` and `FragmentSource` |
 | `src/fragment.rs` | The `fragment.toml` data model and parser. Owns the `FragmentName` newtype, `REPO_PREFIXES`, and `is_repo_path` |
-| `src/loader.rs` | Pulls fragment images via `skopeo`, reads metadata from OCI annotations or by walking layers, validates tar entries, and materializes fragment payload to disk. Produces `LoadedFragment` |
+| `src/loader.rs` | Pulls fragment images via `skopeo`, reads metadata from OCI annotations or by walking layers, validates tar entries, and materializes fragment payload to disk. Produces `LoadedFragment`. Also loads a whole manifest's worth in order (`load_all_fragments`) and decides whether digests survive that load (`should_keep_fragment_digests`) |
 | `src/classify.rs` | Turns the base image's declared `baseType` into a `CapabilitySet` of `Capability::Bootc` and `Capability::Systemd`. Declared-or-default, no network |
 | `src/validate.rs` | Composition checks across loaded fragments: duplicate names, declared conflicts, repo file collisions |
 | `src/generator.rs` | `generate_containerfile`: emits the Containerfile. Also `split_image_ref` |
@@ -141,9 +141,10 @@ listed there is invisible to future sessions.
   385; everything after that is one inline test module. The same pattern
   applies to `src/loader.rs` and `src/self_contained.rs`, where the test
   module is the larger part of the file.
-- **`main.rs` is not a pure dispatcher.** `load_all_fragments` and
-  `should_keep_fragment_digests` live there, outside the library, so they are
-  reachable only from the binary and its own inline tests.
+- **Keep logic out of `main.rs`.** It is dispatch only, so anything it would
+  otherwise compute belongs in a library module where tests can reach it.
+  `load_all_fragments` and `should_keep_fragment_digests` used to live there
+  and now sit in `loader.rs` for exactly that reason.
 - **Fragment-supplied values reach filesystem paths.** Where each one is
   checked, and what to accept as a parameter type when you add a path join, is
   in [fragment-input-invariants.md](fragment-input-invariants.md).
