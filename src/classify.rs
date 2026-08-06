@@ -3,7 +3,12 @@ use std::collections::HashSet;
 use crate::manifest::BaseType;
 
 /// Capabilities that a base image may provide.
-/// Steps in the phase table carry a `requires` field referencing one of these.
+///
+/// `generate_containerfile` emits an optional step only when the base's
+/// capability set contains what that step needs: `systemctl preset-all`
+/// needs `Systemd`, `RUN bootc container lint` needs `Bootc`. The check is
+/// a `contains` call at each step's emission site; there is no table of
+/// steps and no `requires` field.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Capability {
     Bootc,
