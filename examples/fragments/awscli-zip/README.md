@@ -13,7 +13,7 @@ order to be correct for image mode, re-derived and re-debugged in every project
 that installs the same component. You consume it as a versioned, pinned artifact
 instead, and your Containerfile says one line.
 
-## The honest framing
+## Why this exists
 
 The idiomatic way to get the AWS CLI into a CentOS Stream 10 image is
 `dnf install awscli2`. It is not a niche third-party package and it is not even

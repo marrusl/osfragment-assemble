@@ -14,7 +14,7 @@ Containerfile, re-derived and re-debugged in every project that needs the same
 component. You consume it as a versioned, pinned artifact instead, and your
 Containerfile says one line.
 
-## The honest framing
+## Why this exists
 
 The idiomatic way to get an NVIDIA driver into a bootc image is RPMs, from
 NVIDIA's CUDA repo or from a prebuilt kmod package. Nobody in the bootc

@@ -524,7 +524,7 @@ applied post-`FROM`, into the tests. And the escape clause that let it be
 reopened is worth naming: the list stops re-litigation of decisions, it does not
 stop a must-fix finding that the recorded reasoning was factually wrong.
 
-**One honest gap.** No verification run has built a final stage with **zero**
+**One gap.** No verification run has built a final stage with **zero**
 instructions after `FROM`; the local runs all had a `RUN` there. It is ordinary
 Containerfile shape and no issue is expected, but it is now load-bearing for the
 annotation outcome, so it is on the manual end-to-end list rather than assumed.
