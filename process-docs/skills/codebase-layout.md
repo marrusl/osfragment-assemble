@@ -34,7 +34,7 @@ when they disagree.
 |------|----------------|
 | `src/main.rs` | `clap` CLI definition and subcommand dispatch, nothing else. No logic and no tests live here |
 | `src/lib.rs` | Module declarations only, no logic |
-| `src/manifest.rs` | Parses the composition YAML into `Manifest` and `ManifestFragment`, rejecting unknown top-level keys. Owns `FragmentSource` |
+| `src/manifest.rs` | Parses the composition YAML into `Manifest` and `ManifestFragment`, rejecting unknown keys at the top level and inside fragment entries. Owns `FragmentSource` |
 | `src/fragment.rs` | The `fragment.toml` data model and parser. Owns the `FragmentName` newtype, `REPO_PREFIXES`, and `is_repo_path` |
 | `src/loader.rs` | Pulls fragment images via `skopeo`, reads metadata from OCI annotations or by walking layers, validates tar entries, and materializes fragment payload to disk. Produces `LoadedFragment`. Also loads a whole manifest's worth in order (`load_all_fragments`) and decides whether digests survive that load (`should_keep_fragment_digests`) |
 | `src/validate.rs` | Composition checks across loaded fragments: duplicate names, declared conflicts, repo file collisions |
