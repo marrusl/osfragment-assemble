@@ -167,14 +167,16 @@ fragments:
 
 - `apiVersion`: Must be `osfragment/v1alpha1`
 - `kind`: Must be `Composition`
-- `base`: Required. Base bootc image reference (RHCOS included). The base is never inspected;
-  the generated Containerfile validates it at build time via `bootc container lint`.
+- `base`: Required. Base bootc image reference (RHCOS included). The base is never probed to
+  decide behavior; the generated Containerfile validates it at build time via
+  `bootc container lint`. Only `--pin-digests` contacts the registry for the base, to resolve
+  its digest.
 - `fragments`: Required. Array of at least one fragment.
   - `image`: Required. OCI image reference (`registry/repo:tag`) or digest (`registry/repo@sha256:...`).
   - `packages`: Optional. Array of package names to install from this fragment's repos. Defaults to `[]`.
   - `mirror`: Optional. A base URL to rewrite this fragment's `.repo` files against: `baseurl` is replaced with the given URL, and any `metalink`/`mirrorlist` lines are commented out (e.g., `https://satellite.corp/repo`).
 
-Unknown top-level manifest keys are rejected as parse errors, so a misspelled field fails the parse instead of being silently ignored.
+Unknown manifest keys are rejected as parse errors, at the top level and inside fragment entries, so a misspelled field fails the parse instead of being silently ignored.
 
 Package installation is deduplicated across all fragments; if multiple fragments request the same package, it's installed once.
 

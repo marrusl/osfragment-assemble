@@ -193,7 +193,7 @@ List fragments in manifest order (the order they'll appear in the generated Cont
 
 osfragment-assemble composes build inputs for bootc image builds. Every generated Containerfile applies systemd presets (`systemctl preset-all`) and validates the result (`bootc container lint`); on a base without bootc, the lint step fails the build. MachineOSConfig output (`--ocp`) is a bootc target too: it builds OpenShift node OS images through the Machine Config Operator.
 
-**The base image is never inspected.** Generation requires no registry access for the base, so it works against a base that exists only in local storage, or with no network at all.
+**The base image is never probed to decide behavior.** Default-path generation needs no registry access for the base, so it works against a base that exists only in local storage, or with no network at all. `--pin-digests` resolves digests from the registry, the base's included.
 
 ## Example fragments
 

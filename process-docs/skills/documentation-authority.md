@@ -2,7 +2,8 @@
 
 When `README.md` and `docs/fragment-format.md` disagree, `README.md` is authoritative — it's
 what a 2026-08 GPT-5 review panel caught: `docs/fragment-format.md` had drifted stale on
-`baseType` classification and the `mirror` field while `README.md` stayed accurate. If you're
+`baseType` classification (a field since removed) and the `mirror` field while `README.md`
+stayed accurate. If you're
 updating one, check the other for the same fact.
 
 `process-docs/specs/implemented/2026-07-24-bootc-assemble-poc-design.md` and

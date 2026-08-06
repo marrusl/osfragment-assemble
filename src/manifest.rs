@@ -25,7 +25,10 @@ struct ManifestYaml {
     fragments: Vec<ManifestFragmentYaml>,
 }
 
+// deny_unknown_fields: same reasoning as ManifestYaml. A typo'd key inside
+// a fragment entry (mirrorr:) must fail the parse, not be silently ignored.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ManifestFragmentYaml {
     image: String,
     #[serde(default)]
@@ -198,8 +201,7 @@ fragments: []
     /// be silently ignored.
     #[test]
     fn base_type_is_rejected_as_an_unknown_field() {
-        let values = ["bootc", "container", "something-else"];
-        for value in values {
+        for value in ["bootc", "container", "something-else"] {
             let yaml = format!(
                 r#"
 apiVersion: osfragment/v1alpha1
@@ -211,15 +213,11 @@ fragments:
 "#
             );
             let err = parse_manifest(&yaml, "test-manifest.yaml")
-                .expect_err("baseType must fail the parse")
-                .to_string();
-            let full = format!(
-                "{:#}",
-                parse_manifest(&yaml, "test-manifest.yaml").unwrap_err()
-            );
+                .expect_err("baseType must fail the parse");
+            let full = format!("{err:#}");
             assert!(
                 full.contains("baseType"),
-                "error for baseType: {value} must name the field, got: {err} / {full}"
+                "error for baseType: {value} must name the field, got: {full}"
             );
         }
     }
@@ -241,5 +239,45 @@ fragmnets:
             full.contains("fragmnets"),
             "a typo'd key must fail the parse naming the key, got: {full}"
         );
+    }
+
+    #[test]
+    fn unknown_fragment_entry_field_is_rejected() {
+        let yaml = r#"
+apiVersion: osfragment/v1alpha1
+kind: Composition
+base: quay.io/centos-bootc/centos-bootc:stream10
+fragments:
+  - image: quay.io/test/epel:10
+    mirrorr: https://mirror.internal.corp/epel
+"#;
+        let full = format!(
+            "{:#}",
+            parse_manifest(yaml, "test-manifest.yaml").unwrap_err()
+        );
+        assert!(
+            full.contains("mirrorr"),
+            "a typo'd fragment key must fail the parse naming the key, got: {full}"
+        );
+    }
+
+    /// `deny_unknown_fields` means any schema change can break a manifest that
+    /// used to parse, and the manifests shipped in `examples/` are the ones a
+    /// user copies first. They must all still parse.
+    #[test]
+    fn every_committed_example_manifest_parses() {
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/examples/manifests");
+        let mut checked = 0;
+        for entry in std::fs::read_dir(dir).expect("examples/manifests must exist") {
+            let path = entry.unwrap().path();
+            if path.extension().and_then(|e| e.to_str()) != Some("yaml") {
+                continue;
+            }
+            let content = std::fs::read_to_string(&path).unwrap();
+            parse_manifest(&content, &path.display().to_string())
+                .unwrap_or_else(|e| panic!("{} must parse: {e:#}", path.display()));
+            checked += 1;
+        }
+        assert!(checked > 0, "no example manifests found under {dir}");
     }
 }

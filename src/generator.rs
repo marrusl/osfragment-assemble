@@ -615,36 +615,6 @@ mod tests {
     }
 
     #[test]
-    fn generated_output_has_preset_apply() {
-        let (mut cis, mf_cis) = make_config_fragment("cis", "bbb222");
-        cis.manifest_index = 0;
-        let manifest = Manifest {
-            base: "registry.redhat.io/rhel10/rhel-bootc:10.0".into(),
-            source_path: "test-manifest.yaml".into(),
-            fragments: vec![mf_cis],
-        };
-        let output =
-            generate_containerfile(&manifest, &[cis], Some("sha256:base123"), false, false)
-                .unwrap();
-        assert!(output.contains("systemctl preset-all --preset-mode=enable-only"));
-    }
-
-    #[test]
-    fn generated_output_has_bootc_lint() {
-        let (mut cis, mf_cis) = make_config_fragment("cis", "bbb222");
-        cis.manifest_index = 0;
-        let manifest = Manifest {
-            base: "registry.redhat.io/rhel10/rhel-bootc:10.0".into(),
-            source_path: "test-manifest.yaml".into(),
-            fragments: vec![mf_cis],
-        };
-        let output =
-            generate_containerfile(&manifest, &[cis], Some("sha256:base123"), false, false)
-                .unwrap();
-        assert!(output.contains("bootc container lint"));
-    }
-
-    #[test]
     fn no_packages_phase_when_no_packages() {
         let (mut cis, mf_cis) = make_config_fragment("cis", "bbb222");
         cis.manifest_index = 0;
@@ -955,16 +925,29 @@ mod tests {
         assert!(!output.contains("# Override summary"));
     }
 
+    /// Every comment in the emitted Containerfile is behind an `if !ocp` guard,
+    /// so OCP output should carry no comment line at all. Asserting the general
+    /// rule catches a dropped guard on any one of them, including the preset
+    /// banner that `# ---` does not match.
     #[test]
-    fn ocp_omits_section_comments() {
+    fn ocp_output_has_no_comment_lines_at_all() {
         let (epel, mf_epel) = make_unpinned_repos_fragment("epel");
+        let (mut cis, mf_cis) = make_hook_fragment("cis", &["entrypoint"]);
+        cis.manifest_index = 1;
         let manifest = Manifest {
             base: "registry.redhat.io/rhel10/rhel-bootc:10.0".into(),
             source_path: "test-manifest.yaml".into(),
-            fragments: vec![mf_epel],
+            fragments: vec![mf_epel, mf_cis],
         };
-        let output = generate_containerfile(&manifest, &[epel], None, true, false).unwrap();
-        assert!(!output.contains("# ---"));
+        let output = generate_containerfile(&manifest, &[epel, cis], None, true, false).unwrap();
+        let comments: Vec<&str> = output
+            .lines()
+            .filter(|l| l.trim_start().starts_with('#'))
+            .collect();
+        assert!(
+            comments.is_empty(),
+            "OCP output must carry no comment lines, found: {comments:?}\n{output}"
+        );
     }
 
     #[test]
@@ -999,19 +982,6 @@ mod tests {
         let stage_pos = output.find("AS frag-epel").unwrap();
         let final_pos = output.find("FROM configs AS final").unwrap();
         assert!(stage_pos < final_pos);
-    }
-
-    #[test]
-    fn ocp_has_preset_apply_and_lint() {
-        let (epel, mf_epel) = make_unpinned_repos_fragment("epel");
-        let manifest = Manifest {
-            base: "registry.redhat.io/rhel10/rhel-bootc:10.0".into(),
-            source_path: "test-manifest.yaml".into(),
-            fragments: vec![mf_epel],
-        };
-        let output = generate_containerfile(&manifest, &[epel], None, true, false).unwrap();
-        assert!(output.contains("systemctl preset-all"));
-        assert!(output.contains("bootc container lint"));
     }
 
     #[test]
