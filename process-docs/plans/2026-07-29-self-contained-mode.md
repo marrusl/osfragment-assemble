@@ -2474,7 +2474,7 @@ uses `from=context` (no `from=` at all) and deliberately drops
 host-tied mount source, and a build-context source is a static copy
 with no submounts to propagate. `z` still applies there: SELinux
 relabeling is orthogonal to propagation. See
-`process-docs/specs/proposed/2026-07-29-self-contained-mode.md` for
+`process-docs/specs/implemented/2026-07-29-self-contained-mode.md` for
 the full reasoning.
 ```
 

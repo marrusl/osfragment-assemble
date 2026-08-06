@@ -1,6 +1,6 @@
 # Self-Contained Mode
 
-**Status:** Proposed
+**Status:** Implemented
 **Date:** 2026-07-29
 
 Adds one output mode: `--self-contained <dir>` materializes fragment contents

@@ -1,6 +1,6 @@
 # Generator and Schema Changes
 
-**Status:** Proposed (revised after round 1 review)
+**Status:** Implemented (revised after round 1 review)
 **Date:** 2026-07-27
 
 Consolidates five changes to the generator, the OpenShift emitter, and the
