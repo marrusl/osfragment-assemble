@@ -2,6 +2,8 @@
 
 A tool for building composable bootc-compatible OS images from fragment OCI images.
 
+New to the project? Start with [the design explainer](docs/design.md): what a fragment is, why fragments are standard OCI images, and what the tool deliberately leaves to dnf, your configuration tooling, and your builder.
+
 ## What it does
 
 osfragment-assemble reads a YAML manifest declaring a base bootc-compatible image and a set of fragment OCI images, then generates a Containerfile. It can also generate a MachineOSConfig YAML for OpenShift/OKD on-cluster layering. Fragments are standard OCI images that package repo configs, RPM GPG keys, config files, systemd presets, and hooks into reusable units. The tool handles ordering (repo files before packages, packages before config files, config files before hooks), deduplication (identical repo definitions from multiple fragments), and optionally pins all references to content-addressed digests.

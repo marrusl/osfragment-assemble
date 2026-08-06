@@ -1,12 +1,12 @@
 # Design Rationales
 
-Engineering decisions behind osfragment-assemble's fragment format and assembly model.
+Engineering decisions behind osfragment-assemble's fragment format and assembly model. For the design argued as one case, front to back, start with [the design explainer](design.md); this document is the fine-grained decision record behind it.
 
 ## Why fragments are standard OCI images
 
 Fragments use the existing OCI distribution stack: no new builder, no custom registry plugins, no client-side tooling changes. Vendors can publish fragments to quay.io, GHCR, or ECR using the same workflows they use for container images. Customers can pull them with skopeo, mirror them with podman, and scan them with existing supply chain tools.
 
-Being an artifact rather than a piece of text is the point. A unit that lives in a registry has a digest, so it can be pinned exactly. It has a tag, so it can be versioned and upgraded. It can be signed, mirrored into a disconnected environment, pulled through whatever authenticated proxy is already in place, and scanned by whatever already scans images. Text spliced into a build at parse time has none of that: no identity to pin, nothing to sign, nothing for a mirror to hold. Everything a registry already does for container images it does for fragments at no additional cost, and that is the reason the unit is an image.
+The core argument, that being an artifact rather than a piece of text is the point, now lives in [the design explainer](design.md).
 
 Alternative considered: a custom archive format (`.tar.gz` or `.zip`). Rejected because it requires a separate distribution story and doesn't benefit from existing registry infrastructure.
 
