@@ -13,7 +13,7 @@
 
 **Tech Stack:** Rust (2021 edition), clap (CLI), serde + toml + serde_yaml (parsing), flate2 + tar (layer extraction), tempfile, anyhow (errors)
 
-**Spec:** `docs/specs/2026-07-24-osfragment-poc-design.md`
+**Spec:** `process-docs/specs/implemented/2026-07-24-bootc-assemble-poc-design.md`
 
 ## Global Constraints
 

@@ -15,14 +15,15 @@ there are no sub-crates. Every module is one file directly under `src/`.
 ├── examples/         # Example fragments and manifests
 │   ├── fragments/    # 10 buildable fragment sources
 │   └── manifests/    # 6 composition manifests
-├── docs/             # User-facing docs, plus POC-era specs and plans
+├── docs/             # User-facing documentation only
 ├── process-docs/     # Specs, plans, and skill files (internal)
 └── tmp/              # Gitignored scratch, never committed
 ```
 
-`README.md` is the authoritative user documentation. `docs/fragment-format.md`
-and `docs/rationales.md` sit beside it, and `docs/specs/` and `docs/plans/`
-hold POC records that are historical rather than current. See
+`README.md` is the authoritative user documentation, with
+`docs/fragment-format.md` and `docs/rationales.md` beside it. Those two files
+are all of `docs/`: specs and plans live under `process-docs/` only, including
+the POC-era pair. See
 [documentation-authority.md](documentation-authority.md) for which file wins
 when they disagree.
 
@@ -132,8 +133,10 @@ listed there is invisible to future sessions.
 
 ## Gotchas
 
-- **Two locations hold specs and plans.** New work goes in `process-docs/`.
-  `docs/specs/` and `docs/plans/` are POC records kept for history.
+- **`implemented/` means the work shipped, not that the document is current.**
+  Several specs there describe behavior later changes superseded, and the
+  POC-era design spec carries a banner saying so. Read it as a record of what
+  landed, and check `README.md` for what the code does now.
 - **`src/generator.rs` is mostly tests.** The emitting code ends around line
   385; everything after that is one inline test module. The same pattern
   applies to `src/loader.rs` and `src/self_contained.rs`, where the test
