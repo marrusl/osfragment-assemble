@@ -22,6 +22,13 @@ Adopters first: platform engineers and vendor packagers deciding whether to try 
 - Every claim about tool behavior must be true of the tool today. The one forward-looking section is clearly framed as such.
 - No em dashes. Avoid the word "shape" (use "structure," "layout," "form," or name the thing directly).
 - Target length: 2,000 to 2,300 words.
+- Never-say list, beyond the comparison ban:
+  - No packaging anatomy vocabulary: no "spec header," no "scriptlet," nothing that maps the format onto a package's parts.
+  - The tool never "resolves" or "manages" anything. It detects, orders, batches, and defers.
+  - Ordering is never the value claim; non-contiguity is (see the mechanism section).
+  - Never imply a fragment is warranted for every change. One scoping sentence concedes the trivial case: a one-line change stays a line in your Containerfile; a fragment captures an integration that would otherwise be re-derived by the next team, the next image, the next base bump.
+  - No discovery implications. Composition is explicit in the manifest; nothing is picked up by being dropped somewhere.
+  - The runtime-composition point appears only in its calibrated form: nothing composes into the image. Never a bare "nothing will save you."
 
 ## Structure
 
@@ -32,6 +39,8 @@ Six sections, one arc. Titles below are indicative; the writer may improve them.
 On bootc there is no path to follow. A vendor's install documentation, where it exists, describes the conventional-system workflow: add this repo, install this package, edit that config, enable the service. Translating that into an image build is entirely on the reader: you work it out from what you know about RPM and how you want the package configured, encode the result in your Containerfile, and that derivation lives nowhere but your image. The next team starts from zero and derives it again. Nothing is published, nothing is versioned, nothing is shared. Not even prose.
 
 This status quo is the only foil the document ever names.
+
+Two lines belong here and nowhere else in the document. The vendor's half of the gap lands as the capstone: a running system has drop-in directories, a place a third party can put their piece; an image build has no equivalent, and nothing to drop into it. And for the reader who thinks in platforms, one calibrated sentence on why the pressure is structural: on an application platform each vendor ships its own container and composition happens at deploy time, while a bootc host runs one image, and nothing composes into it after it is built. Both lines describe the absence only; neither ever describes the fragment. If the word budget forces a cut, the drop-in line wins.
 
 ### 2. The missing thing is a unit (~300 words)
 
@@ -49,7 +58,9 @@ What a fragment is:
 - `tree/`: delivered payload, copied into the image verbatim.
 - `hooks/`: build inputs, executed through a bind mount, leaving nothing behind in the image.
 
-What the tool does with a set of fragments: ordering (repo definitions before the package install, configuration after it, hooks after that), batching and deduplication of package installs, conflict detection at generation time before anything builds, and a plain Containerfile out the other end.
+The composer's surface gets its own beat: the manifest is a few lines of YAML naming a base image, the fragments to compose, and optionally packages to select, with a plain Containerfile out the other end. A `packages:` list is passed to dnf untouched; describe it as passthrough, never as management.
+
+What the tool does with a set of fragments: ordering (repo definitions before the package install, configuration after it, hooks after that), batching and deduplication of package installs, conflict detection at generation time before anything builds, and a plain Containerfile out the other end. State the ordering work as non-contiguity, never as a counting convenience: a single unit's repo definition and its configuration land on opposite sides of the package install, so there is no correct paste position for a unit at any scale.
 
 ### 4. Powerful because of what it refuses to own (~400 words)
 
@@ -80,9 +91,9 @@ Two more consequences close the section:
 
 The one forward-looking section, and the document's close.
 
-Neutrality: everything the model depends on is infrastructure nobody owns. Any registry, any bootc base, existing signers and scanners. A vendor participating does not have to bet on another vendor's toolchain.
+Neutrality: everything the model depends on is infrastructure nobody owns. Any registry, any bootc base, existing signers and scanners. A vendor participating does not have to bet on another vendor's toolchain. One line calls back to the exit: between what is published and what is run, the tool itself is codegen anyone can walk away from, so dependence on it stays shallow. The section argues that the pattern can spread; it never reads as a bid to be the single blessed answer.
 
-First mover: there is no incumbent format for bootc integration knowledge, and no habits to displace. Fragments do not have to convince anyone to abandon a working practice; they can be the form the practice takes from the start.
+First mover, scoped to the shipped-knowledge channel: a one-off change in your own Containerfile has an incumbent form and always will, a line you write yourself. What has no incumbent is the form integration knowledge takes when it is shipped: no channel, no artifact, and no bootc-specific prose to displace. Fragments do not have to convince anyone to abandon a working practice; they can be the form the shipping practice takes from the start.
 
 Bottom-up bootstrap: because the authoring bar is low, consumers can be producers from day one. A vendor arriving later replaces a homegrown fragment with a canonical one, which is an upgrade, not a migration.
 
