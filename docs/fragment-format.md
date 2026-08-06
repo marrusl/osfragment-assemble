@@ -125,7 +125,7 @@ podman push quay.io/user/fragment:1.0
 
 ## OCI Annotations (Fast-Path Metadata)
 
-For performance, fragments should include OCI annotations that mirror `fragment.toml` fields. When present, `inspect` and `list` can read metadata without pulling layers.
+For performance, fragments should include OCI annotations that mirror `fragment.toml` fields. When present, `list` can read metadata without pulling layers; `inspect` reports tree and hook contents, so it always pulls the layer.
 
 Annotation keys:
 - `com.github.marrusl.osfragment.name`: fragment name
@@ -180,4 +180,4 @@ Unknown manifest keys are rejected as parse errors, at the top level and inside 
 
 Package installation is deduplicated across all fragments; if multiple fragments request the same package, it's installed once.
 
-Repo deduplication: If multiple fragments provide `.repo` files with the same filename, the tool compares their content. Identical content is silently deduplicated (first fragment wins). Different content for the same repo ID causes the build to fail.
+Repo deduplication: If multiple fragments provide `.repo` files with the same filename, the tool compares their content. Identical content is silently deduplicated (last fragment wins). Different content for the same repo ID causes the build to fail.

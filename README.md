@@ -1,6 +1,6 @@
 # osfragment-assemble
 
-A tool for building composable bootc-compatible OS images from fragment OCI images.
+A tool for composing bootc-compatible OS image builds from fragment OCI images.
 
 New to the project? Start with [the design explainer](docs/design.md): what a fragment is, why fragments are standard OCI images, and what the tool deliberately leaves to dnf, your configuration tooling, and your builder.
 
