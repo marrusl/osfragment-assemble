@@ -4,7 +4,7 @@ osfragment-assemble turns fragments, published, versioned units of integration k
 
 ## Worked out by hand, shipped nowhere
 
-On bootc there is no path to follow. A vendor's install documentation, where it exists, describes the conventional-system workflow: add this repository, install this package, edit that configuration, enable the service. Translating that into an image build is entirely on you. You work it out from what you know about RPM and how you want the software configured, you encode the result in your Containerfile, and that derivation lives nowhere but your image. The next team starts from zero and derives it again. So does the next image definition, and the next base bump. Nothing is published, nothing is versioned, nothing is shared. Not even prose.
+On bootc there is no path to follow. A vendor's install documentation, where it exists, describes the conventional-system workflow: add this repository, install this package, edit that configuration, enable the service. Translating that into an image build is entirely on you. You work it out from what you know about RPM and how you want the software configured, you encode the result in your Containerfile, and that derivation lives nowhere but your image. The same derivation happens again for the next image definition, the next base bump, the next organization. What exists is text in private repositories. Nothing is published, nothing carries a version a stranger can pin, and from vendors, not even prose.
 
 Notice what is missing. A running system has drop-in directories, a place where a third party can put their piece without coordinating with anyone else. An image build has no equivalent, and nothing to drop into it.
 
