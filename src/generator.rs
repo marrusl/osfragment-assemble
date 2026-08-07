@@ -32,13 +32,14 @@ pub fn split_image_ref(image_ref: &str) -> (&str, Option<&str>) {
 /// already carries.
 ///
 /// `split_image_ref` deliberately returns a digest-bearing reference whole,
-/// because a digest is not a tag, so formatting `{name}@{digest}` around its
-/// result appends a second digest to a reference that already had one. Build
-/// mounts require the manifest to pin, which makes an already-pinned
-/// reference the normal input here rather than an unusual one.
+/// because a digest is not a tag, so it cannot on its own strip a tag from a
+/// reference that carries both (`repo:tag@sha256:old`). This function strips
+/// the digest first, then routes the remainder through `split_image_ref` to
+/// drop any tag, so a bare tag, a bare digest, or both together all
+/// canonicalize to `repository@digest`.
 pub fn pin_to_digest(image_ref: &str, digest: &str) -> String {
-    let (name, _tag) = split_image_ref(image_ref);
-    let repository = name.split('@').next().unwrap_or(name);
+    let without_digest = image_ref.split('@').next().unwrap_or(image_ref);
+    let (repository, _tag) = split_image_ref(without_digest);
     format!("{}@{}", repository, digest)
 }
 
@@ -164,8 +165,7 @@ pub fn generate_containerfile(
     } else {
         writeln!(out, "# --- Base ---")?;
         let base_ref = if let Some(d) = base_digest {
-            let (base_name, _tag) = split_image_ref(&manifest.base);
-            format!("{}@{}", base_name, d)
+            pin_to_digest(&manifest.base, d)
         } else {
             manifest.base.clone()
         };
@@ -769,6 +769,12 @@ mod tests {
                 "quay.io/acme/frag@sha256:cafe",
                 "quay.io/acme/frag@sha256:beef",
             ),
+            // A ref can carry a tag and a digest together; both must drop,
+            // not just the digest, leaving the tag stuck to the repository.
+            (
+                "quay.io/acme/frag:1.0@sha256:cafe",
+                "quay.io/acme/frag@sha256:beef",
+            ),
         ];
         for (input, expected) in cases {
             assert_eq!(
@@ -792,6 +798,29 @@ mod tests {
                 .unwrap();
         // Must preserve the port in the pinned ref
         assert!(output.contains("FROM localhost:5000/rhel-bootc@sha256:base123"));
+    }
+
+    #[test]
+    fn base_image_pinning_is_idempotent_on_an_already_pinned_base() {
+        // Covers the base pinning path at generate_containerfile's "FROM"
+        // line, which reuses pin_to_digest rather than re-deriving the
+        // strip-and-append logic that produced the double-digest bug.
+        let (epel, mf_epel) = make_repos_fragment("epel", "aaa111");
+        let manifest = Manifest {
+            base: "quay.io/acme/rhel-bootc@sha256:oldbase".into(),
+            source_path: "test-manifest.yaml".into(),
+            fragments: vec![mf_epel],
+        };
+        let output =
+            generate_containerfile(&manifest, &[epel], Some("sha256:base123"), false, false)
+                .unwrap();
+        // The FROM line must pin cleanly, not append a second digest onto
+        // the one the manifest already carried. (The "Resolved digests"
+        // header comment separately echoes manifest.base verbatim for
+        // traceability, so it legitimately still shows the old digest:
+        // this assertion is scoped to the FROM line only.)
+        assert!(output.contains("FROM quay.io/acme/rhel-bootc@sha256:base123"));
+        assert!(!output.contains("FROM quay.io/acme/rhel-bootc@sha256:oldbase@sha256:base123"));
     }
 
     // --- Helpers for unpinned fragments ---
