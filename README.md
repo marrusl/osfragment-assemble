@@ -199,7 +199,7 @@ osfragment-assemble composes build inputs for bootc image builds. Every generate
 
 ## Example fragments
 
-The `examples/fragments/` directory contains 8 ready-to-use fragments:
+The `examples/fragments/` directory contains 10 ready-to-use fragments:
 
 - **epel** - EPEL repository configuration
 - **tailscale** - Tailscale VPN with systemd preset
@@ -209,6 +209,14 @@ The `examples/fragments/` directory contains 8 ready-to-use fragments:
 - **cis-hardening** - CIS security hardening configurations
 - **node-exporter** - Prometheus Node Exporter
 - **nginx** - nginx web server
+- **awscli-zip** - AWS CLI v2 from the vendor's zip, installed into `/usr` rather than `/usr/local`
+- **nvidia-driver-run** - NVIDIA driver from the vendor's `.run` installer, compiled for the image's kernel
+
+`nvidia-driver-run` is the demanding one: a vendor installer that wants a TTY,
+a compiler that must not survive into the finished image, and a kernel module
+built for a kernel and a machine that are not the build host's. [Its
+README](examples/fragments/nvidia-driver-run/README.md) is the tour of how much
+a single fragment can carry.
 
 ## License
 
