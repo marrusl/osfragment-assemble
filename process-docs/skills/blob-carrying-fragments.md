@@ -168,6 +168,11 @@ fi
 For reference, none of `centos-bootc:stream10`, `centos-bootc:stream9`, or
 `fedora-bootc:42` ships `unzip` (measured 2026-08-04).
 
+The `nvidia-driver-run` entrypoint applies the same guard across a whole
+dependency list: an `ADDED_DEPS` array filled by probing each build dep with
+`rpm -q`, plus a separately tracked `kernel-devel`, so the pattern scales past
+a single tool.
+
 ## `python3 -m zipfile` is not a substitute for `unzip`
 
 Reaching for the base's Python to avoid installing an extraction tool looks

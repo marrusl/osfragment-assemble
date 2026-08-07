@@ -60,17 +60,33 @@ build container is the target image's architecture.
    report the build host's kernel and is never correct here.
 2. Runs the archive's own `--check`, so a truncated download fails early and
    legibly instead of halfway through a compile.
-3. Installs the build toolchain, builds and installs the driver, runs `depmod`
-   against `$KVER`, verifies the modules actually landed, then removes the
-   toolchain and the package caches.
+3. Installs the build toolchain **only where the base does not already provide
+   it**, checking each package with `rpm -q` first and remembering which ones it
+   added. `kernel-devel` gets the same check, and must match `$KVER` exactly; if
+   the base already carries it, the script reports that and installs nothing.
+4. Builds and installs the driver, runs `depmod` against `$KVER`, and verifies
+   the modules actually landed.
+5. Removes only the packages it installed, along with the package caches.
+   Unconditionally removing the toolchain would strip packages the base image
+   deliberately ships, gcc and make included, and that damage would land on
+   every consumer of that base, not just this fragment's build.
 
-Step 3 is all one script on purpose. The tool bind-mounts `hooks/` for the
+Steps 3 through 5 are all one script on purpose. The tool bind-mounts `hooks/` for the
 duration of a single `RUN`, and a bind mount is never committed to a layer, so
 the 350 MB installer contributes zero bytes to the finished image. The toolchain
 is installed and removed inside that same `RUN` for the same reason: had it been
 declared as `packages.required` in `fragment.toml`, it would have been installed
 during the earlier batched `dnf` step, and removing it later would write a
 whiteout while the bytes stayed recoverable in that earlier layer forever.
+
+The sharpest fact about the build environment is what is missing from it: a
+GPU. The driver is compiled in a build container, for hardware that is not
+attached to the machine doing the building, and possibly for a machine that
+does not exist yet. So nothing hardware-adjacent is left to detection: the
+kernel version comes from the image's own `kernel-core`, the architecture from
+the build container's `uname -m`, and the kernel module type is passed
+explicitly, because the installer's auto-detection inspects attached GPUs and a
+build container has none.
 
 The fragment owns nouveau blacklisting rather than letting the installer do it
 (`--no-disable-nouveau`), so `tree/` carries the modprobe.d drop-in and the
