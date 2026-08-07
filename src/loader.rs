@@ -8,7 +8,7 @@ use crate::fragment::{
 };
 use crate::generator::pin_to_digest;
 use crate::manifest::{FragmentSource, Manifest};
-use crate::mount::{derive_mount_points, empty_mount_notice, MountPoint};
+use crate::mount::{derive_mount_points, MountPoint};
 
 #[derive(Debug, Clone)]
 pub struct LoadedFragment {
@@ -27,6 +27,13 @@ pub struct LoadedFragment {
     /// sorted order. Derived once here so every consumer sees the same
     /// answer and the derivation error surfaces at load.
     pub mount_points: Vec<MountPoint>,
+    /// Whether this fragment carries a `fragment/mount` entry of any kind,
+    /// including a `mount/` that holds no regular files and therefore
+    /// derives no mount points. Carried alongside `mount_points` so a
+    /// caller can reconstruct `empty_mount_notice` without re-deriving
+    /// anything: the loader only carries the evidence, and does not decide
+    /// when the notice fires.
+    pub has_mount_dir: bool,
 }
 
 impl LoadedFragment {
@@ -509,6 +516,7 @@ struct LayeredMetadata {
     hook_paths: Vec<PathBuf>,
     repo_file_contents: std::collections::HashMap<String, String>,
     mount_points: Vec<MountPoint>,
+    has_mount_dir: bool,
 }
 
 /// Scan all layers and aggregate: fragment.toml, tree paths, hooks, and repo
@@ -578,10 +586,12 @@ fn fragment_from_layers(layer_bytes_list: &[Vec<u8>]) -> Result<LayeredMetadata>
         validate_hooks_entrypoint(fragment.name.as_str(), entrypoint_mode)?;
     }
 
+    // No notice here: this routine is shared by generation, registry
+    // `inspect`, and `list`'s metadata-cache-miss fallback. Emission is
+    // caller-owned, so the loader carries `has_mount_dir` alongside
+    // `mount_points` and leaves the decision to whichever caller should
+    // make it (generation's `validate_composition`; `list` never does).
     let mount_points = derive_mount_points(fragment.name.as_str(), &all_mount_files)?;
-    if let Some(notice) = empty_mount_notice(fragment.name.as_str(), has_mount_dir, &mount_points) {
-        eprintln!("{}", notice);
-    }
 
     Ok(LayeredMetadata {
         fragment,
@@ -589,6 +599,7 @@ fn fragment_from_layers(layer_bytes_list: &[Vec<u8>]) -> Result<LayeredMetadata>
         hook_paths: all_hook_paths,
         repo_file_contents,
         mount_points,
+        has_mount_dir,
     })
 }
 
@@ -614,6 +625,7 @@ pub fn load_registry_fragment(image_ref: &str) -> Result<LoadedFragment> {
         manifest_index: 0, // set by caller
         repo_file_contents: metadata.repo_file_contents,
         mount_points: metadata.mount_points,
+        has_mount_dir: metadata.has_mount_dir,
     })
 }
 
@@ -642,6 +654,7 @@ pub fn load_registry_fragment_metadata_only(image_ref: &str) -> Result<LoadedFra
             manifest_index: 0, // set by caller
             repo_file_contents: std::collections::HashMap::new(),
             mount_points: vec![],
+            has_mount_dir: false,
         });
     }
 
@@ -786,6 +799,7 @@ mod tests {
             manifest_index: 0,
             repo_file_contents: std::collections::HashMap::new(),
             mount_points: vec![],
+            has_mount_dir: false,
         }
     }
 
@@ -1362,20 +1376,27 @@ description = "test fragment"
     }
 
     #[test]
-    fn a_symlink_under_mount_is_rejected_by_the_shared_entry_validation() {
+    fn links_under_mount_are_rejected_by_the_shared_entry_validation() {
         // Documentation of existing enforcement rather than new behavior:
         // validate_tar_entry runs on every entry of every layer, before any
-        // mount/ prefix matching happens.
-        let tarball = create_test_tarball_with_modes(&[RawEntry {
-            path: b"fragment/mount/etc/pki/entitlement/cert.pem",
-            data: b"",
-            mode: 0o644,
-            entry_type: tar::EntryType::Symlink,
-        }]);
-        let err = extract_layer_entries(&tarball)
-            .expect_err("links are rejected anywhere in a fragment layer")
-            .to_string();
-        assert!(err.contains("symlink or hardlink"), "got: {err}");
+        // mount/ prefix matching happens. Both link kinds it rejects are
+        // pinned here, specifically under mount/.
+        let cases = [
+            ("symlink", tar::EntryType::Symlink),
+            ("hardlink", tar::EntryType::Link),
+        ];
+        for (label, entry_type) in cases {
+            let tarball = create_test_tarball_with_modes(&[RawEntry {
+                path: b"fragment/mount/etc/pki/entitlement/cert.pem",
+                data: b"",
+                mode: 0o644,
+                entry_type,
+            }]);
+            let err = extract_layer_entries(&tarball)
+                .expect_err("links are rejected anywhere in a fragment layer")
+                .to_string();
+            assert!(err.contains("symlink or hardlink"), "{label}: got: {err}");
+        }
     }
 
     #[test]

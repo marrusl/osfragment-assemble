@@ -114,10 +114,12 @@ Two edges of the derivation rule are pinned down. A regular file
 directly under `mount/` is a generation error: it would derive a mount
 onto `/`, and the pruning step would then drop every other mount as
 nested inside it. A `mount/` directory containing no regular files
-derives no mounts and produces a generation-time notice naming the
-fragment: an empty `mount/` is almost always an authoring mistake, and
-silence would hide it. The same reasoning covers a composition that
-carries mounts but installs nothing: when no packages are selected or
+derives no mounts and produces a notice naming the fragment when the
+composition is generated or the fragment is inspected: an empty
+`mount/` is almost always an authoring mistake, and silence would hide
+it. The notice is caller-owned, so the read-only `list` inventory
+stays silent. The same reasoning covers a composition that carries
+mounts but installs nothing: when no packages are selected or
 required, no dnf RUN is emitted and no mounts attach, so generation
 prints a notice naming the mount-carrying fragments rather than
 staying silent.

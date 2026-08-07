@@ -3,8 +3,24 @@ use std::collections::{HashMap, HashSet};
 
 use crate::loader::LoadedFragment;
 use crate::manifest::Manifest;
+use crate::mount::empty_mount_notice;
 
+/// Generation-time mount diagnostics live here, ahead of the validation
+/// checks below: `validate_composition` is the choke point the generate
+/// path (both self-contained and normal) always runs, while `inspect` and
+/// `list` never call it. That makes emission generation-only without
+/// threading a "should I print" flag through the shared loader. (Task 7
+/// adds this composition's sibling notice, "mounts but no package step",
+/// alongside this one.)
 pub fn validate_composition(_manifest: &Manifest, fragments: &[LoadedFragment]) -> Result<()> {
+    for f in fragments {
+        if let Some(notice) =
+            empty_mount_notice(f.fragment.name.as_str(), f.has_mount_dir, &f.mount_points)
+        {
+            eprintln!("{notice}");
+        }
+    }
+
     check_duplicate_names(fragments)?;
     check_conflicts(fragments)?;
     check_repo_conflicts(fragments)?;
@@ -128,6 +144,7 @@ mod tests {
             manifest_index: 0,
             repo_file_contents: std::collections::HashMap::new(),
             mount_points: vec![],
+            has_mount_dir: false,
         }
     }
 
@@ -222,5 +239,37 @@ mod tests {
             }],
         };
         assert!(validate_composition(&manifest, &[frag]).is_ok());
+    }
+
+    /// A present-but-empty `mount/` is a notice, not a validation failure:
+    /// the composition still passes. The notice itself is a stderr side
+    /// effect that this test cannot capture, so the substantive check is
+    /// that the carried evidence (`has_mount_dir` plus empty `mount_points`)
+    /// is exactly what makes `empty_mount_notice` fire at the call site
+    /// `validate_composition` uses.
+    #[test]
+    fn composition_with_an_empty_mount_directory_still_validates() {
+        let mut frag = test_fragment("mount-only", vec![], vec![]);
+        frag.has_mount_dir = true;
+        frag.mount_points = vec![];
+        let manifest = Manifest {
+            base: "registry.redhat.io/rhel10/rhel-bootc:10.0".into(),
+            source_path: "test-manifest.yaml".into(),
+            fragments: vec![crate::manifest::ManifestFragment {
+                image: "quay.io/test/mount-only:1.0".into(),
+                packages: vec![],
+                mirror: None,
+            }],
+        };
+        assert!(validate_composition(&manifest, &[frag.clone()]).is_ok());
+        assert!(
+            empty_mount_notice(
+                frag.fragment.name.as_str(),
+                frag.has_mount_dir,
+                &frag.mount_points
+            )
+            .is_some(),
+            "the evidence validate_composition reads must actually yield a notice"
+        );
     }
 }

@@ -423,6 +423,7 @@ mod tests {
             manifest_index: 0,
             repo_file_contents: std::collections::HashMap::new(),
             mount_points: vec![],
+            has_mount_dir: false,
         }
     }
 

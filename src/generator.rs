@@ -429,6 +429,7 @@ mod tests {
             manifest_index: 0,
             repo_file_contents: std::collections::HashMap::new(),
             mount_points: vec![],
+            has_mount_dir: false,
         };
         let manifest_frag = ManifestFragment {
             image: format!("quay.io/test/{}:10", name),
@@ -458,6 +459,7 @@ mod tests {
             manifest_index: 0,
             repo_file_contents: std::collections::HashMap::new(),
             mount_points: vec![],
+            has_mount_dir: false,
         };
         let manifest_frag = ManifestFragment {
             image: format!("quay.io/test/{}:2.1", name),
@@ -494,6 +496,7 @@ mod tests {
             manifest_index: 0,
             repo_file_contents: std::collections::HashMap::new(),
             mount_points: vec![],
+            has_mount_dir: false,
         };
         let manifest_frag = ManifestFragment {
             image: format!("quay.io/test/{}:1.0", name),
@@ -853,6 +856,7 @@ mod tests {
             manifest_index: 0,
             repo_file_contents: std::collections::HashMap::new(),
             mount_points: vec![],
+            has_mount_dir: false,
         };
         let manifest_frag = ManifestFragment {
             image: format!("quay.io/test/{}:10", name),
@@ -882,6 +886,7 @@ mod tests {
             manifest_index: 0,
             repo_file_contents: std::collections::HashMap::new(),
             mount_points: vec![],
+            has_mount_dir: false,
         };
         let manifest_frag = ManifestFragment {
             image: format!("quay.io/test/{}:2.1", name),
@@ -1843,6 +1848,7 @@ mod tests {
             manifest_index: 0,
             repo_file_contents: std::collections::HashMap::new(),
             mount_points: vec![],
+            has_mount_dir: false,
         };
         let manifest_frag = ManifestFragment {
             image: "quay.io/test/hooks-only:1.0".into(),
