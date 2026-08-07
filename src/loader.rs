@@ -8,7 +8,7 @@ use crate::fragment::{
 };
 use crate::generator::pin_to_digest;
 use crate::manifest::{FragmentSource, Manifest};
-use crate::mount::{derive_mount_points, MountPoint};
+use crate::mount::{derive_mount_points, MountPoint, MOUNTS_ANNOTATION_KEY};
 
 #[derive(Debug, Clone)]
 pub struct LoadedFragment {
@@ -367,9 +367,13 @@ pub fn materialize_fragment(image_ref: &str, dest_dir: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Try the OCI annotation fast path: parse fragment metadata from
-/// manifest annotations without pulling any layers.
-fn try_annotation_fast_path(image_ref: &str) -> Result<Option<Fragment>> {
+/// Fetch an image's OCI manifest annotations.
+///
+/// `Ok(None)` when the registry call fails or the manifest carries no
+/// annotations at all. Failure is not an error here: every caller treats
+/// annotations as a cache over authoritative layer content and has a path
+/// that works without them.
+fn fetch_annotations(image_ref: &str) -> Result<Option<serde_json::Value>> {
     let output = std::process::Command::new("skopeo")
         .args([
             "inspect",
@@ -386,12 +390,52 @@ fn try_annotation_fast_path(image_ref: &str) -> Result<Option<Fragment>> {
     }
 
     let manifest: serde_json::Value = serde_json::from_slice(&output.stdout)?;
-    let annotations = match manifest.get("annotations") {
+    Ok(manifest.get("annotations").cloned())
+}
+
+/// Try the OCI annotation fast path: parse fragment metadata and mount
+/// targets from manifest annotations without pulling any layers.
+fn try_annotation_fast_path(image_ref: &str) -> Result<Option<(Fragment, Vec<MountPoint>)>> {
+    let annotations = match fetch_annotations(image_ref)? {
         Some(a) => a,
         None => return Ok(None),
     };
+    Ok(fast_path_from_annotations(&annotations))
+}
 
-    Ok(fragment_from_annotations(annotations))
+/// The fast path's decision, over annotations already in hand.
+///
+/// `None` declines the fast path and sends the caller to the full pull. Both
+/// halves are required. Metadata alone cannot answer the mount question: a
+/// missing mounts key is indistinguishable from a fragment that mounts
+/// nothing, so returning an empty list here would report "no mounts" for a
+/// fragment that has them. Absence therefore falls back to a full pull, which
+/// derives the targets from the layer, exactly as a missing metadata
+/// annotation already does.
+fn fast_path_from_annotations(
+    annotations: &serde_json::Value,
+) -> Option<(Fragment, Vec<MountPoint>)> {
+    let mounts = mounts_from_annotations(annotations)?;
+    let fragment = fragment_from_annotations(annotations)?;
+    Some((fragment, mounts))
+}
+
+/// Mount targets from the mounts annotation.
+///
+/// `None` means the key is absent, which is not drift: the annotation is
+/// optional and a fragment that never annotated its mounts is simply one
+/// `list` has to pull. An entry that does not parse as an absolute target is
+/// dropped rather than failing the read, matching how every other annotation
+/// here degrades toward the authoritative layer content.
+fn mounts_from_annotations(annotations: &serde_json::Value) -> Option<Vec<MountPoint>> {
+    let raw = annotations.get(MOUNTS_ANNOTATION_KEY)?.as_str()?;
+    let targets: Vec<String> = serde_json::from_str(raw).ok()?;
+    let mut mounts: Vec<MountPoint> = targets
+        .iter()
+        .filter_map(|t| MountPoint::from_target(t).ok())
+        .collect();
+    mounts.sort();
+    Some(mounts)
 }
 
 /// Map an OCI manifest `annotations` object onto a `Fragment`.
@@ -639,7 +683,7 @@ pub fn load_registry_fragment_metadata_only(image_ref: &str) -> Result<LoadedFra
     let digest = resolve_digest(image_ref)?;
     let image_with_digest = pin_to_digest(image_ref, &digest);
 
-    if let Some(fragment) = try_annotation_fast_path(image_ref)? {
+    if let Some((fragment, mount_points)) = try_annotation_fast_path(image_ref)? {
         // Annotations present — return metadata without pulling layers.
         // tree_paths and hook_paths are unknown in this path;
         // inspect/list can display fragment metadata without them.
@@ -653,7 +697,7 @@ pub fn load_registry_fragment_metadata_only(image_ref: &str) -> Result<LoadedFra
             resolved_digest: Some(digest),
             manifest_index: 0, // set by caller
             repo_file_contents: std::collections::HashMap::new(),
-            mount_points: vec![],
+            mount_points,
             has_mount_dir: false,
         });
     }
@@ -1794,5 +1838,100 @@ description = "test fragment"
             fragment_from_annotations(&annotations).is_none(),
             "old-namespace keys must not satisfy the fast path; the fragment falls back to layer extraction"
         );
+    }
+
+    #[test]
+    fn mounts_annotation_parses_into_sorted_mount_points() {
+        let annotations = serde_json::json!({
+            "com.github.marrusl.osfragment.mounts": "[\"/etc/rhsm\", \"/etc/pki/entitlement\"]"
+        });
+        let mounts = mounts_from_annotations(&annotations)
+            .expect("the key is present, so the answer is a list and not absence");
+        let targets: Vec<String> = mounts
+            .iter()
+            .map(crate::mount::MountPoint::target)
+            .collect();
+        assert_eq!(
+            targets,
+            vec!["/etc/pki/entitlement", "/etc/rhsm"],
+            "sorted, so a comparison against derived targets is order-independent"
+        );
+    }
+
+    #[test]
+    fn an_absent_mounts_annotation_is_absence_not_an_empty_list() {
+        let annotations = serde_json::json!({
+            "com.github.marrusl.osfragment.name": "epel"
+        });
+        assert!(
+            mounts_from_annotations(&annotations).is_none(),
+            "absence is not drift: the annotation is optional"
+        );
+    }
+
+    #[test]
+    fn a_malformed_mounts_annotation_drops_the_unusable_entries() {
+        // The annotations are a cache of what the layer says, and the layer
+        // is authoritative, so a bad entry costs its own visibility and
+        // nothing else.
+        let annotations = serde_json::json!({
+            "com.github.marrusl.osfragment.mounts": "[\"/etc/rhsm\", \"etc/relative\", \"/\"]"
+        });
+        let mounts = mounts_from_annotations(&annotations).expect("the key is present");
+        let targets: Vec<String> = mounts
+            .iter()
+            .map(crate::mount::MountPoint::target)
+            .collect();
+        assert_eq!(targets, vec!["/etc/rhsm"]);
+    }
+
+    #[test]
+    fn a_mounts_annotation_that_is_not_json_reads_as_absent() {
+        let annotations = serde_json::json!({
+            "com.github.marrusl.osfragment.mounts": "not json at all"
+        });
+        assert!(mounts_from_annotations(&annotations).is_none());
+    }
+
+    #[test]
+    fn the_fast_path_declines_when_the_mounts_annotation_is_absent() {
+        // Metadata alone cannot distinguish "mounts nothing" from "never
+        // annotated its mounts", so the fast path declines and the caller
+        // falls through to the full pull that derives targets from the layer.
+        let annotations = serde_json::json!({
+            "com.github.marrusl.osfragment.name": "epel",
+            "com.github.marrusl.osfragment.version": "1.0"
+        });
+        assert!(
+            fast_path_from_annotations(&annotations).is_none(),
+            "a missing mounts key sends the caller to the layer, not to an empty list"
+        );
+    }
+
+    #[test]
+    fn the_fast_path_answers_when_metadata_and_mounts_are_both_annotated() {
+        let annotations = serde_json::json!({
+            "com.github.marrusl.osfragment.name": "rhel-entitlement",
+            "com.github.marrusl.osfragment.version": "1.0",
+            "com.github.marrusl.osfragment.mounts": "[\"/etc/pki/entitlement\"]"
+        });
+        let (fragment, mounts) =
+            fast_path_from_annotations(&annotations).expect("both halves are present");
+        assert_eq!(fragment.name.as_str(), "rhel-entitlement");
+        let targets: Vec<String> = mounts
+            .iter()
+            .map(crate::mount::MountPoint::target)
+            .collect();
+        assert_eq!(targets, vec!["/etc/pki/entitlement"]);
+    }
+
+    #[test]
+    fn the_fast_path_declines_when_the_metadata_annotations_are_absent() {
+        // The pre-existing half of the precondition, pinned here because the
+        // fast path now has two reasons to decline and both must survive.
+        let annotations = serde_json::json!({
+            "com.github.marrusl.osfragment.mounts": "[\"/etc/pki/entitlement\"]"
+        });
+        assert!(fast_path_from_annotations(&annotations).is_none());
     }
 }
