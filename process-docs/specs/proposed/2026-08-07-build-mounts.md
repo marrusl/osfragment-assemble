@@ -36,7 +36,7 @@ A fragment may carry a `mount/` directory, a sibling of `tree/` and
 `hooks/`. Its subtree mirrors target paths, the same convention `tree/`
 uses: material at `mount/etc/pki/entitlement/cert.pem` is visible at
 `/etc/pki/entitlement/cert.pem` during the package install step, and
-appears nowhere in the built image.
+is never committed by the builder.
 
 Detection is presence-based, exactly like repo files. There is no new
 `fragment.toml` section, no phase vocabulary, and no new fragment kind.
@@ -68,7 +68,7 @@ internal-mirror/
     etc/yum.repos.d/internal.repo   # ships in the image
   mount/
     etc/pki/tls/mirror/
-      client.pem                    # exists only during dnf
+      client.pem                    # mounted during dnf, never committed
       client-key.pem
 ```
 
@@ -125,8 +125,8 @@ fragment registry reference appears anywhere in the output, comments
 included. Mount material therefore cannot arrive as an inline `from=`
 reference. It would have to be materialized into the build context and
 mounted as `source=fragments/<name>/mount/<path>` with no `from=`, the
-same pattern hooks use, and that puts credential material on disk in
-the context directory and in its sibling tar.gz.
+same pattern hooks use, and that puts credential material durably on
+disk in the context directory and in its sibling tar.gz.
 
 That is a custody change, so it is gated rather than noticed. When any
 composed fragment carries `mount/`, `--self-contained` fails at
@@ -139,8 +139,16 @@ contract. The sibling tar.gz preserves those modes.
 
 Git does not record file modes, so the owner-only protection does not
 survive a commit: a context containing mount material is for direct
-handoff, not for committing to a repository. Both this spec and the
-`--materialize-mounts` error text say so.
+handoff, not for committing to a repository. `--materialize-mounts`
+therefore also writes a `.gitignore` into the generated context
+covering `fragments/*/mount/`, carrying a comment that explains the
+context is intentionally non-committable while it holds mount
+material, so a later failing build reads as policy, not mystery. The
+consequence is deliberate: a committed context omits its mount
+material and fails loudly at build time, at the mount source. The
+`--materialize-mounts` error text continues to lead with the custody
+change, the exact paths that would land on disk, and the not-for-git
+warning; it never presents the flag as a routine unblock.
 
 The digest anchor moves with the references. Because the output names
 no registries, the digest pin for a build-mount fragment is not
@@ -186,7 +194,8 @@ would be consumed by nothing and would spend characters against the
 - Error messages follow the loader's existing contract: name the
   fragment, state the rule, give the fix. The unpinned-reference error
   additionally shows how to obtain a digest, for example
-  `skopeo inspect`.
+  `skopeo inspect`, and prints the corrected reference literal to
+  write: the `image:` line with `@sha256:...` in place.
 - `mount/` inherits the loader's tar-entry rules: symlinks and
   hardlinks are rejected. The shared entry validation already runs on
   every fragment layer entry, so this is documentation of existing
@@ -201,9 +210,9 @@ Mount targets can ride in an OCI annotation, joining the existing
 pattern in which annotations cache fragment metadata for `list`. The
 tool has no publish step; like every existing annotation, a mount
 annotation is hand-authored by the fragment author, passed as
-`--annotation` on their own `podman build`. The recipe: run generation
-or a dry run against the fragment locally to see the derived targets,
-then annotate at build:
+`--annotation` on their own `podman build`. The recipe: run `inspect`
+on the local fragment directory to see the derived mount targets, then
+annotate at build:
 
 ```bash
 podman build \
@@ -218,6 +227,14 @@ the annotation is absent, the metadata-only path falls back to a full
 pull, as it does for any other missing annotation. `inspect` always
 pulls, because its contract is to show payload contents.
 
+`inspect` renders a `mount/` section, for both a local fragment
+directory and a registry image: it lists the derived mount targets and
+states that the material is mounted during the package step and never
+committed by the builder. The local form is the pre-publish
+confirmation surface that closes the author-time feedback gap: run
+against the fragment directory, it shows the targets generation will
+derive before the fragment is published anywhere.
+
 Existing annotations cache the in-layer `fragment.toml` and reconcile
 against it. A mount annotation has no in-layer file to reconcile
 against; its counterpart is the derived mount targets themselves. So
@@ -229,12 +246,25 @@ content authoritative, consistent with the existing cache semantics.
 
 Mount material lives in the fragment's own layers. At rest it exists in
 the registry, in the containers-storage of every builder that pulls it,
-and, under `--materialize-mounts`, in the self-contained context
-directory and its sibling tar.gz: pull access equals possession, and a
-materialized context is possession on disk. The intended custody model
-is a private registry with access control, and the digest pin ensures
-the material that arrives is the material that was pinned. Nothing from
-`mount/` enters the built image's layers.
+and on the generating machine itself: every generation, not only a
+`--materialize-mounts` run, pulls fragment layers through a temporary
+on-disk OCI layout, a skopeo copy into a 0700 tempdir removed after
+generation, and neither the mode nor the removal survives an abort.
+Under `--materialize-mounts` the self-contained context directory and
+its sibling tar.gz hold a durable copy as well. Registry mirrors,
+pull-through caches, and scanners that retain pulled images hold
+further copies. This enumeration is a minimum set, not an exhaustive
+one: pull access equals possession. The intended custody model is a
+private registry with access control, and the digest pin ensures the
+material that arrives is the material that was pinned.
+
+The persistence guarantee is precise and narrower than it may read:
+the builder never commits the mount source itself into an image layer.
+It is not a confidentiality guarantee about the material. Any code
+running in the dnf RUN can read the mounted paths and can copy the
+contents into the image, write them somewhere durable, or send them
+over the network. Composing a fragment that carries `mount/` is a
+trust decision about everything that executes in the package step.
 
 During the build, mounts stay attached for the entire batched dnf RUN.
 Every rpm scriptlet in that transaction, from any configured
@@ -294,12 +324,3 @@ Two candidate uses were considered and declined:
   (compiler internals resolve absolute paths). The existing rule,
   install and remove within the hook's own RUN, already achieves zero
   persistent bytes.
-
-## Open questions
-
-1. **Git guard for materialized contexts.** Should `--materialize-mounts`
-   also drop a `.gitignore` covering `fragments/*/mount/` into the
-   generated context? A committed context would then visibly lack its
-   mount material, failing loudly at build time on the git path instead
-   of leaking credentials silently, at the cost of surprising a user
-   who wanted to commit the whole context.
