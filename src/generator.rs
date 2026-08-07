@@ -428,6 +428,7 @@ mod tests {
             resolved_digest: Some(format!("sha256:{}", digest)),
             manifest_index: 0,
             repo_file_contents: std::collections::HashMap::new(),
+            mount_points: vec![],
         };
         let manifest_frag = ManifestFragment {
             image: format!("quay.io/test/{}:10", name),
@@ -456,6 +457,7 @@ mod tests {
             resolved_digest: Some(format!("sha256:{}", digest)),
             manifest_index: 0,
             repo_file_contents: std::collections::HashMap::new(),
+            mount_points: vec![],
         };
         let manifest_frag = ManifestFragment {
             image: format!("quay.io/test/{}:2.1", name),
@@ -491,6 +493,7 @@ mod tests {
             resolved_digest: None,
             manifest_index: 0,
             repo_file_contents: std::collections::HashMap::new(),
+            mount_points: vec![],
         };
         let manifest_frag = ManifestFragment {
             image: format!("quay.io/test/{}:1.0", name),
@@ -849,6 +852,7 @@ mod tests {
             resolved_digest: None,
             manifest_index: 0,
             repo_file_contents: std::collections::HashMap::new(),
+            mount_points: vec![],
         };
         let manifest_frag = ManifestFragment {
             image: format!("quay.io/test/{}:10", name),
@@ -877,6 +881,7 @@ mod tests {
             resolved_digest: None,
             manifest_index: 0,
             repo_file_contents: std::collections::HashMap::new(),
+            mount_points: vec![],
         };
         let manifest_frag = ManifestFragment {
             image: format!("quay.io/test/{}:2.1", name),
@@ -1837,6 +1842,7 @@ mod tests {
             resolved_digest: Some("sha256:hooksonly1".into()),
             manifest_index: 0,
             repo_file_contents: std::collections::HashMap::new(),
+            mount_points: vec![],
         };
         let manifest_frag = ManifestFragment {
             image: "quay.io/test/hooks-only:1.0".into(),

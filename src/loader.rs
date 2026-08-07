@@ -8,6 +8,7 @@ use crate::fragment::{
 };
 use crate::generator::pin_to_digest;
 use crate::manifest::{FragmentSource, Manifest};
+use crate::mount::{derive_mount_points, empty_mount_notice, MountPoint};
 
 #[derive(Debug, Clone)]
 pub struct LoadedFragment {
@@ -22,6 +23,26 @@ pub struct LoadedFragment {
     /// Cached .repo file contents for repo conflict comparison, keyed by filename.
     /// Populated during loading from either local filesystem or layer extraction.
     pub repo_file_contents: std::collections::HashMap<String, String>,
+    /// Bind mount points derived from this fragment's `mount/` subtree, in
+    /// sorted order. Derived once here so every consumer sees the same
+    /// answer and the derivation error surfaces at load.
+    pub mount_points: Vec<MountPoint>,
+}
+
+impl LoadedFragment {
+    /// A fragment consisting of metadata and `mount/` alone: it carries
+    /// build mounts and nothing a `COPY` or a hook `RUN` could reference.
+    /// Build-mount references are always emitted inline, so a named stage
+    /// for one of these would be consumed by nothing while still spending
+    /// characters against the MachineOSConfig content limit.
+    pub fn is_pure_mount(&self) -> bool {
+        !self.mount_points.is_empty()
+            && self.hook_paths.is_empty()
+            && !self
+                .tree_paths
+                .iter()
+                .any(|p| p.to_string_lossy().starts_with("tree/"))
+    }
 }
 
 pub fn split_tree_paths(paths: &[PathBuf]) -> (Vec<PathBuf>, Vec<PathBuf>) {
@@ -73,6 +94,11 @@ pub const HOOKS_ENTRYPOINT_NAME: &str = "entrypoint";
 
 /// The same file as it appears inside a fragment layer.
 const HOOKS_ENTRYPOINT_TAR_PATH: &str = "fragment/hooks/entrypoint";
+
+/// A fragment's build-mount subtree, as it appears inside a fragment layer.
+/// Everything below it mirrors a target path, the same convention `tree/`
+/// uses.
+const MOUNT_TAR_PREFIX: &str = "fragment/mount";
 
 /// Execute bits (`u+x`, `g+x`, `o+x`). Root's `CAP_DAC_OVERRIDE` grants
 /// execute only when at least one of them is set, so this mask matches
@@ -201,29 +227,50 @@ pub fn extract_fragment_toml_from_bytes(compressed: &[u8]) -> Result<String> {
     found.ok_or_else(|| anyhow::anyhow!("fragment.toml not found in layer"))
 }
 
-/// Regular-file paths in a layer, plus the mode of
-/// `fragment/hooks/entrypoint` when this layer carries one as a regular file.
+/// What one pass over a layer's tar entries yields.
+#[derive(Debug)]
+struct LayerEntries {
+    /// Regular-file paths, in the canonical form `validate_tar_entry`
+    /// returns.
+    file_paths: Vec<PathBuf>,
+    /// Mode of `fragment/hooks/entrypoint` when this layer carries one as a
+    /// regular file.
+    entrypoint_mode: Option<u32>,
+    /// Whether this layer carries a `fragment/mount` entry of any type. A
+    /// `mount/` holding no files leaves nothing in `file_paths`, so the
+    /// directory entry is the only evidence the empty-mount notice has.
+    has_mount_dir: bool,
+}
+
+/// Walk a layer once, collecting everything downstream needs from it.
 ///
-/// The mode comes off the header this loop already holds, so enforcing the
-/// entrypoint contract costs no second pass over the archive.
-fn extract_tree_paths_from_bytes(compressed: &[u8]) -> Result<(Vec<PathBuf>, Option<u32>)> {
+/// The entrypoint mode comes off the header this loop already holds, so
+/// enforcing the entrypoint contract costs no second pass, and the same is
+/// true of the mount directory check.
+fn extract_layer_entries(compressed: &[u8]) -> Result<LayerEntries> {
     let decoder = GzDecoder::new(compressed);
     let mut archive = tar::Archive::new(decoder);
-    let mut paths = Vec::new();
-    let mut entrypoint_mode = None;
+    let mut entries = LayerEntries {
+        file_paths: Vec::new(),
+        entrypoint_mode: None,
+        has_mount_dir: false,
+    };
 
     for entry_result in archive.entries()? {
         let entry = entry_result?;
         let path = entry.path()?.to_path_buf();
         let path = validate_tar_entry(&path, entry.header().entry_type())?;
+        if path.starts_with(MOUNT_TAR_PREFIX) {
+            entries.has_mount_dir = true;
+        }
         if entry.header().entry_type().is_file() {
             if path == Path::new(HOOKS_ENTRYPOINT_TAR_PATH) {
-                entrypoint_mode = Some(entry.header().mode()?);
+                entries.entrypoint_mode = Some(entry.header().mode()?);
             }
-            paths.push(path);
+            entries.file_paths.push(path);
         }
     }
-    Ok((paths, entrypoint_mode))
+    Ok(entries)
 }
 
 fn extract_repo_file_contents_from_bytes(
@@ -461,6 +508,7 @@ struct LayeredMetadata {
     tree_paths: Vec<PathBuf>,
     hook_paths: Vec<PathBuf>,
     repo_file_contents: std::collections::HashMap<String, String>,
+    mount_points: Vec<MountPoint>,
 }
 
 /// Scan all layers and aggregate: fragment.toml, tree paths, hooks, and repo
@@ -475,6 +523,8 @@ fn fragment_from_layers(layer_bytes_list: &[Vec<u8>]) -> Result<LayeredMetadata>
     let mut all_hook_paths = Vec::new();
     let mut entrypoint_mode = None;
     let mut repo_file_contents = std::collections::HashMap::new();
+    let mut has_mount_dir = false;
+    let mut all_mount_files: Vec<PathBuf> = Vec::new();
 
     for layer_bytes in layer_bytes_list {
         if fragment.is_none() {
@@ -483,11 +533,20 @@ fn fragment_from_layers(layer_bytes_list: &[Vec<u8>]) -> Result<LayeredMetadata>
             }
         }
 
-        let (tree_paths, layer_entrypoint_mode) = extract_tree_paths_from_bytes(layer_bytes)?;
+        let entries = extract_layer_entries(layer_bytes)?;
+        let tree_paths = entries.file_paths;
         // Later layers shadow earlier ones, so the last entrypoint wins.
-        if layer_entrypoint_mode.is_some() {
-            entrypoint_mode = layer_entrypoint_mode;
+        if entries.entrypoint_mode.is_some() {
+            entrypoint_mode = entries.entrypoint_mode;
         }
+        has_mount_dir |= entries.has_mount_dir;
+
+        let layer_mount_files: Vec<PathBuf> = tree_paths
+            .iter()
+            .filter_map(|p| p.strip_prefix(MOUNT_TAR_PREFIX).ok())
+            .map(|p| p.to_path_buf())
+            .collect();
+        all_mount_files.extend(layer_mount_files);
 
         let hook_paths: Vec<PathBuf> = tree_paths
             .iter()
@@ -519,11 +578,17 @@ fn fragment_from_layers(layer_bytes_list: &[Vec<u8>]) -> Result<LayeredMetadata>
         validate_hooks_entrypoint(fragment.name.as_str(), entrypoint_mode)?;
     }
 
+    let mount_points = derive_mount_points(fragment.name.as_str(), &all_mount_files)?;
+    if let Some(notice) = empty_mount_notice(fragment.name.as_str(), has_mount_dir, &mount_points) {
+        eprintln!("{}", notice);
+    }
+
     Ok(LayeredMetadata {
         fragment,
         tree_paths: all_tree_paths,
         hook_paths: all_hook_paths,
         repo_file_contents,
+        mount_points,
     })
 }
 
@@ -548,6 +613,7 @@ pub fn load_registry_fragment(image_ref: &str) -> Result<LoadedFragment> {
         resolved_digest: Some(digest),
         manifest_index: 0, // set by caller
         repo_file_contents: metadata.repo_file_contents,
+        mount_points: metadata.mount_points,
     })
 }
 
@@ -575,6 +641,7 @@ pub fn load_registry_fragment_metadata_only(image_ref: &str) -> Result<LoadedFra
             resolved_digest: Some(digest),
             manifest_index: 0, // set by caller
             repo_file_contents: std::collections::HashMap::new(),
+            mount_points: vec![],
         });
     }
 
@@ -718,6 +785,7 @@ mod tests {
             resolved_digest: Some(TEST_DIGEST.into()),
             manifest_index: 0,
             repo_file_contents: std::collections::HashMap::new(),
+            mount_points: vec![],
         }
     }
 
@@ -852,6 +920,33 @@ mod tests {
             2,
             "the run stops at the failing fragment rather than continuing to the third"
         );
+    }
+
+    #[test]
+    fn a_fragment_carrying_only_metadata_and_mount_is_pure_mount() {
+        // (tree paths under tree/, hook paths, has mounts, expected)
+        let cases: &[(&[&str], &[&str], bool, bool)] = &[
+            (&[], &[], true, true),
+            (&[], &[], false, false),
+            (&["tree/etc/yum.repos.d/x.repo"], &[], true, false),
+            (&[], &["entrypoint"], true, false),
+        ];
+        for (tree, hooks, has_mounts, expected) in cases {
+            let mut loaded = stub_loaded("quay.io/test/frag:1");
+            loaded.tree_paths = tree.iter().map(PathBuf::from).collect();
+            loaded.hook_paths = hooks.iter().map(PathBuf::from).collect();
+            loaded.mount_points = if *has_mounts {
+                crate::mount::derive_mount_points("frag", &[PathBuf::from("etc/rhsm/rhsm.conf")])
+                    .unwrap()
+            } else {
+                vec![]
+            };
+            assert_eq!(
+                loaded.is_pure_mount(),
+                *expected,
+                "tree={tree:?} hooks={hooks:?} mounts={has_mounts}"
+            );
+        }
     }
 }
 
@@ -1089,7 +1184,7 @@ description = "test fragment"
             ),
             ("fragment/tree/etc/foo.conf", b"data"),
         ]);
-        let (paths, _entrypoint_mode) = extract_tree_paths_from_bytes(&tarball).unwrap();
+        let paths = extract_layer_entries(&tarball).unwrap().file_paths;
         let hook_paths: Vec<PathBuf> = paths
             .iter()
             .filter(|p| p.to_string_lossy().starts_with("fragment/hooks/"))
@@ -1222,6 +1317,82 @@ description = "test fragment"
             mode,
             entry_type: tar::EntryType::Regular,
         }
+    }
+
+    /// A `mount/` entry at the mode credential material usually carries.
+    /// Mirrors the existing `hook_entry` helper directly above.
+    fn mount_entry<'a>(path: &'a str, data: &'a [u8]) -> RawEntry<'a> {
+        RawEntry {
+            path: path.as_bytes(),
+            data,
+            mode: 0o600,
+            entry_type: tar::EntryType::Regular,
+        }
+    }
+
+    #[test]
+    fn mount_paths_derive_mount_points_at_load() {
+        let layers = fragment_layers(vec![
+            mount_entry("fragment/mount/etc/pki/entitlement/cert.pem", b"cert"),
+            mount_entry("fragment/mount/etc/pki/entitlement/key.pem", b"key"),
+            mount_entry("fragment/mount/etc/rhsm/rhsm.conf", b"conf"),
+            mount_entry("fragment/mount/etc/rhsm/ca/ca.pem", b"ca"),
+        ]);
+        let metadata = fragment_from_layers(&layers).expect("a pure mount fragment loads");
+
+        let targets: Vec<String> = metadata
+            .mount_points
+            .iter()
+            .map(crate::mount::MountPoint::target)
+            .collect();
+        assert_eq!(
+            targets,
+            vec!["/etc/pki/entitlement", "/etc/rhsm"],
+            "nested directories are pruned into their ancestor"
+        );
+    }
+
+    #[test]
+    fn a_file_directly_under_mount_fails_the_load() {
+        let layers = fragment_layers(vec![mount_entry("fragment/mount/cert.pem", b"cert")]);
+        let err = fragment_from_layers(&layers)
+            .expect_err("a file at the top of mount/ derives a mount onto /")
+            .to_string();
+        assert!(err.contains("onto /"), "got: {err}");
+    }
+
+    #[test]
+    fn a_symlink_under_mount_is_rejected_by_the_shared_entry_validation() {
+        // Documentation of existing enforcement rather than new behavior:
+        // validate_tar_entry runs on every entry of every layer, before any
+        // mount/ prefix matching happens.
+        let tarball = create_test_tarball_with_modes(&[RawEntry {
+            path: b"fragment/mount/etc/pki/entitlement/cert.pem",
+            data: b"",
+            mode: 0o644,
+            entry_type: tar::EntryType::Symlink,
+        }]);
+        let err = extract_layer_entries(&tarball)
+            .expect_err("links are rejected anywhere in a fragment layer")
+            .to_string();
+        assert!(err.contains("symlink or hardlink"), "got: {err}");
+    }
+
+    #[test]
+    fn an_empty_mount_directory_is_detected_for_the_notice() {
+        let tarball = create_test_tarball_with_modes(&[RawEntry {
+            path: b"fragment/mount/",
+            data: b"",
+            mode: 0o755,
+            entry_type: tar::EntryType::Directory,
+        }]);
+        let entries = extract_layer_entries(&tarball).expect("a directory entry is valid");
+        assert!(entries.file_paths.is_empty());
+        assert!(
+            entries.has_mount_dir,
+            "a mount/ holding no files is invisible in file_paths, and that is \
+             exactly the case the empty-mount notice exists to catch"
+        );
     }
 
     /// These two messages are the contract's whole user interface — a fragment
