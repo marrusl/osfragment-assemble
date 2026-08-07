@@ -224,8 +224,10 @@ The no-pull benefit belongs to `list`, and only when the annotation is
 present: `list` can then report "this fragment mounts material into
 the package step, at these paths" from registry metadata alone. When
 the annotation is absent, the metadata-only path falls back to a full
-pull, as it does for any other missing annotation. `inspect` always
-pulls, because its contract is to show payload contents.
+pull, as it does for any other missing annotation. Against a registry
+reference, `inspect` always pulls, because its contract is to show
+payload contents; against a local fragment directory it reads the
+directory and pulls nothing.
 
 `inspect` renders a `mount/` section, for both a local fragment
 directory and a registry image: it lists the derived mount targets and
