@@ -116,7 +116,11 @@ onto `/`, and the pruning step would then drop every other mount as
 nested inside it. A `mount/` directory containing no regular files
 derives no mounts and produces a generation-time notice naming the
 fragment: an empty `mount/` is almost always an authoring mistake, and
-silence would hide it.
+silence would hide it. The same reasoning covers a composition that
+carries mounts but installs nothing: when no packages are selected or
+required, no dnf RUN is emitted and no mounts attach, so generation
+prints a notice naming the mount-carrying fragments rather than
+staying silent.
 
 ## Self-contained mode
 
