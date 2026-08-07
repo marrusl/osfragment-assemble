@@ -658,6 +658,24 @@ pub fn load_registry_fragment(image_ref: &str) -> Result<LoadedFragment> {
     let layer_bytes_list = pull_layer_bytes(&image_with_digest)?;
     let metadata = fragment_from_layers(&layer_bytes_list)?;
 
+    // The layer is already pulled here, which is the spec's condition for
+    // cross-checking. Existing annotations reconcile against the in-layer
+    // fragment.toml; a mounts annotation has no in-layer file, so its
+    // counterpart is the derived targets themselves. Best effort: a registry
+    // hiccup on a metadata read must not fail a generation whose
+    // authoritative content is already in hand.
+    if let Ok(Some(annotations)) = fetch_annotations(&image_with_digest) {
+        if let Some(annotated) = mounts_from_annotations(&annotations) {
+            if let Some(warning) = crate::mount::mount_annotation_drift(
+                metadata.fragment.name.as_str(),
+                &annotated,
+                &metadata.mount_points,
+            ) {
+                eprintln!("{}", warning);
+            }
+        }
+    }
+
     Ok(LoadedFragment {
         fragment: metadata.fragment,
         tree_paths: metadata.tree_paths,
@@ -1933,5 +1951,27 @@ description = "test fragment"
             "com.github.marrusl.osfragment.mounts": "[\"/etc/pki/entitlement\"]"
         });
         assert!(fast_path_from_annotations(&annotations).is_none());
+    }
+
+    #[test]
+    fn drift_check_compares_annotated_targets_against_derived_ones() {
+        // The wiring in load_registry_fragment needs a registry, so this
+        // pins the decision the wiring delegates to, over the two values it
+        // passes: what the annotation says and what the layers derive.
+        let layers = fragment_layers(vec![mount_entry(
+            "fragment/mount/etc/rhsm/rhsm.conf",
+            b"conf",
+        )]);
+        let derived = fragment_from_layers(&layers).unwrap().mount_points;
+
+        let annotations = serde_json::json!({
+            "com.github.marrusl.osfragment.mounts": "[\"/etc/pki/entitlement\"]"
+        });
+        let annotated = mounts_from_annotations(&annotations).expect("the key is present");
+
+        let warning = crate::mount::mount_annotation_drift("epel", &annotated, &derived)
+            .expect("annotated and derived disagree");
+        assert!(warning.contains("/etc/rhsm"), "got: {warning}");
+        assert!(warning.contains("/etc/pki/entitlement"), "got: {warning}");
     }
 }
