@@ -1006,7 +1006,14 @@ Assisted-by: Claude Code (Opus 5)"
 - Produces:
   - private `fn fetch_annotations(image_ref: &str) -> Result<Option<serde_json::Value>>`, consumed by Task 5
   - private `fn mounts_from_annotations(annotations: &serde_json::Value) -> Option<Vec<MountPoint>>`, consumed by Task 5
+  - private `fn fast_path_from_annotations(annotations: &serde_json::Value) -> Option<(Fragment, Vec<MountPoint>)>`, consumed only by `try_annotation_fast_path`
   - `try_annotation_fast_path` now returns `Result<Option<(Fragment, Vec<MountPoint>)>>`
+
+The mounts annotation is a precondition of the fast path, not an optional extra on it. Without the key there is no way to tell a fragment that mounts nothing from a fragment that never annotated its mounts, and answering from metadata alone would report "no mounts" for a fragment that has them. So an absent mounts key declines the fast path and the caller falls through to the full pull, which derives the targets from the layer. That is what the spec's Visibility section asks for: the no-pull benefit exists only when the annotation is present, and absence falls back to a full pull as it does for any other missing annotation.
+
+The consequence is deliberate and worth stating plainly: until a fragment is annotated, `list` pulls its layers. That is the same cost `list` pays today for a fragment missing any other annotation, and annotating is the fix.
+
+The fast path's decision is pure once the annotations are in hand, so it splits out of the registry call into `fast_path_from_annotations`. That keeps the declining branch reachable from a test without a registry, the same split Task 5 relies on.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -1059,15 +1066,54 @@ Add to `mod layer_tests` in `src/loader.rs`, next to the existing `fragment_from
         });
         assert!(mounts_from_annotations(&annotations).is_none());
     }
+
+    #[test]
+    fn the_fast_path_declines_when_the_mounts_annotation_is_absent() {
+        // Metadata alone cannot distinguish "mounts nothing" from "never
+        // annotated its mounts", so the fast path declines and the caller
+        // falls through to the full pull that derives targets from the layer.
+        let annotations = serde_json::json!({
+            "com.github.marrusl.osfragment.name": "epel",
+            "com.github.marrusl.osfragment.version": "1.0"
+        });
+        assert!(
+            fast_path_from_annotations(&annotations).is_none(),
+            "a missing mounts key sends the caller to the layer, not to an empty list"
+        );
+    }
+
+    #[test]
+    fn the_fast_path_answers_when_metadata_and_mounts_are_both_annotated() {
+        let annotations = serde_json::json!({
+            "com.github.marrusl.osfragment.name": "rhel-entitlement",
+            "com.github.marrusl.osfragment.version": "1.0",
+            "com.github.marrusl.osfragment.mounts": "[\"/etc/pki/entitlement\"]"
+        });
+        let (fragment, mounts) =
+            fast_path_from_annotations(&annotations).expect("both halves are present");
+        assert_eq!(fragment.name.as_str(), "rhel-entitlement");
+        let targets: Vec<String> = mounts.iter().map(crate::mount::MountPoint::target).collect();
+        assert_eq!(targets, vec!["/etc/pki/entitlement"]);
+    }
+
+    #[test]
+    fn the_fast_path_declines_when_the_metadata_annotations_are_absent() {
+        // The pre-existing half of the precondition, pinned here because the
+        // fast path now has two reasons to decline and both must survive.
+        let annotations = serde_json::json!({
+            "com.github.marrusl.osfragment.mounts": "[\"/etc/pki/entitlement\"]"
+        });
+        assert!(fast_path_from_annotations(&annotations).is_none());
+    }
 ```
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
 ```bash
-cargo test --lib loader::layer_tests::mounts
+cargo test --lib loader::layer_tests
 ```
 
-Expected: `cannot find function mounts_from_annotations in this scope`.
+Expected: `cannot find function mounts_from_annotations in this scope` and `cannot find function fast_path_from_annotations in this scope`.
 
 - [ ] **Step 3: Write the implementation**
 
@@ -1113,8 +1159,24 @@ fn try_annotation_fast_path(image_ref: &str) -> Result<Option<(Fragment, Vec<Mou
         Some(a) => a,
         None => return Ok(None),
     };
-    let mounts = mounts_from_annotations(&annotations).unwrap_or_default();
-    Ok(fragment_from_annotations(&annotations).map(|fragment| (fragment, mounts)))
+    Ok(fast_path_from_annotations(&annotations))
+}
+
+/// The fast path's decision, over annotations already in hand.
+///
+/// `None` declines the fast path and sends the caller to the full pull. Both
+/// halves are required. Metadata alone cannot answer the mount question: a
+/// missing mounts key is indistinguishable from a fragment that mounts
+/// nothing, so returning an empty list here would report "no mounts" for a
+/// fragment that has them. Absence therefore falls back to a full pull, which
+/// derives the targets from the layer, exactly as a missing metadata
+/// annotation already does.
+fn fast_path_from_annotations(
+    annotations: &serde_json::Value,
+) -> Option<(Fragment, Vec<MountPoint>)> {
+    let mounts = mounts_from_annotations(annotations)?;
+    let fragment = fragment_from_annotations(annotations)?;
+    Some((fragment, mounts))
 }
 
 /// Mount targets from the mounts annotation.
@@ -1167,8 +1229,10 @@ git add src/loader.rs
 git commit -m "feat(loader): read mount targets from the mounts annotation
 
 The no-pull benefit belongs to list, and only when the annotation is
-present. Absence stays absence rather than an empty list, because the two
-mean different things to the drift check that follows.
+present. A missing mounts key declines the fast path rather than reading
+as an empty list, because metadata alone cannot tell a fragment that
+mounts nothing from one that never annotated its mounts, and the full
+pull it falls back to derives the targets from the layer.
 
 Assisted-by: Claude Code (Opus 5)"
 ```
@@ -1283,8 +1347,12 @@ Assisted-by: Claude Code (Opus 5)"
 - Modify: `src/validate.rs` (`validate_composition` at line 7)
 
 **Interfaces:**
-- Consumes: `LoadedFragment.mount_points` (Task 3), `Manifest`/`ManifestFragment` (existing, `src/manifest.rs`).
-- Produces: `pub fn check_mount_digest_pins(manifest: &Manifest, fragments: &[LoadedFragment]) -> Result<()>`, called from `validate_composition`.
+- Consumes: `LoadedFragment.mount_points` (Task 3), `LoadedFragment.resolved_digest`, `Manifest`/`ManifestFragment` (existing, `src/manifest.rs`), `crate::loader::resolve_digest` and `crate::generator::split_image_ref` (existing, both already `pub`).
+- Produces:
+  - `pub fn check_mount_digest_pins(manifest: &Manifest, fragments: &[LoadedFragment]) -> Result<()>`, called from `validate_composition`
+  - private `fn unpinned_mount_error(name: &str, declared: &str, resolved: Option<&str>) -> String`, called only by `check_mount_digest_pins`
+
+`resolved_digest` is `None` on the default path: `load_all_fragments` strips it whenever `--pin-digests` and `--self-contained` are both off, which is exactly the run this error most often fires on. So the message builder takes the digest as an argument and the caller supplies it from whichever source has one, rather than reading the field directly and printing a placeholder in the common case.
 
 Note that `validate_composition`'s first parameter is currently `_manifest`. This task is what starts using it, so rename it to `manifest`.
 
@@ -1293,11 +1361,18 @@ Note that `validate_composition`'s first parameter is currently `_manifest`. Thi
 Add to `mod tests` in `src/validate.rs`:
 
 ```rust
+    /// A digest already in hand at validation time, as `--pin-digests` leaves
+    /// it. Holding one keeps these tests off the network: the error path
+    /// falls back to a live `resolve_digest` only when this is `None`, and
+    /// `Option::or_else` is lazy.
+    const TEST_MOUNT_DIGEST: &str = "sha256:abc123";
+
     fn mount_fragment(name: &str, image: &str) -> (LoadedFragment, ManifestFragment) {
         let mut loaded = test_fragment(name, vec![], vec![]);
         loaded.source = FragmentSource::Registry {
             image_ref: image.to_string(),
         };
+        loaded.resolved_digest = Some(TEST_MOUNT_DIGEST.to_string());
         loaded.mount_points =
             crate::mount::derive_mount_points(name, &[PathBuf::from("etc/pki/entitlement/cert.pem")])
                 .expect("fixture derives one mount point");
@@ -1329,10 +1404,32 @@ Add to `mod tests` in `src/validate.rs`:
 
         assert!(err.contains("rhel-entitlement"), "names the fragment: {err}");
         assert!(
-            err.contains("image: quay.io/acme/rhel-entitlement@sha256:..."),
-            "prints the corrected image: literal to write: {err}"
+            err.contains("image: quay.io/acme/rhel-entitlement@sha256:abc123"),
+            "prints the corrected image: line with the resolved digest filled in: {err}"
         );
-        assert!(err.contains("skopeo inspect"), "shows how to obtain a digest: {err}");
+        assert!(
+            !err.contains("@sha256:..."),
+            "no placeholder to fill in when the tool is holding the digest: {err}"
+        );
+    }
+
+    #[test]
+    fn the_unpinned_error_keeps_the_placeholder_when_no_digest_resolved() {
+        // The only case where the user has a lookup left to do, so this is
+        // the one branch that carries the skopeo command.
+        let err = unpinned_mount_error(
+            "rhel-entitlement",
+            "quay.io/acme/rhel-entitlement:1.0",
+            None,
+        );
+        assert!(
+            err.contains("image: quay.io/acme/rhel-entitlement@sha256:..."),
+            "got: {err}"
+        );
+        assert!(
+            err.contains("skopeo inspect"),
+            "shows how to obtain a digest: {err}"
+        );
     }
 
     #[test]
@@ -1372,7 +1469,7 @@ Add the imports the fixtures need at the top of `mod tests`:
 cargo test --lib validate::
 ```
 
-Expected: `cannot find function check_mount_digest_pins in this scope`.
+Expected: `cannot find function check_mount_digest_pins in this scope` and `cannot find function unpinned_mount_error in this scope`.
 
 - [ ] **Step 3: Write the implementation**
 
@@ -1408,27 +1505,58 @@ pub fn check_mount_digest_pins(manifest: &Manifest, fragments: &[LoadedFragment]
         if declared.contains("@sha256:") {
             continue;
         }
-        let (repository, _tag) = crate::generator::split_image_ref(declared);
+        // The digest is already in hand under --pin-digests. Without it,
+        // load_all_fragments dropped the one it resolved, so read it again
+        // rather than printing a placeholder for something the tool can go
+        // get. This runs only on a path that is about to abort, so one
+        // registry read buys a fix the user can paste.
+        let resolved = f
+            .resolved_digest
+            .clone()
+            .or_else(|| crate::loader::resolve_digest(declared).ok());
         bail!(
-            "fragment '{}' carries build mounts but its manifest entry is not pinned to a \
-             digest: {}. A movable tag on an artifact that injects trust material into the \
-             package step is an invisible substitution point: whoever can move the tag can \
-             swap a credential or a CA bundle and redirect the whole package fetch. Pin it \
-             by digest in the manifest:\n\
-             \x20   image: {}@sha256:...\n\
-             Obtain the digest with:\n\
-             \x20   skopeo inspect --format '{{{{.Digest}}}}' docker://{}",
-            f.fragment.name,
-            declared,
-            repository,
-            declared
+            "{}",
+            unpinned_mount_error(f.fragment.name.as_str(), declared, resolved.as_deref())
         );
     }
     Ok(())
 }
+
+/// The unpinned build-mount error text.
+///
+/// `resolved` is the digest the tool read for `declared`, when it could read
+/// one. Present, the corrected `image:` line is complete and the fix is a
+/// paste. Absent, the line keeps its placeholder and the skopeo command that
+/// fills it in follows, because that is the only case where the user has a
+/// lookup left to do.
+fn unpinned_mount_error(name: &str, declared: &str, resolved: Option<&str>) -> String {
+    let (repository, _tag) = crate::generator::split_image_ref(declared);
+    let (corrected, guidance) = match resolved {
+        Some(digest) => (format!("{}@{}", repository, digest), String::new()),
+        None => (
+            format!("{}@sha256:...", repository),
+            format!(
+                "\nObtain the digest with:\n\
+                 \x20   skopeo inspect --format '{{{{.Digest}}}}' docker://{}",
+                declared
+            ),
+        ),
+    };
+    format!(
+        "fragment '{}' carries build mounts but its manifest entry is not pinned to a \
+         digest: {}. A movable tag on an artifact that injects trust material into the \
+         package step is an invisible substitution point: whoever can move the tag can \
+         swap a credential or a CA bundle and redirect the whole package fetch. Pin it \
+         by digest in the manifest:\n\
+         \x20   image: {}{}",
+        name, declared, corrected, guidance
+    )
+}
 ```
 
-The `{{{{.Digest}}}}` escaping is deliberate: a `format!` literal collapses each doubled brace, so the printed text is `{{.Digest}}`, which is what a shell needs.
+Two escaping notes. The `{{{{.Digest}}}}` is deliberate: a `format!` literal collapses each doubled brace, so the printed text is `{{.Digest}}`, which is what a shell needs. And `bail!` takes `"{}"` with the built string as an argument rather than the string as its literal, so a digest or a repository name carrying a brace cannot be reinterpreted as a format placeholder.
+
+`resolve_digest` is already `pub` in `src/loader.rs` and returns the digest with its `sha256:` prefix, which is why the corrected line joins it with a bare `@`.
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
@@ -1446,6 +1574,11 @@ Pinning by digest is the verifiable control over what gets injected into
 the package step, and this is the one deliberate asymmetry with ordinary
 fragments. The check reads the manifest's own reference, so the pin
 survives regardless of --pin-digests.
+
+The refusal prints the corrected image: line with the digest filled in,
+because the tool has already read one by that point and sending the user
+to look up something it is holding is busywork. The skopeo command stays
+for the case where that read failed.
 
 Assisted-by: Claude Code (Opus 5)"
 ```
@@ -3542,7 +3675,7 @@ Add to the annotation key list:
 - `com.github.marrusl.osfragment.mounts`: JSON array of mount target paths (e.g., `["/etc/pki/entitlement"]`)
 ```
 
-and note that this one has no `fragment.toml` counterpart: its authority is the derived targets, so generation cross-checks it whenever it pulls the layer and warns on drift, with layer content winning. Add the author recipe: run `inspect` on the local fragment directory to see the derived targets, then pass them as `--annotation` on your own `podman build`.
+and note that this one has no `fragment.toml` counterpart: its authority is the derived targets, so generation cross-checks it whenever it pulls the layer and warns on drift, with layer content winning. State what annotating buys: `list` answers the mount question from registry metadata only when this key is present, and falls back to a full layer pull when it is absent, because metadata alone cannot tell a fragment that mounts nothing from one that never annotated. Add the author recipe: run `inspect` on the local fragment directory to see the derived targets, then pass them as `--annotation` on your own `podman build`.
 
 - [ ] **Step 2: Document the flag in the README**
 
@@ -3571,7 +3704,7 @@ Build mounts inherit the same boundary. They exist so package acquisition can au
 In `CHANGELOG.md`, under `## [Unreleased]` and `### Added`, add as the first bullet:
 
 ```markdown
-- **Build mounts (`mount/`)** - A fragment may carry a `mount/` directory whose subtree mirrors target paths, like `tree/` does. Its material is bind-mounted onto the batched package install step and never committed by the builder, so package acquisition can authenticate from any build host: entitlement certificates, mirror client certificates, CA bundles for a TLS-intercepting proxy. Detection is presence-based, with no `fragment.toml` section and no new fragment kind. One `--mount` flag is emitted per derived mount point, always inline and never as a named stage, and a manifest entry for a fragment carrying `mount/` must be pinned by digest: a movable tag on an artifact that injects trust material into the package step is an invisible substitution point. Colliding mount targets, and targets that would hide the repo files or GPG keys the generator writes ahead of the install, fail generation. `inspect` renders the derived targets for a local fragment directory and for a registry image, and `list` reports them from the new `com.github.marrusl.osfragment.mounts` annotation without pulling layers.
+- **Build mounts (`mount/`)** - A fragment may carry a `mount/` directory whose subtree mirrors target paths, like `tree/` does. Its material is bind-mounted onto the batched package install step and never committed by the builder, so package acquisition can authenticate from any build host: entitlement certificates, mirror client certificates, CA bundles for a TLS-intercepting proxy. Detection is presence-based, with no `fragment.toml` section and no new fragment kind. One `--mount` flag is emitted per derived mount point, always inline and never as a named stage, and a manifest entry for a fragment carrying `mount/` must be pinned by digest: a movable tag on an artifact that injects trust material into the package step is an invisible substitution point. Colliding mount targets, and targets that would hide the repo files or GPG keys the generator writes ahead of the install, fail generation. `inspect` renders the derived targets for a local fragment directory and for a registry image, and `list` reports them without pulling layers when the fragment carries the new `com.github.marrusl.osfragment.mounts` annotation, falling back to a full pull when it does not.
 
 - **`--materialize-mounts`** - With `--self-contained`, writes fragment `mount/` material into the build context. Without it, a composition carrying `mount/` refuses to generate self-contained output, because that output carries no registry references and the material would have to land durably on disk in the context and its tarball. With it, the mount subtrees are written owner-only, the tarball preserves those modes, and a `.gitignore` covering `fragments/*/mount/` is written into the context: git does not record file modes, so a committed context would publish the material world-readable, and omitting it makes the build fail at the mount source instead.
 ```
@@ -3634,7 +3767,7 @@ Assisted-by: Claude Code (Opus 5)"
 | Self-contained: the sibling tar.gz preserves those modes | 13 |
 | Self-contained: `.gitignore` covering `fragments/*/mount/` with the explanatory comment | 14 |
 | Self-contained: the digest anchor lives in the manifest, not the output | 10 |
-| Digest pinning: unpinned build-mount reference is a generation error with the corrected literal and how to obtain a digest | 6 |
+| Digest pinning: unpinned build-mount reference is a generation error with the corrected `image:` line carrying the resolved digest, and the skopeo guidance when none resolved | 6 |
 | Digest pinning: pure-mount fragments excluded from the named-stage loop | 9 |
 | Validation: prefix-based overlap between fragments | 7 |
 | Validation: prefix rule against generator-written paths, naming the phase | 7 |
@@ -3662,8 +3795,8 @@ No occurrence of `TBD`, `TODO`, `add appropriate error handling`, `write tests f
 - `MountPoint`, `derive_mount_points`, `empty_mount_notice`, `mount_annotation_drift`, `MountMaterialization`, `MOUNTS_ANNOTATION_KEY`, `MOUNT_SECTION_NOTE`, `GENERATOR_WRITTEN_PATHS` are all defined in Task 1 and used with those exact names in Tasks 3 through 17.
 - `pin_to_digest` is defined in Task 2 and used only in Task 2.
 - `LoadedFragment.mount_points` and `LoadedFragment::is_pure_mount` are defined in Task 3 and used in Tasks 4, 6, 7, 8, 9, 12, 13, 14, 16, 17.
-- `fetch_annotations` and `mounts_from_annotations` are defined in Task 4 and used in Task 5.
-- `check_mount_digest_pins`, `check_mount_overlaps`, and `unattached_mount_notice` are defined in Tasks 6 and 7 and called only from `validate_composition`.
+- `fetch_annotations` and `mounts_from_annotations` are defined in Task 4 and used in Task 5. `fast_path_from_annotations` is defined in Task 4 and used only by `try_annotation_fast_path`.
+- `check_mount_digest_pins`, `check_mount_overlaps`, and `unattached_mount_notice` are defined in Tasks 6 and 7 and called only from `validate_composition`. `unpinned_mount_error` is defined in Task 6 and called only by `check_mount_digest_pins`.
 - `extract_fragment_payload_to_disk` and `materialize_fragment` gain their third parameter in Task 11; every caller is updated in the same task, and `write_output` passes `Skip` until Task 13 threads the real policy.
 - `write_output` and `write_output_with` gain the `mounts` parameter in Task 13; `src/main.rs` is updated in the same task with a placeholder value that Task 15 replaces.
 - `check_mount_materialization` is defined in Task 12 and called in Task 15.
