@@ -53,7 +53,18 @@ echo "nvidia-driver-run: driver ${DRIVER_VERSION} for image kernel ${KVER}"
 # layer into an early, legible failure instead of a confusing build error.
 sh "$RUN_FILE" --check
 
-dnf -y install "${BUILD_DEPS[@]}"
+# Only install build dependencies the base image does not already provide, and
+# only remove what we installed.  Unconditionally removing them would strip
+# tools the base image deliberately ships, for every consumer of that base.
+ADDED_DEPS=()
+for dep in "${BUILD_DEPS[@]}"; do
+    if ! rpm -q "$dep" >/dev/null 2>&1; then
+        ADDED_DEPS+=("$dep")
+    fi
+done
+if [[ ${#ADDED_DEPS[@]} -gt 0 ]]; then
+    dnf -y install "${ADDED_DEPS[@]}"
+fi
 
 # kernel-devel must match the image's kernel EXACTLY -- an out-of-tree module
 # built against different kernel headers will not load. If this fails, the base
@@ -61,16 +72,22 @@ dnf -y install "${BUILD_DEPS[@]}"
 # is a property of the base image, not of this fragment. The remedy is a base
 # whose kernel is still carried; there is deliberately no fallback to an
 # out-of-band package source here.
-if ! dnf -y install "kernel-devel-${KVER}"; then
-    echo >&2
-    echo "nvidia-driver-run: kernel-devel-${KVER} is not available in this image's repos." >&2
-    echo "nvidia-driver-run: the base image's kernel is out of step with the repos it" >&2
-    echo "nvidia-driver-run: configures, so the matching kernel headers cannot be" >&2
-    echo "nvidia-driver-run: installed. Use a base image whose kernel NVR is still" >&2
-    echo "nvidia-driver-run: carried. Available kernel-devel builds right now:" >&2
-    dnf -q repoquery --showduplicates \
-        --qf 'nvidia-driver-run:   %{VERSION}-%{RELEASE}.%{ARCH}' kernel-devel >&2 || true
-    exit 1
+ADDED_KDEV=0
+if rpm -q "kernel-devel-${KVER}" >/dev/null 2>&1; then
+    echo "nvidia-driver-run: kernel-devel-${KVER} already present in base image"
+else
+    if ! dnf -y install "kernel-devel-${KVER}"; then
+        echo >&2
+        echo "nvidia-driver-run: kernel-devel-${KVER} is not available in this image's repos." >&2
+        echo "nvidia-driver-run: the base image's kernel is out of step with the repos it" >&2
+        echo "nvidia-driver-run: configures, so the matching kernel headers cannot be" >&2
+        echo "nvidia-driver-run: installed. Use a base image whose kernel NVR is still" >&2
+        echo "nvidia-driver-run: carried. Available kernel-devel builds right now:" >&2
+        dnf -q repoquery --showduplicates \
+            --qf 'nvidia-driver-run:   %{VERSION}-%{RELEASE}.%{ARCH}' kernel-devel >&2 || true
+        exit 1
+    fi
+    ADDED_KDEV=1
 fi
 
 # --ui=none/--no-questions instead of --silent: --silent implies both and then
@@ -119,23 +136,34 @@ if ! grep -q 'nvidia' "${MODULE_DIR}/modules.dep"; then
     exit 1
 fi
 
-# Same layer, so the toolchain leaves no recoverable bytes behind.
-dnf -y remove "${BUILD_DEPS[@]}" "kernel-devel-${KVER}"
-dnf clean all
-# /var/lib/nvidia is the installer's own uninstall bookkeeping, which an image
-# that is rebuilt rather than uninstalled in place never reads. Leaving it, or
-# any of the package-manager residue below, trips `bootc container lint`'s
-# var-tmpfiles and var-log checks.
-#
-# The rhsm and ldconfig paths are the non-obvious half: dnf's
-# subscription-manager plugin recreates /run/rhsm, /var/log/rhsm and
-# /var/lib/rhsm on every invocation, and ldconfig rewrites the aux-cache.
-# This hook is the last dnf caller in a composed image, so whatever it leaves
-# is what ships -- measured 2026-08-05, these four were the only warnings the
-# demo image had left once every earlier step was cleaned.
-rm -rf /var/cache/libdnf5 /var/cache/dnf /var/lib/dnf /var/lib/nvidia \
-       /var/tmp/* /var/log/dnf*.log /var/log/hawkey.log \
-       /var/log/nvidia-installer.log \
-       /run/rhsm /var/log/rhsm /var/lib/rhsm /var/cache/ldconfig/aux-cache
+# Same layer, so fragment-installed packages leave no recoverable bytes behind
+# -- but only remove what this fragment installed; anything the base already
+# shipped stays.
+REMOVE_PKGS=()
+[[ ${#ADDED_DEPS[@]} -gt 0 ]] && REMOVE_PKGS+=("${ADDED_DEPS[@]}")
+[[ "$ADDED_KDEV" -eq 1 ]] && REMOVE_PKGS+=("kernel-devel-${KVER}")
+if [[ ${#REMOVE_PKGS[@]} -gt 0 ]]; then
+    dnf -y remove "${REMOVE_PKGS[@]}"
+    dnf clean all
+    # /var/lib/nvidia is the installer's own uninstall bookkeeping, which an
+    # image that is rebuilt rather than uninstalled in place never reads.
+    # Leaving it, or any of the package-manager residue below, trips `bootc
+    # container lint`'s var-tmpfiles and var-log checks.
+    #
+    # The rhsm and ldconfig paths are the non-obvious half: dnf's
+    # subscription-manager plugin recreates /run/rhsm, /var/log/rhsm and
+    # /var/lib/rhsm on every invocation, and ldconfig rewrites the aux-cache.
+    # This hook is the last dnf caller in a composed image, so whatever it
+    # leaves is what ships -- measured 2026-08-05, these four were the only
+    # warnings the demo image had left once every earlier step was cleaned.
+    rm -rf /var/cache/libdnf5 /var/cache/dnf /var/lib/dnf /var/lib/nvidia \
+           /var/tmp/* /var/log/dnf*.log /var/log/hawkey.log \
+           /var/log/nvidia-installer.log \
+           /run/rhsm /var/log/rhsm /var/lib/rhsm /var/cache/ldconfig/aux-cache
+else
+    # No packages to remove, but the nvidia installer's own bookkeeping and
+    # /var/tmp scratch are always this fragment's residue.
+    rm -rf /var/lib/nvidia /var/tmp/* /var/log/nvidia-installer.log
+fi
 
 echo "nvidia-driver-run: driver ${DRIVER_VERSION} installed for ${KVER}"
