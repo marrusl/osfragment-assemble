@@ -2,7 +2,7 @@
 
 A tool for composing bootc-compatible OS image builds from fragment OCI images.
 
-New to the project? Start with [the design explainer](docs/design.md): what a fragment is, why fragments are standard OCI images, and what the tool deliberately leaves to dnf, your configuration tooling, and your builder. Short on time? [The design overview](docs/design-overview.md) makes the same argument at half the length.
+New to the project? Start with [the design explainer](docs/design.md): what a fragment is, why fragments are standard OCI images, and what the tool deliberately leaves to dnf, your configuration tooling, and your builder. Short on time? [The design overview](docs/design-overview.md) makes the same argument at half the length. Prefer to look at real files? [The nvidia-driver-run fragment](examples/fragments/nvidia-driver-run/README.md) is a complete, working one explained file by file.
 
 ## What it does
 
