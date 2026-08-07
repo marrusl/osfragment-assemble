@@ -28,6 +28,20 @@ pub fn split_image_ref(image_ref: &str) -> (&str, Option<&str>) {
     }
 }
 
+/// Rewrite `image_ref` to name `digest`, dropping whatever tag or digest it
+/// already carries.
+///
+/// `split_image_ref` deliberately returns a digest-bearing reference whole,
+/// because a digest is not a tag, so formatting `{name}@{digest}` around its
+/// result appends a second digest to a reference that already had one. Build
+/// mounts require the manifest to pin, which makes an already-pinned
+/// reference the normal input here rather than an unusual one.
+pub fn pin_to_digest(image_ref: &str, digest: &str) -> String {
+    let (name, _tag) = split_image_ref(image_ref);
+    let repository = name.split('@').next().unwrap_or(name);
+    format!("{}@{}", repository, digest)
+}
+
 /// Returns the `--from=` argument for COPY instructions.
 /// Uses inline image refs when stages are unnamed, named stage aliases otherwise.
 fn copy_from_source(loaded: &LoadedFragment, use_named_stages: bool) -> String {
@@ -737,6 +751,32 @@ mod tests {
         let (name, tag) = super::split_image_ref("nginx");
         assert_eq!(name, "nginx");
         assert_eq!(tag, None);
+    }
+
+    #[test]
+    fn pinning_replaces_any_existing_tag_or_digest() {
+        // (input ref, expected pinned form)
+        let cases = [
+            ("quay.io/acme/frag:1.0", "quay.io/acme/frag@sha256:beef"),
+            ("quay.io/acme/frag", "quay.io/acme/frag@sha256:beef"),
+            (
+                "localhost:5000/acme/frag:1.0",
+                "localhost:5000/acme/frag@sha256:beef",
+            ),
+            // The case build mounts make routine: the manifest already pins,
+            // and pinning again must not append a second digest.
+            (
+                "quay.io/acme/frag@sha256:cafe",
+                "quay.io/acme/frag@sha256:beef",
+            ),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(
+                pin_to_digest(input, "sha256:beef"),
+                expected,
+                "input: {input}"
+            );
+        }
     }
 
     #[test]
