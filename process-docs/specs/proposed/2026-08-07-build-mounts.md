@@ -197,9 +197,11 @@ would be consumed by nothing and would spend characters against the
   the generator phase that owns the path.
 - Error messages follow the loader's existing contract: name the
   fragment, state the rule, give the fix. The unpinned-reference error
-  additionally shows how to obtain a digest, for example
-  `skopeo inspect`, and prints the corrected reference literal to
-  write: the `image:` line with `@sha256:...` in place.
+  prints the corrected `image:` line with the resolved digest filled
+  in, so the fix is a paste rather than a lookup. When no digest can be
+  resolved for the reference, that line keeps an `@sha256:...`
+  placeholder and the error shows how to obtain one, for example
+  `skopeo inspect`.
 - `mount/` inherits the loader's tar-entry rules: symlinks and
   hardlinks are rejected. The shared entry validation already runs on
   every fragment layer entry, so this is documentation of existing
