@@ -29,4 +29,4 @@ add a fresh empty `## [Unreleased]` section above it.
 
 Follow [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/).
 Categories: Added, Changed, Deprecated, Removed, Fixed, Security.
-Each entry: `- **Short label** — description of what changed and why it matters.`
+Each entry: `- **Short label** - description of what changed and why it matters.`
