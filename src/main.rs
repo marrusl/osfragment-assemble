@@ -10,6 +10,7 @@ use osfragment_assemble::loader::{
     should_keep_fragment_digests,
 };
 use osfragment_assemble::manifest::parse_manifest;
+use osfragment_assemble::mount::MountMaterialization;
 use osfragment_assemble::ocp::generate_machine_os_config;
 use osfragment_assemble::self_contained::{check_target_dir_safe, create_archive, write_output};
 use osfragment_assemble::validate::validate_composition;
@@ -153,7 +154,13 @@ fn main() -> Result<()> {
                 // failure here can leave an older archive beside a newer
                 // tree. Recoverable, but it must never be silent, hence the
                 // context.
-                write_output(dir, &cli.manifest, &containerfile, &fragments)?;
+                write_output(
+                    dir,
+                    &cli.manifest,
+                    &containerfile,
+                    &fragments,
+                    MountMaterialization::Skip,
+                )?;
                 let archive_path = create_archive(dir).with_context(|| {
                     format!(
                         "packaging {} as an archive; the build context directory itself is \

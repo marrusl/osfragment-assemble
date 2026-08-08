@@ -45,6 +45,13 @@ const TOOL_GENERATED_ENTRIES: &[&str] = &[
 /// tar entries should be normally readable.
 const OUTPUT_DIR_MODE: u32 = 0o755;
 
+/// Permission mode applied to every directory in a materialized `mount/`
+/// subtree: owner only. An explicit exception to `OUTPUT_DIR_MODE`'s
+/// normally readable handoff contract, because mount material is credential
+/// material more often than not and the context and its archive are a
+/// durable copy of it.
+const MOUNT_DIR_MODE: u32 = 0o700;
+
 /// Refuse to regenerate into a directory that holds anything the tool did
 /// not write itself. Absent and empty directories are always safe; a
 /// directory containing the sentinel file (`.osfragment-assemble`) and no
@@ -115,6 +122,40 @@ fn check_target_not_symlink(dir: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Set every directory in `<fragment_dir>/mount` to [`MOUNT_DIR_MODE`].
+///
+/// A no-op when the fragment carries no mount material. Each directory is
+/// read before it is restricted, so tightening a parent never blocks the
+/// walk into its children.
+#[cfg(unix)]
+fn restrict_mount_tree(fragment_dir: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let mount_root = fragment_dir.join("mount");
+    if !mount_root.is_dir() {
+        return Ok(());
+    }
+    let mut stack = vec![mount_root];
+    while let Some(dir) = stack.pop() {
+        for entry in fs::read_dir(&dir).with_context(|| format!("reading {}", dir.display()))? {
+            let path = entry?.path();
+            if path.is_dir() {
+                stack.push(path);
+            }
+        }
+        fs::set_permissions(&dir, fs::Permissions::from_mode(MOUNT_DIR_MODE))
+            .with_context(|| format!("restricting permissions on {}", dir.display()))?;
+    }
+    Ok(())
+}
+
+/// File modes are a Unix concept; elsewhere the materialized tree carries
+/// whatever the platform gives it.
+#[cfg(not(unix))]
+fn restrict_mount_tree(_fragment_dir: &Path) -> Result<()> {
+    Ok(())
+}
+
 /// Materialize the self-contained output: fragment tree/hooks payload,
 /// the generated Containerfile, and a copy of the input manifest.
 ///
@@ -137,6 +178,7 @@ fn write_output_with(
     manifest_path: &Path,
     containerfile: &str,
     fragments: &[LoadedFragment],
+    mounts: MountMaterialization,
     materialize: impl Fn(&str, &Path) -> Result<()>,
 ) -> Result<()> {
     check_target_not_symlink(dir)?;
@@ -180,6 +222,14 @@ fn write_output_with(
         let dest = staged_fragments.join(&loaded.fragment.name);
         materialize(image_ref, &dest)
             .with_context(|| format!("materializing fragment '{}'", loaded.fragment.name))?;
+        if mounts == MountMaterialization::Write {
+            restrict_mount_tree(&dest).with_context(|| {
+                format!(
+                    "restricting mount material for fragment '{}'",
+                    loaded.fragment.name
+                )
+            })?;
+        }
     }
 
     // The staging tempdir was created at 0700. Normalize it to a normal,
@@ -228,15 +278,15 @@ pub fn write_output(
     manifest_path: &Path,
     containerfile: &str,
     fragments: &[LoadedFragment],
+    mounts: MountMaterialization,
 ) -> Result<()> {
     write_output_with(
         dir,
         manifest_path,
         containerfile,
         fragments,
-        |image_ref, dest| {
-            crate::loader::materialize_fragment(image_ref, dest, MountMaterialization::Skip)
-        },
+        mounts,
+        |image_ref, dest| crate::loader::materialize_fragment(image_ref, dest, mounts),
     )
 }
 
@@ -579,6 +629,119 @@ mod tests {
     }
 
     #[test]
+    fn materialized_mount_directories_are_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let layer = build_fixture_layer(&[
+            ("fragment/tree/etc/motd", b"hello", 0o644),
+            (
+                "fragment/mount/etc/pki/entitlement/cert.pem",
+                b"secret",
+                0o600,
+            ),
+        ]);
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("out");
+        let manifest_path = tmp.path().join("manifest.yaml");
+        fs::write(&manifest_path, "base: x\n").unwrap();
+        let fragments = vec![test_loaded_fragment("entitlement")];
+
+        write_output_with(
+            &dir,
+            &manifest_path,
+            "FROM x\n",
+            &fragments,
+            MountMaterialization::Write,
+            |_r, dest| {
+                crate::loader::extract_fragment_payload_to_disk(
+                    &layer,
+                    dest,
+                    MountMaterialization::Write,
+                )
+            },
+        )
+        .unwrap();
+
+        let mount_root = dir.join("fragments/entitlement/mount");
+        for path in [
+            mount_root.clone(),
+            mount_root.join("etc"),
+            mount_root.join("etc/pki"),
+            mount_root.join("etc/pki/entitlement"),
+        ] {
+            let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(
+                mode,
+                0o700,
+                "{} must be owner-only, an explicit exception to the output \
+                 directory's normally readable handoff contract",
+                path.display()
+            );
+        }
+
+        // The exception is scoped to mount/: everything else keeps the
+        // normal handoff mode.
+        let tree_mode = fs::metadata(dir.join("fragments/entitlement/tree"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_ne!(tree_mode, 0o700, "tree/ is not credential material");
+    }
+
+    #[test]
+    fn the_archive_preserves_the_owner_only_mount_modes() {
+        let layer = build_fixture_layer(&[(
+            "fragment/mount/etc/pki/entitlement/cert.pem",
+            b"secret",
+            0o600,
+        )]);
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("out");
+        let manifest_path = tmp.path().join("manifest.yaml");
+        fs::write(&manifest_path, "base: x\n").unwrap();
+        let fragments = vec![test_loaded_fragment("entitlement")];
+
+        write_output_with(
+            &dir,
+            &manifest_path,
+            "FROM x\n",
+            &fragments,
+            MountMaterialization::Write,
+            |_r, dest| {
+                crate::loader::extract_fragment_payload_to_disk(
+                    &layer,
+                    dest,
+                    MountMaterialization::Write,
+                )
+            },
+        )
+        .unwrap();
+        let archive = create_archive(&dir).unwrap();
+
+        let bytes = fs::read(&archive).unwrap();
+        let decoder = flate2::read::GzDecoder::new(&bytes[..]);
+        let mut tar = tar::Archive::new(decoder);
+        let mut checked = 0;
+        for entry in tar.entries().unwrap() {
+            let entry = entry.unwrap();
+            let path = entry.path().unwrap().to_string_lossy().to_string();
+            if path.contains("/mount") && entry.header().entry_type().is_dir() {
+                assert_eq!(
+                    entry.header().mode().unwrap() & 0o777,
+                    0o700,
+                    "archived directory {path} must carry the owner-only mode"
+                );
+                checked += 1;
+            }
+        }
+        assert!(
+            checked > 0,
+            "the archive must contain the mount directories"
+        );
+    }
+
+    #[test]
     fn materialize_and_archive_round_trip_byte_for_byte() {
         // Composes write_output_with (real extract_fragment_payload_to_disk,
         // stubbing only the skopeo pull) with create_archive over the same
@@ -614,6 +777,7 @@ mod tests {
             &manifest_path,
             "FROM example\n",
             &fragments,
+            MountMaterialization::Skip,
             |image_ref, dest| {
                 let layer: &[u8] = match image_ref {
                     "quay.io/test/epel:1" => &epel_layer,
@@ -676,6 +840,7 @@ mod tests {
             &manifest_path,
             "FROM example\n",
             &fragments,
+            MountMaterialization::Skip,
             |_image_ref, dest| {
                 crate::loader::extract_fragment_payload_to_disk(
                     &hooks_only_layer,
@@ -824,6 +989,7 @@ mod tests {
             &manifest_path,
             &containerfile,
             &fragments,
+            MountMaterialization::Skip,
             |image_ref, dest| {
                 let entries: &[(&str, &[u8], u32)] = match image_ref {
                     "quay.io/test/epel:1" => &epel_entries,
@@ -1152,6 +1318,7 @@ mod tests {
             &manifest_path,
             "FROM example\n",
             &fragments,
+            MountMaterialization::Skip,
             |_r, d| fs::create_dir_all(d).map_err(Into::into),
         )
         .unwrap();
@@ -1189,6 +1356,7 @@ mod tests {
             &manifest_path,
             "NEW CONTENT\n",
             &fragments,
+            MountMaterialization::Skip,
             |_r, d| fs::create_dir_all(d).map_err(Into::into),
         )
         .unwrap();
@@ -1221,6 +1389,7 @@ mod tests {
                 &manifest_path,
                 "FROM example\n",
                 &fragments,
+                MountMaterialization::Skip,
                 |_r, d| fs::create_dir_all(d).map_err(Into::into),
             )
             .unwrap();
@@ -1249,9 +1418,14 @@ mod tests {
         fs::write(&manifest_path, "base: example\n").unwrap();
 
         let fragments: Vec<LoadedFragment> = vec![];
-        let result = write_output_with(&dir, &manifest_path, "X\n", &fragments, |_r, d| {
-            fs::create_dir_all(d).map_err(Into::into)
-        });
+        let result = write_output_with(
+            &dir,
+            &manifest_path,
+            "X\n",
+            &fragments,
+            MountMaterialization::Skip,
+            |_r, d| fs::create_dir_all(d).map_err(Into::into),
+        );
 
         assert!(result.is_err());
         assert!(
@@ -1280,6 +1454,7 @@ mod tests {
             &manifest_path,
             "NEW\n",
             &fragments,
+            MountMaterialization::Skip,
             |image_ref, dest| {
                 if image_ref.contains("bad-frag") {
                     bail!("simulated registry failure");
@@ -1335,11 +1510,18 @@ mod tests {
         fs::write(&manifest_path, "base: example\n").unwrap();
 
         let fragments = vec![test_loaded_fragment("epel")];
-        let result = write_output_with(&dir, &manifest_path, "NEW\n", &fragments, |_r, d| {
-            // Stands in for a concurrent writer during the pull window.
-            fs::write(dir.join("README.md"), "appeared mid-run").unwrap();
-            fs::create_dir_all(d).map_err(Into::into)
-        });
+        let result = write_output_with(
+            &dir,
+            &manifest_path,
+            "NEW\n",
+            &fragments,
+            MountMaterialization::Skip,
+            |_r, d| {
+                // Stands in for a concurrent writer during the pull window.
+                fs::write(dir.join("README.md"), "appeared mid-run").unwrap();
+                fs::create_dir_all(d).map_err(Into::into)
+            },
+        );
 
         assert!(result.is_err());
         assert!(
@@ -1364,6 +1546,7 @@ mod tests {
             &manifest_path,
             "FROM example\n",
             &fragments,
+            MountMaterialization::Skip,
             |_r, d| fs::create_dir_all(d).map_err(Into::into),
         )
         .unwrap();
@@ -1401,9 +1584,14 @@ mod tests {
         fs::write(&manifest_path, "base: example\n").unwrap();
 
         let fragments: Vec<LoadedFragment> = vec![];
-        let err = write_output_with(&dir, &manifest_path, "NEW\n", &fragments, |_r, d| {
-            fs::create_dir_all(d).map_err(Into::into)
-        })
+        let err = write_output_with(
+            &dir,
+            &manifest_path,
+            "NEW\n",
+            &fragments,
+            MountMaterialization::Skip,
+            |_r, d| fs::create_dir_all(d).map_err(Into::into),
+        )
         .unwrap_err();
 
         assert!(
@@ -1431,9 +1619,14 @@ mod tests {
         fs::write(&manifest_path, "base: example\n").unwrap();
 
         let fragments: Vec<LoadedFragment> = vec![];
-        let err = write_output_with(&dir, &manifest_path, "NEW\n", &fragments, |_r, d| {
-            fs::create_dir_all(d).map_err(Into::into)
-        })
+        let err = write_output_with(
+            &dir,
+            &manifest_path,
+            "NEW\n",
+            &fragments,
+            MountMaterialization::Skip,
+            |_r, d| fs::create_dir_all(d).map_err(Into::into),
+        )
         .unwrap_err();
 
         assert!(
@@ -1466,6 +1659,7 @@ mod tests {
             &manifest_path,
             "FROM example\n",
             &fragments,
+            MountMaterialization::Skip,
             |_r, d| {
                 staged_dests.borrow_mut().push(d.to_path_buf());
                 fs::create_dir_all(d).map_err(Into::into)
@@ -1505,6 +1699,7 @@ mod tests {
             &manifest_path,
             "FROM example\n",
             &fragments,
+            MountMaterialization::Skip,
             |_r, d| fs::create_dir_all(d).map_err(Into::into),
         )
         .unwrap();
