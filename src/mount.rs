@@ -100,6 +100,35 @@ impl MountPoint {
         format!("fragments/{}/mount/{}", fragment, self.0.display())
     }
 
+    /// Render this mount point as a `--mount=` flag for the batched package
+    /// RUN. The option skeleton and key order (`type=bind`, `from=`
+    /// optional, `source=`, `target=`, `ro`, `z`) are defined in exactly
+    /// this one place, so the generator's two emission forms cannot drift
+    /// apart on it.
+    ///
+    /// `from` is the inline registry reference for the default output
+    /// form, or `None` for the self-contained form, which carries no
+    /// `from=` and reads from the materialized build context instead.
+    /// `source` is the already-derived source path: the caller passes
+    /// [`Self::layer_source`] or [`Self::context_source`] depending on
+    /// which form it is emitting. This method owns only the flag's
+    /// byte-format, not the decision of which form or source to use.
+    pub fn mount_flag(&self, from: Option<&str>, source: &str) -> String {
+        match from {
+            Some(image_ref) => format!(
+                "--mount=type=bind,from={},source={},target={},ro,z",
+                image_ref,
+                source,
+                self.target()
+            ),
+            None => format!(
+                "--mount=type=bind,source={},target={},ro,z",
+                source,
+                self.target()
+            ),
+        }
+    }
+
     /// Whether two mount targets collide: either equals or is an ancestor of
     /// the other. Comparison is component-wise, so `/etc/pkix` does not
     /// collide with `/etc/pki`.
@@ -329,6 +358,27 @@ mod tests {
         assert_eq!(
             point.context_source(&name),
             "fragments/rhel-entitlement/mount/etc/pki/entitlement"
+        );
+    }
+
+    #[test]
+    fn mount_flag_renders_the_option_skeleton_exactly() {
+        let point = derive_mount_points("f", &files(&["etc/pki/entitlement/cert.pem"])).unwrap();
+        let point = &point[0];
+        let name = FragmentName::new("rhel-entitlement").unwrap();
+
+        assert_eq!(
+            point.mount_flag(
+                Some("quay.io/acme/rhel-entitlement@sha256:d00d"),
+                &point.layer_source()
+            ),
+            "--mount=type=bind,from=quay.io/acme/rhel-entitlement@sha256:d00d,\
+             source=/fragment/mount/etc/pki/entitlement,target=/etc/pki/entitlement,ro,z"
+        );
+        assert_eq!(
+            point.mount_flag(None, &point.context_source(&name)),
+            "--mount=type=bind,source=fragments/rhel-entitlement/mount/etc/pki/entitlement,\
+             target=/etc/pki/entitlement,ro,z"
         );
     }
 

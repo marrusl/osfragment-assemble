@@ -293,18 +293,9 @@ pub fn generate_containerfile(
                 // No registry reference may appear in this mode's output, so
                 // the material is read from the context instead, the same
                 // pattern hooks use.
-                format!(
-                    "--mount=type=bind,source={},target={},ro,z",
-                    point.context_source(&loaded.fragment.name),
-                    point.target()
-                )
+                point.mount_flag(None, &point.context_source(&loaded.fragment.name))
             } else {
-                format!(
-                    "--mount=type=bind,from={},source={},target={},ro,z",
-                    image_ref,
-                    point.layer_source(),
-                    point.target()
-                )
+                point.mount_flag(Some(image_ref), &point.layer_source())
             });
         }
     }
@@ -567,49 +558,80 @@ mod tests {
             fragments: vec![mf],
         };
         let output = generate_containerfile(&manifest, &[frag], None, false, false).unwrap();
+        let expected_flag = "--mount=type=bind,from=quay.io/acme/rhel-entitlement@sha256:d00d,\
+             source=/fragment/mount/etc/pki/entitlement,target=/etc/pki/entitlement,ro,z";
 
-        assert!(
-            output.contains(
-                "RUN --mount=type=bind,from=quay.io/acme/rhel-entitlement@sha256:d00d,\
-                 source=/fragment/mount/etc/pki/entitlement,\
-                 target=/etc/pki/entitlement,ro,z \\"
-            ),
+        assert_eq!(
+            mount_flags(&output),
+            vec![expected_flag.to_string()],
             "got:\n{output}"
         );
-        let dnf_line = output
-            .lines()
-            .position(|l| l.trim_start().starts_with("dnf install -y"))
-            .expect("the batched install line is still emitted");
-        let mount_line = output
-            .lines()
-            .position(|l| l.contains("--mount=type=bind,from=quay.io/acme"))
-            .expect("the mount line is emitted");
-        assert!(
-            mount_line < dnf_line,
-            "the mount attaches to that RUN:\n{output}"
+
+        // Exact line equality, sliced by position: a duplicated mount line
+        // or a stray flag elsewhere would change what sits at these two
+        // indices, where a `contains` check would miss it.
+        let lines: Vec<&str> = output.lines().collect();
+        let run_idx = lines
+            .iter()
+            .position(|l| l.starts_with("RUN "))
+            .expect("the batched package RUN is emitted");
+        assert_eq!(
+            lines[run_idx],
+            format!("RUN {} \\", expected_flag),
+            "the mount opens the batched RUN:\n{output}"
+        );
+        assert_eq!(
+            lines[run_idx + 1],
+            "    dnf install -y \\",
+            "the install line immediately follows:\n{output}"
         );
     }
 
     #[test]
     fn one_flag_per_derived_mount_point_in_manifest_order() {
-        let (first, mf_first) = make_mount_fragment("entitlement", &["etc/pki/entitlement/c.pem"]);
-        let (mut second, mf_second) = make_mount_fragment("rhsm", &["etc/rhsm/rhsm.conf"]);
-        second.manifest_index = 1;
+        // Deliberately adversarial: "rhsm" carries two mount points whose
+        // source files are supplied out of sorted order, and "rhsm" is
+        // placed FIRST in the manifest even though both of its own target
+        // paths sort after "entitlement"'s. A global alphabetical sort
+        // across fragments, or emission that followed input-file order
+        // instead of the sorted-within-fragment / manifest-across-fragment
+        // rule, would each produce a different sequence than the one
+        // asserted below.
+        let (mut rhsm, mf_rhsm) = make_mount_fragment(
+            "rhsm",
+            &[
+                "etc/rhsm/rhsm.conf",
+                "etc/rhsm/ca/cert.pem",
+                "etc/pki/other/thing.pem",
+            ],
+        );
+        rhsm.manifest_index = 0;
+        let (mut entitlement, mf_entitlement) =
+            make_mount_fragment("entitlement", &["etc/pki/entitlement/c.pem"]);
+        entitlement.manifest_index = 1;
         let manifest = Manifest {
             base: "quay.io/test/base:1".into(),
             source_path: "test-manifest.yaml".into(),
-            fragments: vec![mf_first, mf_second],
+            fragments: vec![mf_rhsm, mf_entitlement],
         };
         let output =
-            generate_containerfile(&manifest, &[first, second], None, false, false).unwrap();
+            generate_containerfile(&manifest, &[rhsm, entitlement], None, false, false).unwrap();
 
-        let flags = mount_flags(&output);
-        assert_eq!(flags.len(), 2, "one flag per derived point:\n{output}");
-        assert!(
-            flags[0].contains("target=/etc/pki/entitlement"),
-            "{flags:?}"
+        assert_eq!(
+            mount_flags(&output),
+            vec![
+                "--mount=type=bind,from=quay.io/acme/rhsm@sha256:d00d,\
+                 source=/fragment/mount/etc/pki/other,target=/etc/pki/other,ro,z"
+                    .to_string(),
+                "--mount=type=bind,from=quay.io/acme/rhsm@sha256:d00d,\
+                 source=/fragment/mount/etc/rhsm,target=/etc/rhsm,ro,z"
+                    .to_string(),
+                "--mount=type=bind,from=quay.io/acme/entitlement@sha256:d00d,\
+                 source=/fragment/mount/etc/pki/entitlement,target=/etc/pki/entitlement,ro,z"
+                    .to_string(),
+            ],
+            "got:\n{output}"
         );
-        assert!(flags[1].contains("target=/etc/rhsm"), "{flags:?}");
     }
 
     #[test]
@@ -621,9 +643,16 @@ mod tests {
             fragments: vec![mf],
         };
         let output = generate_containerfile(&manifest, &[frag], None, false, false).unwrap();
-        let flags = mount_flags(&output);
-        assert_eq!(flags.len(), 1);
-        assert!(flags[0].ends_with(",ro,z"), "got: {}", flags[0]);
+
+        assert_eq!(
+            mount_flags(&output),
+            vec![
+                "--mount=type=bind,from=quay.io/acme/entitlement@sha256:d00d,\
+                 source=/fragment/mount/etc/pki/entitlement,target=/etc/pki/entitlement,ro,z"
+                    .to_string()
+            ],
+            "got:\n{output}"
+        );
     }
 
     #[test]
@@ -636,7 +665,11 @@ mod tests {
             fragments: vec![mf_epel],
         };
         let output = generate_containerfile(&manifest, &[epel], None, false, false).unwrap();
-        assert!(output.contains("RUN dnf install -y \\\n"), "got:\n{output}");
+        let run_line = output
+            .lines()
+            .find(|l| l.starts_with("RUN "))
+            .expect("the batched package RUN is emitted");
+        assert_eq!(run_line, "RUN dnf install -y \\", "got:\n{output}");
     }
 
     /// The one invocation line every hook-carrying fragment gets, in every
