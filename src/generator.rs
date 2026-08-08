@@ -539,7 +539,10 @@ mod tests {
     }
 
     /// Every `--mount=` option string the output carries, trailing
-    /// continuation backslash removed.
+    /// continuation backslash removed. Coarse: proves flag content and
+    /// order, but the whitespace tokenizing drops indentation, so it
+    /// cannot catch a continuation-line formatting regression. Pair with
+    /// `run_block_lines` for that.
     fn mount_flags(output: &str) -> Vec<String> {
         output
             .lines()
@@ -547,6 +550,26 @@ mod tests {
             .filter(|t| t.starts_with("--mount="))
             .map(|t| t.trim_end_matches('\\').to_string())
             .collect()
+    }
+
+    /// The raw package-RUN block, sliced by line position from the `RUN `
+    /// line through the `dnf install -y \` line inclusive, indentation and
+    /// the trailing continuation backslash preserved verbatim. This is what
+    /// pins the byte-exact contract: the first flag rides the `RUN ` line,
+    /// every other line (further flags, and the final `dnf install -y \`)
+    /// is indented exactly four spaces.
+    fn run_block_lines(output: &str) -> Vec<String> {
+        let lines: Vec<&str> = output.lines().collect();
+        let start = lines
+            .iter()
+            .position(|l| l.starts_with("RUN "))
+            .expect("the batched package RUN is emitted");
+        let end = lines[start..]
+            .iter()
+            .position(|l| *l == "RUN dnf install -y \\" || *l == "    dnf install -y \\")
+            .map(|offset| start + offset)
+            .expect("the dnf install line terminates the RUN block");
+        lines[start..=end].iter().map(|l| l.to_string()).collect()
     }
 
     #[test]
@@ -567,23 +590,15 @@ mod tests {
             "got:\n{output}"
         );
 
-        // Exact line equality, sliced by position: a duplicated mount line
-        // or a stray flag elsewhere would change what sits at these two
-        // indices, where a `contains` check would miss it.
-        let lines: Vec<&str> = output.lines().collect();
-        let run_idx = lines
-            .iter()
-            .position(|l| l.starts_with("RUN "))
-            .expect("the batched package RUN is emitted");
+        // Byte-exact: the raw block, indentation and trailing continuation
+        // backslash included, not just the tokenized flag content above.
         assert_eq!(
-            lines[run_idx],
-            format!("RUN {} \\", expected_flag),
-            "the mount opens the batched RUN:\n{output}"
-        );
-        assert_eq!(
-            lines[run_idx + 1],
-            "    dnf install -y \\",
-            "the install line immediately follows:\n{output}"
+            run_block_lines(&output),
+            vec![
+                format!("RUN {} \\", expected_flag),
+                "    dnf install -y \\".to_string(),
+            ],
+            "got:\n{output}"
         );
     }
 
@@ -617,18 +632,31 @@ mod tests {
         let output =
             generate_containerfile(&manifest, &[rhsm, entitlement], None, false, false).unwrap();
 
+        let expected_flags = vec![
+            "--mount=type=bind,from=quay.io/acme/rhsm@sha256:d00d,\
+             source=/fragment/mount/etc/pki/other,target=/etc/pki/other,ro,z"
+                .to_string(),
+            "--mount=type=bind,from=quay.io/acme/rhsm@sha256:d00d,\
+             source=/fragment/mount/etc/rhsm,target=/etc/rhsm,ro,z"
+                .to_string(),
+            "--mount=type=bind,from=quay.io/acme/entitlement@sha256:d00d,\
+             source=/fragment/mount/etc/pki/entitlement,target=/etc/pki/entitlement,ro,z"
+                .to_string(),
+        ];
+        assert_eq!(mount_flags(&output), expected_flags, "got:\n{output}");
+
+        // Byte-exact block: first flag rides the RUN line, the remaining
+        // flags are four-space-indented continuations, and the dnf install
+        // line is the final four-space-indented continuation. Out-of-order
+        // emission (global sort instead of manifest order) or a formatting
+        // regression each fail this.
         assert_eq!(
-            mount_flags(&output),
+            run_block_lines(&output),
             vec![
-                "--mount=type=bind,from=quay.io/acme/rhsm@sha256:d00d,\
-                 source=/fragment/mount/etc/pki/other,target=/etc/pki/other,ro,z"
-                    .to_string(),
-                "--mount=type=bind,from=quay.io/acme/rhsm@sha256:d00d,\
-                 source=/fragment/mount/etc/rhsm,target=/etc/rhsm,ro,z"
-                    .to_string(),
-                "--mount=type=bind,from=quay.io/acme/entitlement@sha256:d00d,\
-                 source=/fragment/mount/etc/pki/entitlement,target=/etc/pki/entitlement,ro,z"
-                    .to_string(),
+                format!("RUN {} \\", expected_flags[0]),
+                format!("    {} \\", expected_flags[1]),
+                format!("    {} \\", expected_flags[2]),
+                "    dnf install -y \\".to_string(),
             ],
             "got:\n{output}"
         );
@@ -643,13 +671,22 @@ mod tests {
             fragments: vec![mf],
         };
         let output = generate_containerfile(&manifest, &[frag], None, false, false).unwrap();
+        let expected_flag = "--mount=type=bind,from=quay.io/acme/entitlement@sha256:d00d,\
+             source=/fragment/mount/etc/pki/entitlement,target=/etc/pki/entitlement,ro,z";
 
         assert_eq!(
             mount_flags(&output),
+            vec![expected_flag.to_string()],
+            "got:\n{output}"
+        );
+
+        // Byte-exact: confirms `ro,z` sits where the option order requires,
+        // not just that the tokenized flag ends with it.
+        assert_eq!(
+            run_block_lines(&output),
             vec![
-                "--mount=type=bind,from=quay.io/acme/entitlement@sha256:d00d,\
-                 source=/fragment/mount/etc/pki/entitlement,target=/etc/pki/entitlement,ro,z"
-                    .to_string()
+                format!("RUN {} \\", expected_flag),
+                "    dnf install -y \\".to_string(),
             ],
             "got:\n{output}"
         );
@@ -665,11 +702,11 @@ mod tests {
             fragments: vec![mf_epel],
         };
         let output = generate_containerfile(&manifest, &[epel], None, false, false).unwrap();
-        let run_line = output
-            .lines()
-            .find(|l| l.starts_with("RUN "))
-            .expect("the batched package RUN is emitted");
-        assert_eq!(run_line, "RUN dnf install -y \\", "got:\n{output}");
+        assert_eq!(
+            run_block_lines(&output),
+            vec!["RUN dnf install -y \\".to_string()],
+            "got:\n{output}"
+        );
     }
 
     /// The one invocation line every hook-carrying fragment gets, in every
