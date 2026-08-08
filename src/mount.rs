@@ -333,6 +333,42 @@ mod tests {
         }
     }
 
+    /// The sort at the end of `derive_mount_points` is what makes emission
+    /// order stable across runs, and every case in the table above happens to
+    /// feed already-sorted input, so none of them can see it go missing. A
+    /// tar walk hands files back in whatever order the archive stored them,
+    /// which is the input this locks: descending in, ascending out, and two
+    /// permutations of one set agreeing with each other.
+    #[test]
+    fn derivation_sorts_its_output_whatever_order_the_files_arrive_in() {
+        let descending = files(&[
+            "etc/rhsm/rhsm.conf",
+            "etc/pkix/two.pem",
+            "etc/pki/one.pem",
+            "etc/a/one.pem",
+        ]);
+        let ascending = files(&[
+            "etc/a/one.pem",
+            "etc/pki/one.pem",
+            "etc/pkix/two.pem",
+            "etc/rhsm/rhsm.conf",
+        ]);
+        let expected = ["/etc/a", "/etc/pki", "/etc/pkix", "/etc/rhsm"];
+
+        let from_descending = derive_mount_points("f", &descending).unwrap();
+        assert_eq!(
+            targets(&from_descending),
+            expected,
+            "reversed input must still come back sorted"
+        );
+
+        let from_ascending = derive_mount_points("f", &ascending).unwrap();
+        assert_eq!(
+            from_descending, from_ascending,
+            "two orderings of one set of mount files must derive the same list"
+        );
+    }
+
     #[test]
     fn a_file_directly_under_mount_is_a_derivation_error() {
         let err = derive_mount_points("rhel-entitlement", &files(&["cert.pem"]))
