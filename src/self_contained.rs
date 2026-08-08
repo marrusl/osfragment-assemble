@@ -28,6 +28,30 @@ pub fn sentinel_contents() -> String {
     format!("osfragment-assemble v{}\n", env!("CARGO_PKG_VERSION"))
 }
 
+/// Filename of the ignore file `--materialize-mounts` writes into a context
+/// that holds mount material.
+const GITIGNORE_FILENAME: &str = ".gitignore";
+
+/// Contents of that file: the pattern plus the reason it is there.
+///
+/// Git does not record file modes, so the owner-only protection applied to
+/// the mount subtrees does not survive a commit. The consequence is
+/// deliberate: a committed context omits its mount material and fails loudly
+/// at build time, at the mount source, and this comment is what makes that
+/// failure read as policy rather than mystery.
+fn mount_gitignore_contents() -> &'static str {
+    "# Written by osfragment-assemble.\n\
+     #\n\
+     # This build context holds build-mount material under fragments/*/mount/,\n\
+     # written owner-only on disk. Git does not record file modes, so committing\n\
+     # it would publish that material world-readable. While it holds mount\n\
+     # material this context is for direct handoff, not for committing.\n\
+     #\n\
+     # A committed context omits the material, and the build then fails at the\n\
+     # mount source rather than building without it.\n\
+     fragments/*/mount/\n"
+}
+
 /// Entries the tool itself may have written to a self-contained output
 /// directory in a prior run. A directory is safe to regenerate only if
 /// every entry it contains is one of these.
@@ -36,6 +60,7 @@ const TOOL_GENERATED_ENTRIES: &[&str] = &[
     "manifest.yaml",
     "fragments",
     SENTINEL_FILENAME,
+    GITIGNORE_FILENAME,
 ];
 
 /// Permission mode applied to the output directory after the staging swap,
@@ -246,6 +271,19 @@ fn write_output_with(
                 )
             })?;
         }
+    }
+
+    // Only when the context actually holds mount material: an ignore file
+    // announcing credential material in a context that has none would be a
+    // lie, and it would make an ordinary context look uncommittable.
+    let holds_mount_material = mounts == MountMaterialization::Write
+        && fragments.iter().any(|f| !f.mount_points.is_empty());
+    if holds_mount_material {
+        fs::write(
+            staging.path().join(GITIGNORE_FILENAME),
+            mount_gitignore_contents(),
+        )
+        .context("writing the mount material .gitignore")?;
     }
 
     // The staging tempdir was created at 0700. Normalize it to a normal,
@@ -785,6 +823,94 @@ mod tests {
             "the archive must contain the mount directories"
         );
         assert!(checked_files > 0, "the archive must contain the mount file");
+    }
+
+    #[test]
+    fn materializing_mounts_writes_a_gitignore_that_explains_itself() {
+        let layer = build_fixture_layer(&[(
+            "fragment/mount/etc/pki/entitlement/cert.pem",
+            b"secret",
+            0o600,
+        )]);
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("out");
+        let manifest_path = tmp.path().join("manifest.yaml");
+        fs::write(&manifest_path, "base: x\n").unwrap();
+        let fragments = vec![mount_carrying_fragment(
+            "entitlement",
+            &["etc/pki/entitlement/cert.pem"],
+        )];
+
+        write_output_with(
+            &dir,
+            &manifest_path,
+            "FROM x\n",
+            &fragments,
+            MountMaterialization::Write,
+            |_r, dest| {
+                crate::loader::extract_fragment_payload_to_disk(
+                    &layer,
+                    dest,
+                    MountMaterialization::Write,
+                )
+            },
+        )
+        .unwrap();
+
+        let ignore = fs::read_to_string(dir.join(".gitignore")).expect("a .gitignore is written");
+        assert!(ignore.contains("fragments/*/mount/"), "got: {ignore}");
+        assert!(
+            ignore.contains("modes"),
+            "the comment explains why, so a later failing build reads as policy \
+             rather than mystery: {ignore}"
+        );
+    }
+
+    #[test]
+    fn a_run_without_mount_material_writes_no_gitignore() {
+        let layer = build_fixture_layer(&[("fragment/tree/etc/motd", b"hello", 0o644)]);
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("out");
+        let manifest_path = tmp.path().join("manifest.yaml");
+        fs::write(&manifest_path, "base: x\n").unwrap();
+        let fragments = vec![test_loaded_fragment("epel")];
+
+        write_output_with(
+            &dir,
+            &manifest_path,
+            "FROM x\n",
+            &fragments,
+            MountMaterialization::Write,
+            |_r, dest| {
+                crate::loader::extract_fragment_payload_to_disk(
+                    &layer,
+                    dest,
+                    MountMaterialization::Write,
+                )
+            },
+        )
+        .unwrap();
+
+        assert!(
+            !dir.join(".gitignore").exists(),
+            "a context holding no mount material is committable, and an ignore \
+             file claiming otherwise would be a lie"
+        );
+    }
+
+    #[test]
+    fn a_context_carrying_a_gitignore_is_still_regenerable() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("prior-run");
+        fs::create_dir_all(dir.join("fragments/entitlement")).unwrap();
+        fs::write(dir.join("Containerfile"), "FROM x\n").unwrap();
+        fs::write(dir.join("manifest.yaml"), "base: x\n").unwrap();
+        fs::write(dir.join(SENTINEL_FILENAME), sentinel_contents()).unwrap();
+        fs::write(dir.join(".gitignore"), mount_gitignore_contents()).unwrap();
+        assert!(
+            check_target_dir_safe(&dir).is_ok(),
+            "the tool writes this file, so it must recognize it on the next run"
+        );
     }
 
     #[test]
@@ -1579,8 +1705,11 @@ mod tests {
     #[test]
     fn write_output_writes_only_the_tool_generated_entry_set() {
         // Anything the tool writes at the top level of <dir> outside the
-        // four recognized names would make check_target_dir_safe refuse the
-        // tool's own output on the next regeneration.
+        // recognized names would make check_target_dir_safe refuse the
+        // tool's own output on the next regeneration. This run carries no
+        // mount material, so the recognized set is only ever an upper
+        // bound: check every entry is in it rather than asserting an exact
+        // match, the same test as check_target_dir_safe's own `all()`.
         let workdir = tempfile::tempdir().unwrap();
         let dir = workdir.path().join("ctx");
         let manifest_path = workdir.path().join("osfragment-assemble.yaml");
@@ -1597,17 +1726,16 @@ mod tests {
         )
         .unwrap();
 
-        let mut entries: Vec<_> = fs::read_dir(&dir)
+        let entries: Vec<_> = fs::read_dir(&dir)
             .unwrap()
             .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
             .collect();
-        entries.sort();
-        let mut expected: Vec<_> = TOOL_GENERATED_ENTRIES
-            .iter()
-            .map(|e| e.to_string())
-            .collect();
-        expected.sort();
-        assert_eq!(entries, expected);
+        assert!(
+            entries
+                .iter()
+                .all(|e| TOOL_GENERATED_ENTRIES.contains(&e.as_str())),
+            "unexpected entries: {entries:?}"
+        );
     }
 
     #[test]
