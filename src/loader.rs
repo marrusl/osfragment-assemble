@@ -6,8 +6,9 @@ use crate::fragment::{
     is_repo_path, parse_fragment_toml, Fragment, FragmentConflicts, FragmentName, FragmentPackages,
     FragmentProvides,
 };
-use crate::generator::split_image_ref;
+use crate::generator::pin_to_digest;
 use crate::manifest::{FragmentSource, Manifest};
+use crate::mount::{derive_mount_points, MountMaterialization, MountPoint, MOUNTS_ANNOTATION_KEY};
 
 #[derive(Debug, Clone)]
 pub struct LoadedFragment {
@@ -22,6 +23,42 @@ pub struct LoadedFragment {
     /// Cached .repo file contents for repo conflict comparison, keyed by filename.
     /// Populated during loading from either local filesystem or layer extraction.
     pub repo_file_contents: std::collections::HashMap<String, String>,
+    /// Bind mount points derived from this fragment's `mount/` subtree, in
+    /// sorted order. Derived once here so every consumer sees the same
+    /// answer and the derivation error surfaces at load.
+    pub mount_points: Vec<MountPoint>,
+    /// Whether this fragment carries a `fragment/mount` entry of any kind,
+    /// including a `mount/` that holds no regular files and therefore
+    /// derives no mount points. Carried alongside `mount_points` so a
+    /// caller can reconstruct `empty_mount_notice` without re-deriving
+    /// anything: the loader only carries the evidence, and does not decide
+    /// when the notice fires.
+    pub has_mount_dir: bool,
+    /// The stderr warning for a mounts annotation that disagrees with the
+    /// derived targets, or `None` when there is nothing to say: no mount/
+    /// layer at all, no mounts annotation, or the two already agree.
+    /// Carried rather than printed for the same reason `has_mount_dir` is:
+    /// `load_registry_fragment` is a shared load path used by both
+    /// generation and `inspect`, and only `validate_composition`
+    /// (generation) should print it, matching `empty_mount_notice`'s
+    /// caller-owned placement.
+    pub drift_warning: Option<String>,
+}
+
+impl LoadedFragment {
+    /// A fragment consisting of metadata and `mount/` alone: it carries
+    /// build mounts and nothing a `COPY` or a hook `RUN` could reference.
+    /// Build-mount references are always emitted inline, so a named stage
+    /// for one of these would be consumed by nothing while still spending
+    /// characters against the MachineOSConfig content limit.
+    pub fn is_pure_mount(&self) -> bool {
+        !self.mount_points.is_empty()
+            && self.hook_paths.is_empty()
+            && !self
+                .tree_paths
+                .iter()
+                .any(|p| p.to_string_lossy().starts_with("tree/"))
+    }
 }
 
 pub fn split_tree_paths(paths: &[PathBuf]) -> (Vec<PathBuf>, Vec<PathBuf>) {
@@ -73,6 +110,19 @@ pub const HOOKS_ENTRYPOINT_NAME: &str = "entrypoint";
 
 /// The same file as it appears inside a fragment layer.
 const HOOKS_ENTRYPOINT_TAR_PATH: &str = "fragment/hooks/entrypoint";
+
+/// A fragment's build-mount subtree, as it appears inside a fragment layer.
+/// Everything below it mirrors a target path, the same convention `tree/`
+/// uses.
+const MOUNT_TAR_PREFIX: &str = "fragment/mount";
+
+/// The OCI layer whiteout prefix: a tar entry whose base name starts with
+/// this marks its sibling as deleted in a lower layer, or, doubled as
+/// `.wh..wh..opq`, marks the entry's directory as opaque. A fragment is
+/// built `FROM scratch` with `COPY` only, so a well-formed fragment layer
+/// never has a lower layer to delete from and can never legitimately
+/// contain one.
+const OCI_WHITEOUT_PREFIX: &str = ".wh.";
 
 /// Execute bits (`u+x`, `g+x`, `o+x`). Root's `CAP_DAC_OVERRIDE` grants
 /// execute only when at least one of them is set, so this mask matches
@@ -141,6 +191,23 @@ fn validate_tar_entry(path: &Path, entry_type: tar::EntryType) -> Result<PathBuf
             path.to_string_lossy().escape_debug()
         )
     })?;
+    // Checked ahead of the traversal guard below: the opaque-directory
+    // marker `.wh..wh..opq` also contains `..` and would otherwise be
+    // rejected under that check's generic message instead of this one's,
+    // which names the actual problem and survives if the traversal check is
+    // ever narrowed to stop treating every `..` substring as traversal.
+    if path_str
+        .split('/')
+        .any(|component| component.starts_with(OCI_WHITEOUT_PREFIX))
+    {
+        bail!(
+            "OCI whiteout entry rejected in fragment layer: {}. A fragment is a \
+             FROM-scratch, COPY-only payload and must never carry a deletion \
+             marker; remove the file from the fragment image instead of \
+             whiting it out.",
+            path_str
+        );
+    }
     if path_str.contains("..") {
         bail!("path traversal detected in fragment layer: {}", path_str);
     }
@@ -201,29 +268,50 @@ pub fn extract_fragment_toml_from_bytes(compressed: &[u8]) -> Result<String> {
     found.ok_or_else(|| anyhow::anyhow!("fragment.toml not found in layer"))
 }
 
-/// Regular-file paths in a layer, plus the mode of
-/// `fragment/hooks/entrypoint` when this layer carries one as a regular file.
+/// What one pass over a layer's tar entries yields.
+#[derive(Debug)]
+struct LayerEntries {
+    /// Regular-file paths, in the canonical form `validate_tar_entry`
+    /// returns.
+    file_paths: Vec<PathBuf>,
+    /// Mode of `fragment/hooks/entrypoint` when this layer carries one as a
+    /// regular file.
+    entrypoint_mode: Option<u32>,
+    /// Whether this layer carries a `fragment/mount` entry of any type. A
+    /// `mount/` holding no files leaves nothing in `file_paths`, so the
+    /// directory entry is the only evidence the empty-mount notice has.
+    has_mount_dir: bool,
+}
+
+/// Walk a layer once, collecting everything downstream needs from it.
 ///
-/// The mode comes off the header this loop already holds, so enforcing the
-/// entrypoint contract costs no second pass over the archive.
-fn extract_tree_paths_from_bytes(compressed: &[u8]) -> Result<(Vec<PathBuf>, Option<u32>)> {
+/// The entrypoint mode comes off the header this loop already holds, so
+/// enforcing the entrypoint contract costs no second pass, and the same is
+/// true of the mount directory check.
+fn extract_layer_entries(compressed: &[u8]) -> Result<LayerEntries> {
     let decoder = GzDecoder::new(compressed);
     let mut archive = tar::Archive::new(decoder);
-    let mut paths = Vec::new();
-    let mut entrypoint_mode = None;
+    let mut entries = LayerEntries {
+        file_paths: Vec::new(),
+        entrypoint_mode: None,
+        has_mount_dir: false,
+    };
 
     for entry_result in archive.entries()? {
         let entry = entry_result?;
         let path = entry.path()?.to_path_buf();
         let path = validate_tar_entry(&path, entry.header().entry_type())?;
+        if path.starts_with(MOUNT_TAR_PREFIX) {
+            entries.has_mount_dir = true;
+        }
         if entry.header().entry_type().is_file() {
             if path == Path::new(HOOKS_ENTRYPOINT_TAR_PATH) {
-                entrypoint_mode = Some(entry.header().mode()?);
+                entries.entrypoint_mode = Some(entry.header().mode()?);
             }
-            paths.push(path);
+            entries.file_paths.push(path);
         }
     }
-    Ok((paths, entrypoint_mode))
+    Ok(entries)
 }
 
 fn extract_repo_file_contents_from_bytes(
@@ -252,9 +340,10 @@ fn extract_repo_file_contents_from_bytes(
     Ok(contents)
 }
 
-/// Write a layer's `fragment/tree/` and `fragment/hooks/` payload to disk
-/// under `dest_dir/tree` and `dest_dir/hooks`. Shares the same tar-entry
-/// security validation as the metadata-only extractors above.
+/// Write a layer's `fragment/tree/`, `fragment/hooks/`, and, under
+/// [`MountMaterialization::Write`], `fragment/mount/` payload to disk under
+/// `dest_dir`. Shares the same tar-entry security validation as the
+/// metadata-only extractors above.
 ///
 /// `pub(crate)` rather than private: `src/self_contained.rs`'s tests
 /// compose this directly with `create_archive` over a fixture layer to
@@ -265,7 +354,11 @@ fn extract_repo_file_contents_from_bytes(
 /// Extraction streams entry-by-entry, so on `Err` `dest_dir` may contain
 /// partially written files from entries processed before the failing one;
 /// callers must treat it as unusable rather than a valid partial result.
-pub(crate) fn extract_fragment_payload_to_disk(compressed: &[u8], dest_dir: &Path) -> Result<()> {
+pub(crate) fn extract_fragment_payload_to_disk(
+    compressed: &[u8],
+    dest_dir: &Path,
+    mounts: MountMaterialization,
+) -> Result<()> {
     let decoder = GzDecoder::new(compressed);
     let mut archive = tar::Archive::new(decoder);
 
@@ -283,6 +376,14 @@ pub(crate) fn extract_fragment_payload_to_disk(compressed: &[u8], dest_dir: &Pat
             dest_dir.join("tree").join(rel)
         } else if let Ok(rel) = path.strip_prefix("fragment/hooks") {
             dest_dir.join("hooks").join(rel)
+        } else if let Ok(rel) = path.strip_prefix(MOUNT_TAR_PREFIX) {
+            // Skipped unless the caller opts in: materializing mount
+            // material is a custody change, not a packaging detail, and the
+            // default output must not make a durable copy of it.
+            match mounts {
+                MountMaterialization::Skip => continue,
+                MountMaterialization::Write => dest_dir.join("mount").join(rel),
+            }
         } else {
             continue;
         };
@@ -299,23 +400,32 @@ pub(crate) fn extract_fragment_payload_to_disk(compressed: &[u8], dest_dir: &Pat
 }
 
 /// Pull a fragment image by reference and materialize its tree/hooks
-/// payload to disk under `dest_dir`. Reuses `pull_layer_bytes`, the same
+/// payload to disk under `dest_dir`, and its `mount/` payload as well under
+/// [`MountMaterialization::Write`]. Reuses `pull_layer_bytes`, the same
 /// skopeo-copy-then-walk-layers path `load_registry_fragment` uses; only
 /// the sink differs (files on disk instead of an in-memory path list).
 ///
 /// On `Err`, `dest_dir` may contain partially written files from an
 /// earlier layer or an earlier entry within the failing layer; callers
 /// must treat it as unusable rather than a valid partial result.
-pub fn materialize_fragment(image_ref: &str, dest_dir: &Path) -> Result<()> {
+pub fn materialize_fragment(
+    image_ref: &str,
+    dest_dir: &Path,
+    mounts: MountMaterialization,
+) -> Result<()> {
     for layer_bytes in pull_layer_bytes(image_ref)? {
-        extract_fragment_payload_to_disk(&layer_bytes, dest_dir)?;
+        extract_fragment_payload_to_disk(&layer_bytes, dest_dir, mounts)?;
     }
     Ok(())
 }
 
-/// Try the OCI annotation fast path: parse fragment metadata from
-/// manifest annotations without pulling any layers.
-fn try_annotation_fast_path(image_ref: &str) -> Result<Option<Fragment>> {
+/// Fetch an image's OCI manifest annotations.
+///
+/// `Ok(None)` when the registry call fails or the manifest carries no
+/// annotations at all. Failure is not an error here: every caller treats
+/// annotations as a cache over authoritative layer content and has a path
+/// that works without them.
+fn fetch_annotations(image_ref: &str) -> Result<Option<serde_json::Value>> {
     let output = std::process::Command::new("skopeo")
         .args([
             "inspect",
@@ -332,12 +442,80 @@ fn try_annotation_fast_path(image_ref: &str) -> Result<Option<Fragment>> {
     }
 
     let manifest: serde_json::Value = serde_json::from_slice(&output.stdout)?;
-    let annotations = match manifest.get("annotations") {
+    Ok(manifest.get("annotations").cloned())
+}
+
+/// Try the OCI annotation fast path: parse fragment metadata and mount
+/// targets from manifest annotations without pulling any layers.
+fn try_annotation_fast_path(image_ref: &str) -> Result<Option<(Fragment, Vec<MountPoint>)>> {
+    let annotations = match fetch_annotations(image_ref)? {
         Some(a) => a,
         None => return Ok(None),
     };
+    Ok(fast_path_from_annotations(&annotations))
+}
 
-    Ok(fragment_from_annotations(annotations))
+/// The fast path's decision, over annotations already in hand.
+///
+/// `None` declines the fast path and sends the caller to the full pull. Both
+/// halves are required. Metadata alone cannot answer the mount question: a
+/// missing mounts key is indistinguishable from a fragment that mounts
+/// nothing, so returning an empty list here would report "no mounts" for a
+/// fragment that has them. Absence therefore falls back to a full pull, which
+/// derives the targets from the layer, exactly as a missing metadata
+/// annotation already does.
+fn fast_path_from_annotations(
+    annotations: &serde_json::Value,
+) -> Option<(Fragment, Vec<MountPoint>)> {
+    let mounts = mounts_from_annotations(annotations)?;
+    let fragment = fragment_from_annotations(annotations)?;
+    Some((fragment, mounts))
+}
+
+/// Mount targets from the mounts annotation.
+///
+/// `None` means the key is absent, which is not drift: the annotation is
+/// optional and a fragment that never annotated its mounts is simply one
+/// `list` has to pull. Unlike every other annotation here, this one is not
+/// a cache of something the layer also states independently: it is the
+/// exact set of mount targets, and there is no in-layer counterpart to fall
+/// back on for just the targets that failed to parse. So an entry that does
+/// not parse as an absolute target invalidates the whole annotation rather
+/// than being dropped from it; the caller falls back to a full layer pull,
+/// where the layer is authoritative and any drift surfaces.
+fn mounts_from_annotations(annotations: &serde_json::Value) -> Option<Vec<MountPoint>> {
+    let raw = annotations.get(MOUNTS_ANNOTATION_KEY)?.as_str()?;
+    let targets: Vec<String> = serde_json::from_str(raw).ok()?;
+    let mut mounts = Vec::with_capacity(targets.len());
+    for target in &targets {
+        mounts.push(MountPoint::from_target(target).ok()?);
+    }
+    mounts.sort();
+    Some(mounts)
+}
+
+/// The drift decision `load_registry_fragment` carries as evidence on
+/// `LoadedFragment.drift_warning`, split out so it is testable without a
+/// registry, the same split `fast_path_from_annotations` uses for the
+/// metadata fast path.
+///
+/// Gated on `has_mount_dir`: a fragment with no real `mount/` layer derives
+/// no mount points regardless of what an annotation claims, so an
+/// annotation on a mount-less fragment is not drift, it is simply
+/// unconsumed. Without this gate, `derive_mount_points`'s empty result for
+/// an absent layer would compare unequal to any non-empty annotation and
+/// report a false positive.
+fn annotation_drift_warning(
+    fragment_name: &str,
+    has_mount_dir: bool,
+    annotations: Option<&serde_json::Value>,
+    derived: &[MountPoint],
+) -> Option<String> {
+    if !has_mount_dir {
+        return None;
+    }
+    let annotated = mounts_from_annotations(annotations?)?;
+    crate::mount::mount_annotation_drift(fragment_name, &annotated, derived)
 }
 
 /// Map an OCI manifest `annotations` object onto a `Fragment`.
@@ -461,6 +639,8 @@ struct LayeredMetadata {
     tree_paths: Vec<PathBuf>,
     hook_paths: Vec<PathBuf>,
     repo_file_contents: std::collections::HashMap<String, String>,
+    mount_points: Vec<MountPoint>,
+    has_mount_dir: bool,
 }
 
 /// Scan all layers and aggregate: fragment.toml, tree paths, hooks, and repo
@@ -475,6 +655,8 @@ fn fragment_from_layers(layer_bytes_list: &[Vec<u8>]) -> Result<LayeredMetadata>
     let mut all_hook_paths = Vec::new();
     let mut entrypoint_mode = None;
     let mut repo_file_contents = std::collections::HashMap::new();
+    let mut has_mount_dir = false;
+    let mut all_mount_files: Vec<PathBuf> = Vec::new();
 
     for layer_bytes in layer_bytes_list {
         if fragment.is_none() {
@@ -483,11 +665,20 @@ fn fragment_from_layers(layer_bytes_list: &[Vec<u8>]) -> Result<LayeredMetadata>
             }
         }
 
-        let (tree_paths, layer_entrypoint_mode) = extract_tree_paths_from_bytes(layer_bytes)?;
+        let entries = extract_layer_entries(layer_bytes)?;
+        let tree_paths = entries.file_paths;
         // Later layers shadow earlier ones, so the last entrypoint wins.
-        if layer_entrypoint_mode.is_some() {
-            entrypoint_mode = layer_entrypoint_mode;
+        if entries.entrypoint_mode.is_some() {
+            entrypoint_mode = entries.entrypoint_mode;
         }
+        has_mount_dir |= entries.has_mount_dir;
+
+        let layer_mount_files: Vec<PathBuf> = tree_paths
+            .iter()
+            .filter_map(|p| p.strip_prefix(MOUNT_TAR_PREFIX).ok())
+            .map(|p| p.to_path_buf())
+            .collect();
+        all_mount_files.extend(layer_mount_files);
 
         let hook_paths: Vec<PathBuf> = tree_paths
             .iter()
@@ -519,18 +710,26 @@ fn fragment_from_layers(layer_bytes_list: &[Vec<u8>]) -> Result<LayeredMetadata>
         validate_hooks_entrypoint(fragment.name.as_str(), entrypoint_mode)?;
     }
 
+    // No notice here: this routine is shared by generation, registry
+    // `inspect`, and `list`'s metadata-cache-miss fallback. Emission is
+    // caller-owned, so the loader carries `has_mount_dir` alongside
+    // `mount_points` and leaves the decision to whichever caller should
+    // make it (generation's `validate_composition`; `list` never does).
+    let mount_points = derive_mount_points(fragment.name.as_str(), &all_mount_files)?;
+
     Ok(LayeredMetadata {
         fragment,
         tree_paths: all_tree_paths,
         hook_paths: all_hook_paths,
         repo_file_contents,
+        mount_points,
+        has_mount_dir,
     })
 }
 
 pub fn load_registry_fragment(image_ref: &str) -> Result<LoadedFragment> {
     let digest = resolve_digest(image_ref)?;
-    let (name, _tag) = split_image_ref(image_ref);
-    let image_with_digest = format!("{}@{}", name, digest);
+    let image_with_digest = pin_to_digest(image_ref, &digest);
 
     // Assembly always parses the in-layer fragment.toml for the authoritative
     // Fragment.  The annotation fast path is limited to metadata-only
@@ -538,6 +737,23 @@ pub fn load_registry_fragment(image_ref: &str) -> Result<LoadedFragment> {
     // because annotations omit fields like conflicts.
     let layer_bytes_list = pull_layer_bytes(&image_with_digest)?;
     let metadata = fragment_from_layers(&layer_bytes_list)?;
+
+    // The layer is already pulled here, which is the spec's condition for
+    // cross-checking. Existing annotations reconcile against the in-layer
+    // fragment.toml; a mounts annotation has no in-layer file, so its
+    // counterpart is the derived targets themselves. Best effort: a registry
+    // hiccup on a metadata read must not fail a generation whose
+    // authoritative content is already in hand. The result is carried on
+    // `LoadedFragment` rather than printed here: this function is also
+    // `inspect`'s full-load path, and only generation should speak, the
+    // same caller-owned placement `empty_mount_notice` uses.
+    let annotations = fetch_annotations(&image_with_digest).ok().flatten();
+    let drift_warning = annotation_drift_warning(
+        metadata.fragment.name.as_str(),
+        metadata.has_mount_dir,
+        annotations.as_ref(),
+        &metadata.mount_points,
+    );
 
     Ok(LoadedFragment {
         fragment: metadata.fragment,
@@ -549,6 +765,9 @@ pub fn load_registry_fragment(image_ref: &str) -> Result<LoadedFragment> {
         resolved_digest: Some(digest),
         manifest_index: 0, // set by caller
         repo_file_contents: metadata.repo_file_contents,
+        mount_points: metadata.mount_points,
+        has_mount_dir: metadata.has_mount_dir,
+        drift_warning,
     })
 }
 
@@ -560,10 +779,9 @@ pub fn load_registry_fragment(image_ref: &str) -> Result<LoadedFragment> {
 /// load_registry_fragment path, which always parses the in-layer TOML.
 pub fn load_registry_fragment_metadata_only(image_ref: &str) -> Result<LoadedFragment> {
     let digest = resolve_digest(image_ref)?;
-    let (name, _tag) = split_image_ref(image_ref);
-    let image_with_digest = format!("{}@{}", name, digest);
+    let image_with_digest = pin_to_digest(image_ref, &digest);
 
-    if let Some(fragment) = try_annotation_fast_path(image_ref)? {
+    if let Some((fragment, mount_points)) = try_annotation_fast_path(&image_with_digest)? {
         // Annotations present — return metadata without pulling layers.
         // tree_paths and hook_paths are unknown in this path;
         // inspect/list can display fragment metadata without them.
@@ -577,6 +795,9 @@ pub fn load_registry_fragment_metadata_only(image_ref: &str) -> Result<LoadedFra
             resolved_digest: Some(digest),
             manifest_index: 0, // set by caller
             repo_file_contents: std::collections::HashMap::new(),
+            mount_points,
+            has_mount_dir: false,
+            drift_warning: None,
         });
     }
 
@@ -699,6 +920,7 @@ mod tests {
         use crate::fragment::{
             Fragment, FragmentConflicts, FragmentName, FragmentPackages, FragmentProvides,
         };
+        use crate::generator::split_image_ref;
         let (name, _tag) = split_image_ref(image_ref);
         let short = name.rsplit('/').next().unwrap_or("frag");
         LoadedFragment {
@@ -719,6 +941,9 @@ mod tests {
             resolved_digest: Some(TEST_DIGEST.into()),
             manifest_index: 0,
             repo_file_contents: std::collections::HashMap::new(),
+            mount_points: vec![],
+            has_mount_dir: false,
+            drift_warning: None,
         }
     }
 
@@ -853,6 +1078,33 @@ mod tests {
             2,
             "the run stops at the failing fragment rather than continuing to the third"
         );
+    }
+
+    #[test]
+    fn a_fragment_carrying_only_metadata_and_mount_is_pure_mount() {
+        // (tree paths under tree/, hook paths, has mounts, expected)
+        let cases: &[(&[&str], &[&str], bool, bool)] = &[
+            (&[], &[], true, true),
+            (&[], &[], false, false),
+            (&["tree/etc/yum.repos.d/x.repo"], &[], true, false),
+            (&[], &["entrypoint"], true, false),
+        ];
+        for (tree, hooks, has_mounts, expected) in cases {
+            let mut loaded = stub_loaded("quay.io/test/frag:1");
+            loaded.tree_paths = tree.iter().map(PathBuf::from).collect();
+            loaded.hook_paths = hooks.iter().map(PathBuf::from).collect();
+            loaded.mount_points = if *has_mounts {
+                crate::mount::derive_mount_points("frag", &[PathBuf::from("etc/rhsm/rhsm.conf")])
+                    .unwrap()
+            } else {
+                vec![]
+            };
+            assert_eq!(
+                loaded.is_pure_mount(),
+                *expected,
+                "tree={tree:?} hooks={hooks:?} mounts={has_mounts}"
+            );
+        }
     }
 }
 
@@ -1020,6 +1272,28 @@ description = "test fragment"
                 false,
                 "symlink or hardlink",
             ),
+            // OCI whiteouts
+            (
+                "fragment/mount/etc/pki/entitlement/.wh.cert.pem",
+                EntryType::Regular,
+                false,
+                "whiteout",
+            ),
+            (
+                "fragment/mount/etc/pki/entitlement/.wh..wh..opq",
+                EntryType::Regular,
+                false,
+                "whiteout",
+            ),
+            // A component that merely starts with the same two letters as
+            // the whiteout prefix, but not the prefix itself, must still
+            // pass: the guard matches on `.wh.` and nothing broader.
+            (
+                "fragment/tree/etc/something.whatever",
+                EntryType::Regular,
+                true,
+                "",
+            ),
         ];
         for (path, entry_type, should_pass, expected_err) in &cases {
             let result = validate_tar_entry(Path::new(path), *entry_type);
@@ -1090,7 +1364,7 @@ description = "test fragment"
             ),
             ("fragment/tree/etc/foo.conf", b"data"),
         ]);
-        let (paths, _entrypoint_mode) = extract_tree_paths_from_bytes(&tarball).unwrap();
+        let paths = extract_layer_entries(&tarball).unwrap().file_paths;
         let hook_paths: Vec<PathBuf> = paths
             .iter()
             .filter(|p| p.to_string_lossy().starts_with("fragment/hooks/"))
@@ -1115,7 +1389,8 @@ description = "test fragment"
         ]);
 
         let workdir = tempfile::tempdir().unwrap();
-        extract_fragment_payload_to_disk(&tarball, workdir.path()).unwrap();
+        extract_fragment_payload_to_disk(&tarball, workdir.path(), MountMaterialization::Skip)
+            .unwrap();
 
         let extracted_tree =
             std::fs::read(workdir.path().join("tree/etc/yum.repos.d/epel.repo")).unwrap();
@@ -1125,13 +1400,74 @@ description = "test fragment"
     }
 
     #[test]
+    fn mount_material_lands_on_disk_only_under_the_write_policy() {
+        use crate::mount::MountMaterialization;
+
+        // (policy, mount file exists on disk afterward)
+        let cases = [
+            (MountMaterialization::Skip, false),
+            (MountMaterialization::Write, true),
+        ];
+        for (policy, expected) in cases {
+            let tarball = create_test_tarball(&[
+                ("fragment/tree/etc/motd", b"hello" as &[u8]),
+                ("fragment/mount/etc/pki/entitlement/cert.pem", b"secret"),
+            ]);
+            let workdir = tempfile::tempdir().unwrap();
+            extract_fragment_payload_to_disk(&tarball, workdir.path(), policy).unwrap();
+
+            assert!(
+                workdir.path().join("tree/etc/motd").is_file(),
+                "tree payload is unaffected by the mount policy"
+            );
+            assert_eq!(
+                workdir
+                    .path()
+                    .join("mount/etc/pki/entitlement/cert.pem")
+                    .is_file(),
+                expected,
+                "policy={policy:?}"
+            );
+        }
+    }
+
+    /// The sibling of `mount_material_lands_on_disk_only_under_the_write_policy`:
+    /// that test proves the materialized file exists; this one proves its
+    /// bytes are the source layer entry's bytes, unmodified. Credential
+    /// material (entitlement certs and the like) is what lands here, so a
+    /// silent truncation or corruption in the write path is a custody bug,
+    /// not just a cosmetic one.
+    #[test]
+    fn materialized_mount_bytes_match_the_source_layer_entry() {
+        use crate::mount::MountMaterialization;
+
+        let cert_bytes =
+            b"-----BEGIN CERTIFICATE-----\nnot a real cert\n-----END CERTIFICATE-----\n";
+        let tarball = create_test_tarball(&[(
+            "fragment/mount/etc/pki/entitlement/cert.pem",
+            cert_bytes as &[u8],
+        )]);
+        let workdir = tempfile::tempdir().unwrap();
+        extract_fragment_payload_to_disk(&tarball, workdir.path(), MountMaterialization::Write)
+            .unwrap();
+
+        let materialized =
+            std::fs::read(workdir.path().join("mount/etc/pki/entitlement/cert.pem")).unwrap();
+        assert_eq!(
+            materialized, cert_bytes,
+            "materialized mount bytes must match the source layer entry exactly"
+        );
+    }
+
+    #[test]
     fn payload_extraction_rejects_traversal_like_other_extractors() {
         let tarball = create_test_tarball(&[
             ("../etc/passwd", b"evil"),
             ("fragment/tree/etc/foo.conf", b"data"),
         ]);
         let workdir = tempfile::tempdir().unwrap();
-        let result = extract_fragment_payload_to_disk(&tarball, workdir.path());
+        let result =
+            extract_fragment_payload_to_disk(&tarball, workdir.path(), MountMaterialization::Skip);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("traversal"));
     }
@@ -1162,8 +1498,9 @@ description = "test fragment"
         ]);
 
         let workdir = tempfile::tempdir().unwrap();
-        let err = extract_fragment_payload_to_disk(&tarball, workdir.path())
-            .expect_err("a non-UTF-8 entry name must be rejected, not mangled onto disk");
+        let err =
+            extract_fragment_payload_to_disk(&tarball, workdir.path(), MountMaterialization::Skip)
+                .expect_err("a non-UTF-8 entry name must be rejected, not mangled onto disk");
         assert!(
             err.to_string().contains("non-UTF-8"),
             "wrong error for a non-UTF-8 entry name: {err}"
@@ -1180,7 +1517,8 @@ description = "test fragment"
         }]);
 
         let workdir = tempfile::tempdir().unwrap();
-        extract_fragment_payload_to_disk(&tarball, workdir.path()).unwrap();
+        extract_fragment_payload_to_disk(&tarball, workdir.path(), MountMaterialization::Skip)
+            .unwrap();
 
         let dir_path = workdir.path().join("tree/etc/empty-dir");
         let metadata = std::fs::metadata(&dir_path).unwrap();
@@ -1223,6 +1561,89 @@ description = "test fragment"
             mode,
             entry_type: tar::EntryType::Regular,
         }
+    }
+
+    /// A `mount/` entry at the mode credential material usually carries.
+    /// Mirrors the existing `hook_entry` helper directly above.
+    fn mount_entry<'a>(path: &'a str, data: &'a [u8]) -> RawEntry<'a> {
+        RawEntry {
+            path: path.as_bytes(),
+            data,
+            mode: 0o600,
+            entry_type: tar::EntryType::Regular,
+        }
+    }
+
+    #[test]
+    fn mount_paths_derive_mount_points_at_load() {
+        let layers = fragment_layers(vec![
+            mount_entry("fragment/mount/etc/pki/entitlement/cert.pem", b"cert"),
+            mount_entry("fragment/mount/etc/pki/entitlement/key.pem", b"key"),
+            mount_entry("fragment/mount/etc/rhsm/rhsm.conf", b"conf"),
+            mount_entry("fragment/mount/etc/rhsm/ca/ca.pem", b"ca"),
+        ]);
+        let metadata = fragment_from_layers(&layers).expect("a pure mount fragment loads");
+
+        let targets: Vec<String> = metadata
+            .mount_points
+            .iter()
+            .map(crate::mount::MountPoint::target)
+            .collect();
+        assert_eq!(
+            targets,
+            vec!["/etc/pki/entitlement", "/etc/rhsm"],
+            "nested directories are pruned into their ancestor"
+        );
+    }
+
+    #[test]
+    fn a_file_directly_under_mount_fails_the_load() {
+        let layers = fragment_layers(vec![mount_entry("fragment/mount/cert.pem", b"cert")]);
+        let err = fragment_from_layers(&layers)
+            .expect_err("a file at the top of mount/ derives a mount onto /")
+            .to_string();
+        assert!(err.contains("onto /"), "got: {err}");
+    }
+
+    #[test]
+    fn links_under_mount_are_rejected_by_the_shared_entry_validation() {
+        // Documentation of existing enforcement rather than new behavior:
+        // validate_tar_entry runs on every entry of every layer, before any
+        // mount/ prefix matching happens. Both link kinds it rejects are
+        // pinned here, specifically under mount/.
+        let cases = [
+            ("symlink", tar::EntryType::Symlink),
+            ("hardlink", tar::EntryType::Link),
+        ];
+        for (label, entry_type) in cases {
+            let tarball = create_test_tarball_with_modes(&[RawEntry {
+                path: b"fragment/mount/etc/pki/entitlement/cert.pem",
+                data: b"",
+                mode: 0o644,
+                entry_type,
+            }]);
+            let err = extract_layer_entries(&tarball)
+                .expect_err("links are rejected anywhere in a fragment layer")
+                .to_string();
+            assert!(err.contains("symlink or hardlink"), "{label}: got: {err}");
+        }
+    }
+
+    #[test]
+    fn an_empty_mount_directory_is_detected_for_the_notice() {
+        let tarball = create_test_tarball_with_modes(&[RawEntry {
+            path: b"fragment/mount/",
+            data: b"",
+            mode: 0o755,
+            entry_type: tar::EntryType::Directory,
+        }]);
+        let entries = extract_layer_entries(&tarball).expect("a directory entry is valid");
+        assert!(entries.file_paths.is_empty());
+        assert!(
+            entries.has_mount_dir,
+            "a mount/ holding no files is invisible in file_paths, and that is \
+             exactly the case the empty-mount notice exists to catch"
+        );
     }
 
     /// These two messages are the contract's whole user interface — a fragment
@@ -1524,7 +1945,8 @@ description = "test fragment"
             ]);
 
             let workdir = tempfile::tempdir().unwrap();
-            extract_fragment_payload_to_disk(&tarball, workdir.path()).unwrap();
+            extract_fragment_payload_to_disk(&tarball, workdir.path(), MountMaterialization::Skip)
+                .unwrap();
             assert_eq!(
                 std::fs::read(workdir.path().join("tree/etc/app.conf")).unwrap(),
                 b"key=value\n",
@@ -1602,6 +2024,201 @@ description = "test fragment"
         assert!(
             fragment_from_annotations(&annotations).is_none(),
             "old-namespace keys must not satisfy the fast path; the fragment falls back to layer extraction"
+        );
+    }
+
+    #[test]
+    fn mounts_annotation_parses_into_sorted_mount_points() {
+        let annotations = serde_json::json!({
+            "com.github.marrusl.osfragment.mounts": "[\"/etc/rhsm\", \"/etc/pki/entitlement\"]"
+        });
+        let mounts = mounts_from_annotations(&annotations)
+            .expect("the key is present, so the answer is a list and not absence");
+        let targets: Vec<String> = mounts
+            .iter()
+            .map(crate::mount::MountPoint::target)
+            .collect();
+        assert_eq!(
+            targets,
+            vec!["/etc/pki/entitlement", "/etc/rhsm"],
+            "sorted, so a comparison against derived targets is order-independent"
+        );
+    }
+
+    #[test]
+    fn an_absent_mounts_annotation_is_absence_not_an_empty_list() {
+        let annotations = serde_json::json!({
+            "com.github.marrusl.osfragment.name": "epel"
+        });
+        assert!(
+            mounts_from_annotations(&annotations).is_none(),
+            "absence is not drift: the annotation is optional"
+        );
+    }
+
+    #[test]
+    fn a_malformed_mounts_annotation_invalidates_the_whole_fast_path() {
+        // The mounts annotation is an exact set, not a cache with an
+        // authoritative in-layer counterpart to fall back on for the
+        // targets that failed to parse. One bad entry must not silently
+        // shrink the reported set, so it invalidates the annotation and
+        // sends the caller to a full layer pull instead.
+        let annotations = serde_json::json!({
+            "com.github.marrusl.osfragment.mounts": "[\"/etc/rhsm\", \"etc/relative\"]"
+        });
+        assert!(
+            mounts_from_annotations(&annotations).is_none(),
+            "an unparseable target must invalidate the fast path, not drop silently"
+        );
+    }
+
+    #[test]
+    fn an_empty_mounts_annotation_is_a_real_answer_not_absence() {
+        // Pins the axis the no-pull decision rests on: the key ABSENT means
+        // "unknown, go pull the layer" (`None`), while the key present as
+        // an empty array means "this fragment genuinely mounts nothing"
+        // (`Some(vec![])`) and needs no pull at all. Collapsing the two
+        // would either force a needless pull or mis-report a mounting
+        // fragment as mount-free.
+        let annotations = serde_json::json!({
+            "com.github.marrusl.osfragment.mounts": "[]"
+        });
+        assert_eq!(
+            mounts_from_annotations(&annotations),
+            Some(vec![]),
+            "an empty array is a real, pull-free answer, not absence"
+        );
+    }
+
+    #[test]
+    fn a_mounts_annotation_that_is_not_json_reads_as_absent() {
+        let annotations = serde_json::json!({
+            "com.github.marrusl.osfragment.mounts": "not json at all"
+        });
+        assert!(mounts_from_annotations(&annotations).is_none());
+    }
+
+    #[test]
+    fn the_fast_path_declines_when_the_mounts_annotation_is_absent() {
+        // Metadata alone cannot distinguish "mounts nothing" from "never
+        // annotated its mounts", so the fast path declines and the caller
+        // falls through to the full pull that derives targets from the layer.
+        let annotations = serde_json::json!({
+            "com.github.marrusl.osfragment.name": "epel",
+            "com.github.marrusl.osfragment.version": "1.0"
+        });
+        assert!(
+            fast_path_from_annotations(&annotations).is_none(),
+            "a missing mounts key sends the caller to the layer, not to an empty list"
+        );
+    }
+
+    #[test]
+    fn the_fast_path_answers_when_metadata_and_mounts_are_both_annotated() {
+        let annotations = serde_json::json!({
+            "com.github.marrusl.osfragment.name": "rhel-entitlement",
+            "com.github.marrusl.osfragment.version": "1.0",
+            "com.github.marrusl.osfragment.mounts": "[\"/etc/pki/entitlement\"]"
+        });
+        let (fragment, mounts) =
+            fast_path_from_annotations(&annotations).expect("both halves are present");
+        assert_eq!(fragment.name.as_str(), "rhel-entitlement");
+        let targets: Vec<String> = mounts
+            .iter()
+            .map(crate::mount::MountPoint::target)
+            .collect();
+        assert_eq!(targets, vec!["/etc/pki/entitlement"]);
+    }
+
+    #[test]
+    fn the_fast_path_declines_when_the_metadata_annotations_are_absent() {
+        // The pre-existing half of the precondition, pinned here because the
+        // fast path now has two reasons to decline and both must survive.
+        let annotations = serde_json::json!({
+            "com.github.marrusl.osfragment.mounts": "[\"/etc/pki/entitlement\"]"
+        });
+        assert!(fast_path_from_annotations(&annotations).is_none());
+    }
+
+    #[test]
+    fn drift_check_compares_annotated_targets_against_derived_ones() {
+        // The wiring in load_registry_fragment needs a registry, so this
+        // pins the decision load_registry_fragment carries on
+        // LoadedFragment.drift_warning, over the values annotation_drift_warning
+        // is given: whether there is a real mount/ layer, what the
+        // annotation says, and what the layers derive.
+        let layers = fragment_layers(vec![mount_entry(
+            "fragment/mount/etc/rhsm/rhsm.conf",
+            b"conf",
+        )]);
+        let metadata = fragment_from_layers(&layers).unwrap();
+
+        let annotations = serde_json::json!({
+            "com.github.marrusl.osfragment.mounts": "[\"/etc/pki/entitlement\"]"
+        });
+
+        let warning = annotation_drift_warning(
+            "epel",
+            metadata.has_mount_dir,
+            Some(&annotations),
+            &metadata.mount_points,
+        )
+        .expect("annotated and derived disagree");
+        assert!(warning.contains("/etc/rhsm"), "got: {warning}");
+        assert!(warning.contains("/etc/pki/entitlement"), "got: {warning}");
+    }
+
+    #[test]
+    fn drift_is_silent_when_the_annotation_matches_the_derived_targets() {
+        let layers = fragment_layers(vec![mount_entry(
+            "fragment/mount/etc/rhsm/rhsm.conf",
+            b"conf",
+        )]);
+        let metadata = fragment_from_layers(&layers).unwrap();
+
+        let annotations = serde_json::json!({
+            "com.github.marrusl.osfragment.mounts": "[\"/etc/rhsm\"]"
+        });
+
+        assert!(
+            annotation_drift_warning(
+                "epel",
+                metadata.has_mount_dir,
+                Some(&annotations),
+                &metadata.mount_points,
+            )
+            .is_none(),
+            "agreement between the annotation and the derived targets is not drift"
+        );
+    }
+
+    #[test]
+    fn drift_is_silent_when_the_fragment_has_no_mount_layer_at_all() {
+        // Regression test: an annotation with no real mount/ layer behind it
+        // used to compare a non-empty annotated list against the empty
+        // derived list `derive_mount_points` returns for an absent layer,
+        // reporting a false positive. `has_mount_dir` gates that away: no
+        // layer means nothing to disagree with.
+        let layers = fragment_layers(vec![]);
+        let metadata = fragment_from_layers(&layers).unwrap();
+        assert!(
+            !metadata.has_mount_dir,
+            "fixture carries no fragment/mount entry"
+        );
+
+        let annotations = serde_json::json!({
+            "com.github.marrusl.osfragment.mounts": "[\"/etc/pki/entitlement\"]"
+        });
+
+        assert!(
+            annotation_drift_warning(
+                "epel",
+                metadata.has_mount_dir,
+                Some(&annotations),
+                &metadata.mount_points,
+            )
+            .is_none(),
+            "no mount/ layer means the annotation has nothing to disagree with"
         );
     }
 }

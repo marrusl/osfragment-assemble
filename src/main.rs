@@ -10,8 +10,11 @@ use osfragment_assemble::loader::{
     should_keep_fragment_digests,
 };
 use osfragment_assemble::manifest::parse_manifest;
+use osfragment_assemble::mount::MountMaterialization;
 use osfragment_assemble::ocp::generate_machine_os_config;
-use osfragment_assemble::self_contained::{check_target_dir_safe, create_archive, write_output};
+use osfragment_assemble::self_contained::{
+    check_mount_materialization, check_target_dir_safe, create_archive, write_output,
+};
 use osfragment_assemble::validate::validate_composition;
 
 #[derive(Parser)]
@@ -51,6 +54,14 @@ struct Cli {
     /// only at <dir>/Containerfile.
     #[arg(long, value_name = "DIR", conflicts_with_all = ["ocp", "output"])]
     self_contained: Option<PathBuf>,
+
+    /// Write build-mount material into the --self-contained build context.
+    /// Mount material is credential material more often than not, so the
+    /// context and its archive become a durable copy of it: the mount
+    /// subtrees are written owner-only and a .gitignore keeps the context
+    /// out of git while it holds them.
+    #[arg(long, requires = "self_contained")]
+    materialize_mounts: bool,
 
     /// MachineConfigPool name for --ocp output (only meaningful with --ocp)
     #[arg(long, default_value = "worker")]
@@ -127,6 +138,8 @@ fn main() -> Result<()> {
             validate_composition(&manifest, &fragments)?;
 
             if let Some(dir) = &cli.self_contained {
+                check_mount_materialization(dir, &fragments, cli.materialize_mounts)?;
+
                 let containerfile = generate_containerfile(
                     &manifest,
                     &fragments,
@@ -153,7 +166,13 @@ fn main() -> Result<()> {
                 // failure here can leave an older archive beside a newer
                 // tree. Recoverable, but it must never be silent, hence the
                 // context.
-                write_output(dir, &cli.manifest, &containerfile, &fragments)?;
+                write_output(
+                    dir,
+                    &cli.manifest,
+                    &containerfile,
+                    &fragments,
+                    MountMaterialization::from_flag(cli.materialize_mounts),
+                )?;
                 let archive_path = create_archive(dir).with_context(|| {
                     format!(
                         "packaging {} as an archive; the build context directory itself is \

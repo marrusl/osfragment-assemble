@@ -28,6 +28,21 @@ pub fn split_image_ref(image_ref: &str) -> (&str, Option<&str>) {
     }
 }
 
+/// Rewrite `image_ref` to name `digest`, dropping whatever tag or digest it
+/// already carries.
+///
+/// `split_image_ref` deliberately returns a digest-bearing reference whole,
+/// because a digest is not a tag, so it cannot on its own strip a tag from a
+/// reference that carries both (`repo:tag@sha256:old`). This function strips
+/// the digest first, then routes the remainder through `split_image_ref` to
+/// drop any tag, so a bare tag, a bare digest, or both together all
+/// canonicalize to `repository@digest`.
+pub fn pin_to_digest(image_ref: &str, digest: &str) -> String {
+    let without_digest = image_ref.split('@').next().unwrap_or(image_ref);
+    let (repository, _tag) = split_image_ref(without_digest);
+    format!("{}@{}", repository, digest)
+}
+
 /// Returns the `--from=` argument for COPY instructions.
 /// Uses inline image refs when stages are unnamed, named stage aliases otherwise.
 fn copy_from_source(loaded: &LoadedFragment, use_named_stages: bool) -> String {
@@ -131,11 +146,16 @@ pub fn generate_containerfile(
     // readability). Self-contained mode never emits these: nothing in the
     // build context comes from a named stage, and no fragment registry
     // reference may appear in the output.
-    if use_named_stages && !self_contained {
+    // A fragment consisting of metadata and mount/ alone is excluded: its
+    // reference is always emitted inline on the package RUN, so a stage for
+    // it would be consumed by nothing and would spend characters against the
+    // MachineOSConfig content limit for no reader.
+    let staged: Vec<&LoadedFragment> = fragments.iter().filter(|f| !f.is_pure_mount()).collect();
+    if use_named_stages && !self_contained && !staged.is_empty() {
         if !ocp {
             writeln!(out, "# --- Fragment stages ---")?;
         }
-        for loaded in fragments {
+        for loaded in &staged {
             let FragmentSource::Registry { ref image_ref } = loaded.source;
             writeln!(out, "FROM {} AS frag-{}", image_ref, loaded.fragment.name)?;
         }
@@ -150,8 +170,7 @@ pub fn generate_containerfile(
     } else {
         writeln!(out, "# --- Base ---")?;
         let base_ref = if let Some(d) = base_digest {
-            let (base_name, _tag) = split_image_ref(&manifest.base);
-            format!("{}@{}", base_name, d)
+            pin_to_digest(&manifest.base, d)
         } else {
             manifest.base.clone()
         };
@@ -266,11 +285,42 @@ pub fn generate_containerfile(
         }
     }
 
+    // Build mounts. The package phase already copies the config that belongs
+    // in the image; this is its second verb, mounting the material that must
+    // not persist. One flag per derived mount point, fragments in manifest
+    // order, and always inline: a build-mount reference is never a named
+    // stage, including under --pin-digests.
+    let mut mount_flags: Vec<String> = Vec::new();
+    for loaded in fragments {
+        let FragmentSource::Registry { ref image_ref } = loaded.source;
+        for point in &loaded.mount_points {
+            mount_flags.push(if self_contained {
+                // No registry reference may appear in this mode's output, so
+                // the material is read from the context instead, the same
+                // pattern hooks use.
+                point.mount_flag(None, &point.context_source(&loaded.fragment.name))
+            } else {
+                point.mount_flag(Some(image_ref), &point.layer_source())
+            });
+        }
+    }
+
     if !all_packages.is_empty() {
         if !ocp {
             writeln!(out, "# --- Packages ---")?;
         }
-        writeln!(out, "RUN dnf install -y \\")?;
+        match mount_flags.split_first() {
+            // The unmounted form is byte-identical to what every existing
+            // manifest already generates.
+            None => writeln!(out, "RUN dnf install -y \\")?,
+            Some((first, rest)) => {
+                writeln!(out, "RUN {} \\", first)?;
+                for flag in rest {
+                    writeln!(out, "    {} \\", flag)?;
+                }
+                writeln!(out, "    dnf install -y \\")?;
+            }
+        }
         for pkg in &all_packages {
             writeln!(out, "        {} \\", pkg)?;
         }
@@ -414,6 +464,9 @@ mod tests {
             resolved_digest: Some(format!("sha256:{}", digest)),
             manifest_index: 0,
             repo_file_contents: std::collections::HashMap::new(),
+            mount_points: vec![],
+            has_mount_dir: false,
+            drift_warning: None,
         };
         let manifest_frag = ManifestFragment {
             image: format!("quay.io/test/{}:10", name),
@@ -442,6 +495,9 @@ mod tests {
             resolved_digest: Some(format!("sha256:{}", digest)),
             manifest_index: 0,
             repo_file_contents: std::collections::HashMap::new(),
+            mount_points: vec![],
+            has_mount_dir: false,
+            drift_warning: None,
         };
         let manifest_frag = ManifestFragment {
             image: format!("quay.io/test/{}:2.1", name),
@@ -449,6 +505,213 @@ mod tests {
             mirror: None,
         };
         (loaded, manifest_frag)
+    }
+
+    /// A fragment carrying metadata and `mount/` alone, pinned by digest as
+    /// build mounts require.
+    fn make_mount_fragment(name: &str, mount_files: &[&str]) -> (LoadedFragment, ManifestFragment) {
+        let pinned = format!("quay.io/acme/{}@sha256:d00d", name);
+        let files: Vec<PathBuf> = mount_files.iter().map(PathBuf::from).collect();
+        let loaded = LoadedFragment {
+            fragment: Fragment {
+                name: FragmentName::new(name).expect("test fragment name must be valid"),
+                version: "1.0".into(),
+                description: "test".into(),
+                vendor: None,
+                provides: FragmentProvides { repos: vec![] },
+                packages: FragmentPackages { required: vec![] },
+                conflicts: FragmentConflicts { fragments: vec![] },
+            },
+            tree_paths: vec![],
+            hook_paths: vec![],
+            source: FragmentSource::Registry {
+                image_ref: pinned.clone(),
+            },
+            resolved_digest: Some("sha256:d00d".into()),
+            manifest_index: 0,
+            repo_file_contents: std::collections::HashMap::new(),
+            mount_points: crate::mount::derive_mount_points(name, &files)
+                .expect("fixture derives mount points"),
+            has_mount_dir: true,
+            drift_warning: None,
+        };
+        let manifest_frag = ManifestFragment {
+            image: pinned,
+            packages: vec!["some-package".into()],
+            mirror: None,
+        };
+        (loaded, manifest_frag)
+    }
+
+    /// Every `--mount=` option string the output carries, trailing
+    /// continuation backslash removed. Coarse: proves flag content and
+    /// order, but the whitespace tokenizing drops indentation, so it
+    /// cannot catch a continuation-line formatting regression. Pair with
+    /// `run_block_lines` for that.
+    fn mount_flags(output: &str) -> Vec<String> {
+        output
+            .lines()
+            .flat_map(|l| l.split_whitespace())
+            .filter(|t| t.starts_with("--mount="))
+            .map(|t| t.trim_end_matches('\\').to_string())
+            .collect()
+    }
+
+    /// The raw package-RUN block, sliced by line position from the `RUN `
+    /// line through the `dnf install -y \` line inclusive, indentation and
+    /// the trailing continuation backslash preserved verbatim. This is what
+    /// pins the byte-exact contract: the first flag rides the `RUN ` line,
+    /// every other line (further flags, and the final `dnf install -y \`)
+    /// is indented exactly four spaces.
+    fn run_block_lines(output: &str) -> Vec<String> {
+        let lines: Vec<&str> = output.lines().collect();
+        let start = lines
+            .iter()
+            .position(|l| l.starts_with("RUN "))
+            .expect("the batched package RUN is emitted");
+        let end = lines[start..]
+            .iter()
+            .position(|l| *l == "RUN dnf install -y \\" || *l == "    dnf install -y \\")
+            .map(|offset| start + offset)
+            .expect("the dnf install line terminates the RUN block");
+        lines[start..=end].iter().map(|l| l.to_string()).collect()
+    }
+
+    #[test]
+    fn build_mounts_attach_to_the_batched_package_run() {
+        let (frag, mf) = make_mount_fragment("rhel-entitlement", &["etc/pki/entitlement/cert.pem"]);
+        let manifest = Manifest {
+            base: "quay.io/test/base:1".into(),
+            source_path: "test-manifest.yaml".into(),
+            fragments: vec![mf],
+        };
+        let output = generate_containerfile(&manifest, &[frag], None, false, false).unwrap();
+        let expected_flag = "--mount=type=bind,from=quay.io/acme/rhel-entitlement@sha256:d00d,\
+             source=/fragment/mount/etc/pki/entitlement,target=/etc/pki/entitlement,ro,z";
+
+        assert_eq!(
+            mount_flags(&output),
+            vec![expected_flag.to_string()],
+            "got:\n{output}"
+        );
+
+        // Byte-exact: the raw block, indentation and trailing continuation
+        // backslash included, not just the tokenized flag content above.
+        assert_eq!(
+            run_block_lines(&output),
+            vec![
+                format!("RUN {} \\", expected_flag),
+                "    dnf install -y \\".to_string(),
+            ],
+            "got:\n{output}"
+        );
+    }
+
+    #[test]
+    fn one_flag_per_derived_mount_point_in_manifest_order() {
+        // Deliberately adversarial: "rhsm" carries two mount points whose
+        // source files are supplied out of sorted order, and "rhsm" is
+        // placed FIRST in the manifest even though both of its own target
+        // paths sort after "entitlement"'s. A global alphabetical sort
+        // across fragments, or emission that followed input-file order
+        // instead of the sorted-within-fragment / manifest-across-fragment
+        // rule, would each produce a different sequence than the one
+        // asserted below.
+        let (mut rhsm, mf_rhsm) = make_mount_fragment(
+            "rhsm",
+            &[
+                "etc/rhsm/rhsm.conf",
+                "etc/rhsm/ca/cert.pem",
+                "etc/pki/other/thing.pem",
+            ],
+        );
+        rhsm.manifest_index = 0;
+        let (mut entitlement, mf_entitlement) =
+            make_mount_fragment("entitlement", &["etc/pki/entitlement/c.pem"]);
+        entitlement.manifest_index = 1;
+        let manifest = Manifest {
+            base: "quay.io/test/base:1".into(),
+            source_path: "test-manifest.yaml".into(),
+            fragments: vec![mf_rhsm, mf_entitlement],
+        };
+        let output =
+            generate_containerfile(&manifest, &[rhsm, entitlement], None, false, false).unwrap();
+
+        let expected_flags = vec![
+            "--mount=type=bind,from=quay.io/acme/rhsm@sha256:d00d,\
+             source=/fragment/mount/etc/pki/other,target=/etc/pki/other,ro,z"
+                .to_string(),
+            "--mount=type=bind,from=quay.io/acme/rhsm@sha256:d00d,\
+             source=/fragment/mount/etc/rhsm,target=/etc/rhsm,ro,z"
+                .to_string(),
+            "--mount=type=bind,from=quay.io/acme/entitlement@sha256:d00d,\
+             source=/fragment/mount/etc/pki/entitlement,target=/etc/pki/entitlement,ro,z"
+                .to_string(),
+        ];
+        assert_eq!(mount_flags(&output), expected_flags, "got:\n{output}");
+
+        // Byte-exact block: first flag rides the RUN line, the remaining
+        // flags are four-space-indented continuations, and the dnf install
+        // line is the final four-space-indented continuation. Out-of-order
+        // emission (global sort instead of manifest order) or a formatting
+        // regression each fail this.
+        assert_eq!(
+            run_block_lines(&output),
+            vec![
+                format!("RUN {} \\", expected_flags[0]),
+                format!("    {} \\", expected_flags[1]),
+                format!("    {} \\", expected_flags[2]),
+                "    dnf install -y \\".to_string(),
+            ],
+            "got:\n{output}"
+        );
+    }
+
+    #[test]
+    fn build_mounts_are_read_only_and_relabelled() {
+        let (frag, mf) = make_mount_fragment("entitlement", &["etc/pki/entitlement/c.pem"]);
+        let manifest = Manifest {
+            base: "quay.io/test/base:1".into(),
+            source_path: "test-manifest.yaml".into(),
+            fragments: vec![mf],
+        };
+        let output = generate_containerfile(&manifest, &[frag], None, false, false).unwrap();
+        let expected_flag = "--mount=type=bind,from=quay.io/acme/entitlement@sha256:d00d,\
+             source=/fragment/mount/etc/pki/entitlement,target=/etc/pki/entitlement,ro,z";
+
+        assert_eq!(
+            mount_flags(&output),
+            vec![expected_flag.to_string()],
+            "got:\n{output}"
+        );
+
+        // Byte-exact: confirms `ro,z` sits where the option order requires,
+        // not just that the tokenized flag ends with it.
+        assert_eq!(
+            run_block_lines(&output),
+            vec![
+                format!("RUN {} \\", expected_flag),
+                "    dnf install -y \\".to_string(),
+            ],
+            "got:\n{output}"
+        );
+    }
+
+    #[test]
+    fn a_composition_without_build_mounts_emits_the_run_line_unchanged() {
+        // Byte stability for every existing manifest: no mounts, no change.
+        let (epel, mf_epel) = make_repos_fragment("epel", "aaa111");
+        let manifest = Manifest {
+            base: "quay.io/test/base:1".into(),
+            source_path: "test-manifest.yaml".into(),
+            fragments: vec![mf_epel],
+        };
+        let output = generate_containerfile(&manifest, &[epel], None, false, false).unwrap();
+        assert_eq!(
+            run_block_lines(&output),
+            vec!["RUN dnf install -y \\".to_string()],
+            "got:\n{output}"
+        );
     }
 
     /// The one invocation line every hook-carrying fragment gets, in every
@@ -477,6 +740,9 @@ mod tests {
             resolved_digest: None,
             manifest_index: 0,
             repo_file_contents: std::collections::HashMap::new(),
+            mount_points: vec![],
+            has_mount_dir: false,
+            drift_warning: None,
         };
         let manifest_frag = ManifestFragment {
             image: format!("quay.io/test/{}:1.0", name),
@@ -740,6 +1006,38 @@ mod tests {
     }
 
     #[test]
+    fn pinning_replaces_any_existing_tag_or_digest() {
+        // (input ref, expected pinned form)
+        let cases = [
+            ("quay.io/acme/frag:1.0", "quay.io/acme/frag@sha256:beef"),
+            ("quay.io/acme/frag", "quay.io/acme/frag@sha256:beef"),
+            (
+                "localhost:5000/acme/frag:1.0",
+                "localhost:5000/acme/frag@sha256:beef",
+            ),
+            // The case build mounts make routine: the manifest already pins,
+            // and pinning again must not append a second digest.
+            (
+                "quay.io/acme/frag@sha256:cafe",
+                "quay.io/acme/frag@sha256:beef",
+            ),
+            // A ref can carry a tag and a digest together; both must drop,
+            // not just the digest, leaving the tag stuck to the repository.
+            (
+                "quay.io/acme/frag:1.0@sha256:cafe",
+                "quay.io/acme/frag@sha256:beef",
+            ),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(
+                pin_to_digest(input, "sha256:beef"),
+                expected,
+                "input: {input}"
+            );
+        }
+    }
+
+    #[test]
     fn base_image_with_port_generates_correct_from() {
         let (epel, mf_epel) = make_repos_fragment("epel", "aaa111");
         let manifest = Manifest {
@@ -752,6 +1050,29 @@ mod tests {
                 .unwrap();
         // Must preserve the port in the pinned ref
         assert!(output.contains("FROM localhost:5000/rhel-bootc@sha256:base123"));
+    }
+
+    #[test]
+    fn base_image_pinning_is_idempotent_on_an_already_pinned_base() {
+        // Covers the base pinning path at generate_containerfile's "FROM"
+        // line, which reuses pin_to_digest rather than re-deriving the
+        // strip-and-append logic that produced the double-digest bug.
+        let (epel, mf_epel) = make_repos_fragment("epel", "aaa111");
+        let manifest = Manifest {
+            base: "quay.io/acme/rhel-bootc@sha256:oldbase".into(),
+            source_path: "test-manifest.yaml".into(),
+            fragments: vec![mf_epel],
+        };
+        let output =
+            generate_containerfile(&manifest, &[epel], Some("sha256:base123"), false, false)
+                .unwrap();
+        // The FROM line must pin cleanly, not append a second digest onto
+        // the one the manifest already carried. (The "Resolved digests"
+        // header comment separately echoes manifest.base verbatim for
+        // traceability, so it legitimately still shows the old digest:
+        // this assertion is scoped to the FROM line only.)
+        assert!(output.contains("FROM quay.io/acme/rhel-bootc@sha256:base123"));
+        assert!(!output.contains("FROM quay.io/acme/rhel-bootc@sha256:oldbase@sha256:base123"));
     }
 
     // --- Helpers for unpinned fragments ---
@@ -780,6 +1101,9 @@ mod tests {
             resolved_digest: None,
             manifest_index: 0,
             repo_file_contents: std::collections::HashMap::new(),
+            mount_points: vec![],
+            has_mount_dir: false,
+            drift_warning: None,
         };
         let manifest_frag = ManifestFragment {
             image: format!("quay.io/test/{}:10", name),
@@ -808,6 +1132,9 @@ mod tests {
             resolved_digest: None,
             manifest_index: 0,
             repo_file_contents: std::collections::HashMap::new(),
+            mount_points: vec![],
+            has_mount_dir: false,
+            drift_warning: None,
         };
         let manifest_frag = ManifestFragment {
             image: format!("quay.io/test/{}:2.1", name),
@@ -893,6 +1220,18 @@ mod tests {
         // Named FROM stage and named COPY ref for repo files
         assert!(output.contains("FROM quay.io/test/epel@sha256:aaa111 AS frag-epel"));
         assert!(output.contains("COPY --from=frag-epel /fragment/tree/etc/yum.repos.d/"));
+        // Byte-exact stage block: banner, the one FROM..AS line, blank
+        // line, then the next section. Pins ordering and spacing for the
+        // staged == fragments case (nothing filtered out).
+        assert!(
+            output.contains(
+                "# --- Fragment stages ---\n\
+                 FROM quay.io/test/epel@sha256:aaa111 AS frag-epel\n\
+                 \n\
+                 # --- Base ---\n"
+            ),
+            "got:\n{output}"
+        );
     }
 
     // --- OCP mode tests ---
@@ -1768,6 +2107,9 @@ mod tests {
             resolved_digest: Some("sha256:hooksonly1".into()),
             manifest_index: 0,
             repo_file_contents: std::collections::HashMap::new(),
+            mount_points: vec![],
+            has_mount_dir: false,
+            drift_warning: None,
         };
         let manifest_frag = ManifestFragment {
             image: "quay.io/test/hooks-only:1.0".into(),
@@ -1834,5 +2176,139 @@ RUN bootc container lint
         let output = generate_containerfile(&manifest, &[epel, cis], None, false, true).unwrap();
 
         assert_eq!(output, EXPECTED);
+    }
+
+    #[test]
+    fn a_pure_mount_fragment_gets_no_named_stage() {
+        let (mount_frag, mf_mount) = make_mount_fragment("entitlement", &["etc/rhsm/rhsm.conf"]);
+        let (mut epel, mf_epel) = make_repos_fragment("epel", "aaa111");
+        epel.manifest_index = 1;
+        let manifest = Manifest {
+            base: "quay.io/test/base:1".into(),
+            source_path: "test-manifest.yaml".into(),
+            fragments: vec![mf_mount, mf_epel],
+        };
+        let output =
+            generate_containerfile(&manifest, &[mount_frag, epel], None, false, false).unwrap();
+
+        assert!(
+            !output.contains("AS frag-entitlement"),
+            "a stage for a pure mount fragment would be consumed by nothing:\n{output}"
+        );
+        assert!(
+            output.contains("AS frag-epel"),
+            "fragments a COPY references still get their stage:\n{output}"
+        );
+        assert!(
+            output.contains("--mount=type=bind,from=quay.io/acme/entitlement@sha256:d00d"),
+            "and the mount still references the image inline:\n{output}"
+        );
+    }
+
+    #[test]
+    fn a_composition_of_only_pure_mount_fragments_emits_no_stage_section() {
+        let (mount_frag, mf_mount) = make_mount_fragment("entitlement", &["etc/rhsm/rhsm.conf"]);
+        let manifest = Manifest {
+            base: "quay.io/test/base:1".into(),
+            source_path: "test-manifest.yaml".into(),
+            fragments: vec![mf_mount],
+        };
+        let output = generate_containerfile(&manifest, &[mount_frag], None, false, false).unwrap();
+        assert!(
+            !output.contains("# --- Fragment stages ---"),
+            "an empty section banner is worse than no section:\n{output}"
+        );
+    }
+
+    #[test]
+    fn a_mixed_mount_and_tree_fragment_keeps_its_stage_while_a_pure_mount_sibling_is_dropped() {
+        // The predicate the exclusion turns on: `is_pure_mount()` must
+        // distinguish "carries mounts and nothing else" from "carries
+        // mounts and also something a COPY or hook needs". A regression
+        // that excluded any fragment with mount_points, rather than only
+        // pure-mount ones, would drop this fragment's COPY silently while
+        // every other committed test still passed.
+        let (mut mixed, mf_mixed) = make_mount_fragment("cis", &["etc/rhsm/rhsm.conf"]);
+        mixed.tree_paths = vec![PathBuf::from("tree/usr/lib/sysctl.d/99-cis.conf")];
+        assert!(
+            !mixed.is_pure_mount(),
+            "a tree/ path must disqualify pure-mount status"
+        );
+
+        let (mut pure, mf_pure) =
+            make_mount_fragment("entitlement", &["etc/pki/entitlement/cert.pem"]);
+        pure.manifest_index = 1;
+        assert!(pure.is_pure_mount());
+
+        let manifest = Manifest {
+            base: "quay.io/test/base:1".into(),
+            source_path: "test-manifest.yaml".into(),
+            fragments: vec![mf_mixed, mf_pure],
+        };
+        let output = generate_containerfile(&manifest, &[mixed, pure], None, false, false).unwrap();
+
+        // Mixed fragment: keeps its named stage and the COPY that depends
+        // on it.
+        assert!(
+            output.contains("FROM quay.io/acme/cis@sha256:d00d AS frag-cis"),
+            "got:\n{output}"
+        );
+        assert!(
+            output.contains("COPY --from=frag-cis /fragment/tree/ /"),
+            "got:\n{output}"
+        );
+
+        // Pure-mount sibling: no stage, but its inline mount is still on
+        // the batched RUN.
+        assert!(!output.contains("AS frag-entitlement"), "got:\n{output}");
+        assert!(
+            output.contains("--mount=type=bind,from=quay.io/acme/entitlement@sha256:d00d"),
+            "got:\n{output}"
+        );
+
+        // Byte-exact stage block: the banner, only the mixed fragment's
+        // FROM..AS line (the pure-mount sibling's is absent, not just
+        // unasserted), blank line, then the next section.
+        assert!(
+            output.contains(
+                "# --- Fragment stages ---\n\
+                 FROM quay.io/acme/cis@sha256:d00d AS frag-cis\n\
+                 \n\
+                 # --- Base ---\n"
+            ),
+            "got:\n{output}"
+        );
+    }
+
+    #[test]
+    fn self_contained_mounts_read_from_the_context_and_name_no_registry() {
+        let (frag, mf) = make_mount_fragment("rhel-entitlement", &["etc/pki/entitlement/cert.pem"]);
+        let manifest = Manifest {
+            base: "quay.io/test/base:1".into(),
+            source_path: "test-manifest.yaml".into(),
+            fragments: vec![mf],
+        };
+        let output = generate_containerfile(&manifest, &[frag], None, false, true).unwrap();
+
+        assert!(
+            output.contains(
+                "RUN --mount=type=bind,\
+                 source=fragments/rhel-entitlement/mount/etc/pki/entitlement,\
+                 target=/etc/pki/entitlement,ro,z \\"
+            ),
+            "got:\n{output}"
+        );
+        assert!(
+            !output.contains("from="),
+            "self-contained output carries no fragment registry reference at all:\n{output}"
+        );
+        assert!(
+            !output.contains("quay.io/acme"),
+            "not in a mount, not in a comment:\n{output}"
+        );
+        assert!(
+            !output.contains("sha256:d00d"),
+            "the digest pin lives in the manifest, not in this output:\n{output}"
+        );
     }
 }
