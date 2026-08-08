@@ -56,7 +56,7 @@ pub struct ManifestFragment {
 impl ManifestFragment {
     pub fn resolve_source(&self) -> Result<FragmentSource> {
         if self.image.starts_with("dir:") {
-            bail!("local directory sources (dir:) are not supported — push fragments to a registry first");
+            bail!("local directory sources (dir:) are not supported: push fragments to a registry first");
         }
         Ok(FragmentSource::Registry {
             image_ref: self.image.clone(),

@@ -135,9 +135,9 @@ const EXECUTE_BITS: u32 = 0o111;
 ///
 /// `entrypoint_mode` is the mode of `hooks/entrypoint` when it is a regular
 /// file, and `None` when it is missing or is something else (a directory of
-/// that name is not an entrypoint). Both validation sites — the registry load,
+/// that name is not an entrypoint). Both validation sites (the registry load,
 /// reading the mode off the tar header, and `inspect`, reading it off the
-/// filesystem — call this so their messages cannot drift apart.
+/// filesystem) call this so their messages cannot drift apart.
 pub fn validate_hooks_entrypoint(fragment_name: &str, entrypoint_mode: Option<u32>) -> Result<()> {
     match entrypoint_mode {
         None => bail!(
@@ -540,7 +540,7 @@ fn fragment_from_annotations(annotations: &serde_json::Value) -> Option<Fragment
 
     let (name, version) = match (name, version) {
         (Some(n), Some(v)) => (n, v),
-        _ => return None, // Missing required annotations — fall back to layer extraction
+        _ => return None, // Missing required annotations: fall back to layer extraction
     };
 
     let repos: Vec<String> = annotations
@@ -647,8 +647,8 @@ struct LayeredMetadata {
 /// file contents may be spread across multiple layers. The hooks entrypoint
 /// contract is enforced here, once, against the aggregate.
 ///
-/// Split out of `load_registry_fragment` so the aggregation — including that
-/// contract — is exercisable from fixture layers without a registry.
+/// Split out of `load_registry_fragment` so the aggregation (including that
+/// contract) is exercisable from fixture layers without a registry.
 fn fragment_from_layers(layer_bytes_list: &[Vec<u8>]) -> Result<LayeredMetadata> {
     let mut fragment = None;
     let mut all_tree_paths = Vec::new();
@@ -782,7 +782,7 @@ pub fn load_registry_fragment_metadata_only(image_ref: &str) -> Result<LoadedFra
     let image_with_digest = pin_to_digest(image_ref, &digest);
 
     if let Some((fragment, mount_points)) = try_annotation_fast_path(&image_with_digest)? {
-        // Annotations present — return metadata without pulling layers.
+        // Annotations present: return metadata without pulling layers.
         // tree_paths and hook_paths are unknown in this path;
         // inspect/list can display fragment metadata without them.
         return Ok(LoadedFragment {
@@ -801,7 +801,7 @@ pub fn load_registry_fragment_metadata_only(image_ref: &str) -> Result<LoadedFra
         });
     }
 
-    // No annotations — fall back to full layer extraction
+    // No annotations: fall back to full layer extraction
     load_registry_fragment(image_ref)
 }
 
@@ -1646,8 +1646,8 @@ description = "test fragment"
         );
     }
 
-    /// These two messages are the contract's whole user interface — a fragment
-    /// author reads one line of stderr, not this function — and the spec fixes
+    /// These two messages are the contract's whole user interface (a fragment
+    /// author reads one line of stderr, not this function), and the spec fixes
     /// their wording. The substring assertions below would not catch a reflow,
     /// a dropped remediation sentence, or a space lost at a `\` continuation;
     /// that last one is invisible at review time because it sits at

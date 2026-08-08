@@ -44,7 +44,7 @@ pub fn check_duplicate_names(fragments: &[LoadedFragment]) -> Result<()> {
     for f in fragments {
         if !seen.insert(&f.fragment.name) {
             bail!(
-                "duplicate fragment name '{}' — each fragment must have a unique name",
+                "duplicate fragment name '{}': each fragment must have a unique name",
                 f.fragment.name
             );
         }

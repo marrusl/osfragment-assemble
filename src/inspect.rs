@@ -28,7 +28,7 @@ pub fn run_inspect(target: &str) -> Result<()> {
         let mount_section = local_mount_section(path, frag.name.as_str())?;
         (frag, paths, hook_list, mount_section)
     } else {
-        // Inspect requires tree/ contents and hooks — always do a
+        // Inspect requires tree/ contents and hooks: always do a
         // full load (metadata-only path skips these). The annotation
         // fast path is used inside load_registry_fragment for the
         // Fragment struct, but the layer is still pulled for tree_paths.

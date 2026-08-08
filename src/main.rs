@@ -149,10 +149,10 @@ fn main() -> Result<()> {
                 )?;
 
                 // Archive after the swap, not from the staging tree. Archiving
-                // pre-swap is possible in principle — tar takes the
+                // pre-swap is possible in principle (tar takes the
                 // in-archive name independently of the source path, so the
                 // staging directory's temporary name need not appear in the
-                // tarball — but not reachable from here: write_output does not
+                // tarball), but not reachable from here: write_output does not
                 // expose its staging path, and keep() consumes the TempDir.
                 // Getting at it would mean changing that interface, which is
                 // out of scope, not impossible. Post-swap, <dir> holds exactly

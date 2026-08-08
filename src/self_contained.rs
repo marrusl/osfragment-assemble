@@ -663,7 +663,7 @@ mod tests {
 
     /// Builds a minimal fragment layer tarball for tests that need to
     /// exercise the real `extract_fragment_payload_to_disk` extractor
-    /// without a registry. Mirrors the real layer shape
+    /// without a registry. Mirrors the real layer layout
     /// (`fragment/tree/...`, `fragment/hooks/...`). Takes an explicit mode
     /// per entry (following the `RawEntry`/`create_test_tarball_with_modes`
     /// precedent in `src/loader.rs`) so tests can assert modes survive in

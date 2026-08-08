@@ -10,8 +10,8 @@ const OCP_CONTAINERFILE_LIMIT: usize = 4096;
 pub fn generate_machine_os_config(containerfile: &str, pool: &str) -> Result<String> {
     if containerfile.len() > OCP_CONTAINERFILE_LIMIT {
         bail!(
-            "OCP Containerfile exceeds {} character limit ({} chars) \
-             — reduce fragments or packages to fit within MachineOSConfig API limits",
+            "OCP Containerfile exceeds {} character limit ({} chars): \
+             reduce fragments or packages to fit within MachineOSConfig API limits",
             OCP_CONTAINERFILE_LIMIT,
             containerfile.len()
         );
