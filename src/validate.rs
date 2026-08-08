@@ -15,7 +15,7 @@ use crate::mount::empty_mount_notice;
 /// `LoadedFragment.drift_warning` by the loader for the same reason and
 /// printed here too, so the two generation-time mount diagnostics stay
 /// co-located.
-pub fn validate_composition(_manifest: &Manifest, fragments: &[LoadedFragment]) -> Result<()> {
+pub fn validate_composition(manifest: &Manifest, fragments: &[LoadedFragment]) -> Result<()> {
     for f in fragments {
         if let Some(notice) =
             empty_mount_notice(f.fragment.name.as_str(), f.has_mount_dir, &f.mount_points)
@@ -30,6 +30,7 @@ pub fn validate_composition(_manifest: &Manifest, fragments: &[LoadedFragment]) 
     check_duplicate_names(fragments)?;
     check_conflicts(fragments)?;
     check_repo_conflicts(fragments)?;
+    check_mount_digest_pins(manifest, fragments)?;
     Ok(())
 }
 
@@ -120,11 +121,78 @@ pub fn check_repo_conflicts(fragments: &[LoadedFragment]) -> Result<()> {
     Ok(())
 }
 
+/// A build-mount fragment referenced without a digest is a generation error.
+///
+/// A movable tag on an artifact that injects trust material into the package
+/// step is an invisible substitution point: whoever can move the tag can
+/// swap a CA bundle or a credential and redirect the entire package fetch.
+/// The pin is checked against the manifest's own image reference, so it
+/// survives regardless of `--pin-digests` and needs no per-fragment
+/// retention machinery.
+pub fn check_mount_digest_pins(manifest: &Manifest, fragments: &[LoadedFragment]) -> Result<()> {
+    for f in fragments {
+        if f.mount_points.is_empty() {
+            continue;
+        }
+        let declared = &manifest.fragments[f.manifest_index].image;
+        if declared.contains("@sha256:") {
+            continue;
+        }
+        // The digest is already in hand under --pin-digests. Without it,
+        // load_all_fragments dropped the one it resolved, so read it again
+        // rather than printing a placeholder for something the tool can go
+        // get. This runs only on a path that is about to abort, so one
+        // registry read buys a fix the user can paste.
+        let resolved = f
+            .resolved_digest
+            .clone()
+            .or_else(|| crate::loader::resolve_digest(declared).ok());
+        bail!(
+            "{}",
+            unpinned_mount_error(f.fragment.name.as_str(), declared, resolved.as_deref())
+        );
+    }
+    Ok(())
+}
+
+/// The unpinned build-mount error text.
+///
+/// `resolved` is the digest the tool read for `declared`, when it could read
+/// one. Present, the corrected `image:` line is complete and the fix is a
+/// paste. Absent, the line keeps its placeholder and the skopeo command that
+/// fills it in follows, because that is the only case where the user has a
+/// lookup left to do.
+fn unpinned_mount_error(name: &str, declared: &str, resolved: Option<&str>) -> String {
+    let (repository, _tag) = crate::generator::split_image_ref(declared);
+    let (corrected, guidance) = match resolved {
+        Some(digest) => (format!("{}@{}", repository, digest), String::new()),
+        None => (
+            format!("{}@sha256:...", repository),
+            format!(
+                "\nObtain the digest with:\n\
+                 \x20   skopeo inspect --format '{{{{.Digest}}}}' docker://{}",
+                declared
+            ),
+        ),
+    };
+    format!(
+        "fragment '{}' carries build mounts but its manifest entry is not pinned to a \
+         digest: {}. A movable tag on an artifact that injects trust material into the \
+         package step is an invisible substitution point: whoever can move the tag can \
+         swap a credential or a CA bundle and redirect the whole package fetch. Pin it \
+         by digest in the manifest:\n\
+         \x20   image: {}{}",
+        name, declared, corrected, guidance
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::fragment::*;
     use crate::manifest::FragmentSource;
+    use crate::manifest::{Manifest, ManifestFragment};
+    use std::path::PathBuf;
 
     fn test_fragment(name: &str, repos: Vec<&str>, conflicts: Vec<&str>) -> LoadedFragment {
         LoadedFragment {
@@ -301,7 +369,11 @@ mod tests {
             base: "registry.redhat.io/rhel10/rhel-bootc:10.0".into(),
             source_path: "test-manifest.yaml".into(),
             fragments: vec![crate::manifest::ManifestFragment {
-                image: "quay.io/test/drifted:1.0".into(),
+                // Pinned: this test carries mount_points, and an unpinned
+                // build-mount reference is now its own generation error
+                // (check_mount_digest_pins). Unrelated to what this test
+                // checks, so the pin just needs to be present.
+                image: "quay.io/test/drifted@sha256:abc123".into(),
                 packages: vec![],
                 mirror: None,
             }],
@@ -311,5 +383,104 @@ mod tests {
             frag.drift_warning.is_some(),
             "the evidence validate_composition reads must actually carry a warning"
         );
+    }
+
+    /// A digest already in hand at validation time, as `--pin-digests` leaves
+    /// it. Holding one keeps these tests off the network: the error path
+    /// falls back to a live `resolve_digest` only when this is `None`, and
+    /// `Option::or_else` is lazy.
+    const TEST_MOUNT_DIGEST: &str = "sha256:abc123";
+
+    fn mount_fragment(name: &str, image: &str) -> (LoadedFragment, ManifestFragment) {
+        let mut loaded = test_fragment(name, vec![], vec![]);
+        loaded.source = FragmentSource::Registry {
+            image_ref: image.to_string(),
+        };
+        loaded.resolved_digest = Some(TEST_MOUNT_DIGEST.to_string());
+        loaded.mount_points = crate::mount::derive_mount_points(
+            name,
+            &[PathBuf::from("etc/pki/entitlement/cert.pem")],
+        )
+        .expect("fixture derives one mount point");
+        (
+            loaded,
+            ManifestFragment {
+                image: image.to_string(),
+                packages: vec!["some-package".into()],
+                mirror: None,
+            },
+        )
+    }
+
+    fn manifest_of(entries: Vec<ManifestFragment>) -> Manifest {
+        Manifest {
+            base: "quay.io/test/base:1".into(),
+            fragments: entries,
+            source_path: "test-manifest.yaml".into(),
+        }
+    }
+
+    #[test]
+    fn an_unpinned_build_mount_reference_is_a_generation_error() {
+        let (loaded, mf) = mount_fragment("rhel-entitlement", "quay.io/acme/rhel-entitlement:1.0");
+        let manifest = manifest_of(vec![mf]);
+        let err = check_mount_digest_pins(&manifest, &[loaded])
+            .expect_err("a movable tag on mount material is an invisible substitution point")
+            .to_string();
+
+        assert!(
+            err.contains("rhel-entitlement"),
+            "names the fragment: {err}"
+        );
+        assert!(
+            err.contains("image: quay.io/acme/rhel-entitlement@sha256:abc123"),
+            "prints the corrected image: line with the resolved digest filled in: {err}"
+        );
+        assert!(
+            !err.contains("@sha256:..."),
+            "no placeholder to fill in when the tool is holding the digest: {err}"
+        );
+    }
+
+    #[test]
+    fn the_unpinned_error_keeps_the_placeholder_when_no_digest_resolved() {
+        // The only case where the user has a lookup left to do, so this is
+        // the one branch that carries the skopeo command.
+        let err = unpinned_mount_error(
+            "rhel-entitlement",
+            "quay.io/acme/rhel-entitlement:1.0",
+            None,
+        );
+        assert!(
+            err.contains("image: quay.io/acme/rhel-entitlement@sha256:..."),
+            "got: {err}"
+        );
+        assert!(
+            err.contains("skopeo inspect"),
+            "shows how to obtain a digest: {err}"
+        );
+    }
+
+    #[test]
+    fn a_pinned_build_mount_reference_passes() {
+        let (loaded, mf) = mount_fragment(
+            "rhel-entitlement",
+            "quay.io/acme/rhel-entitlement@sha256:abc123",
+        );
+        let manifest = manifest_of(vec![mf]);
+        assert!(check_mount_digest_pins(&manifest, &[loaded]).is_ok());
+    }
+
+    #[test]
+    fn a_fragment_without_mounts_needs_no_pin() {
+        // The one deliberate asymmetry: ordinary fragments pin only under
+        // --pin-digests, and this check must not quietly extend to them.
+        let loaded = test_fragment("epel", vec!["epel"], vec![]);
+        let manifest = manifest_of(vec![ManifestFragment {
+            image: "quay.io/acme/epel:10".into(),
+            packages: vec![],
+            mirror: None,
+        }]);
+        assert!(check_mount_digest_pins(&manifest, &[loaded]).is_ok());
     }
 }
