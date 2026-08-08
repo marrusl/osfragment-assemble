@@ -2279,4 +2279,36 @@ RUN bootc container lint
             "got:\n{output}"
         );
     }
+
+    #[test]
+    fn self_contained_mounts_read_from_the_context_and_name_no_registry() {
+        let (frag, mf) = make_mount_fragment("rhel-entitlement", &["etc/pki/entitlement/cert.pem"]);
+        let manifest = Manifest {
+            base: "quay.io/test/base:1".into(),
+            source_path: "test-manifest.yaml".into(),
+            fragments: vec![mf],
+        };
+        let output = generate_containerfile(&manifest, &[frag], None, false, true).unwrap();
+
+        assert!(
+            output.contains(
+                "RUN --mount=type=bind,\
+                 source=fragments/rhel-entitlement/mount/etc/pki/entitlement,\
+                 target=/etc/pki/entitlement,ro,z \\"
+            ),
+            "got:\n{output}"
+        );
+        assert!(
+            !output.contains("from="),
+            "self-contained output carries no fragment registry reference at all:\n{output}"
+        );
+        assert!(
+            !output.contains("quay.io/acme"),
+            "not in a mount, not in a comment:\n{output}"
+        );
+        assert!(
+            !output.contains("sha256:d00d"),
+            "the digest pin lives in the manifest, not in this output:\n{output}"
+        );
+    }
 }
