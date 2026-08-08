@@ -34,6 +34,15 @@ pub struct LoadedFragment {
     /// anything: the loader only carries the evidence, and does not decide
     /// when the notice fires.
     pub has_mount_dir: bool,
+    /// The stderr warning for a mounts annotation that disagrees with the
+    /// derived targets, or `None` when there is nothing to say: no mount/
+    /// layer at all, no mounts annotation, or the two already agree.
+    /// Carried rather than printed for the same reason `has_mount_dir` is:
+    /// `load_registry_fragment` is a shared load path used by both
+    /// generation and `inspect`, and only `validate_composition`
+    /// (generation) should print it, matching `empty_mount_notice`'s
+    /// caller-owned placement.
+    pub drift_warning: Option<String>,
 }
 
 impl LoadedFragment {
@@ -438,6 +447,30 @@ fn mounts_from_annotations(annotations: &serde_json::Value) -> Option<Vec<MountP
     Some(mounts)
 }
 
+/// The drift decision `load_registry_fragment` carries as evidence on
+/// `LoadedFragment.drift_warning`, split out so it is testable without a
+/// registry, the same split `fast_path_from_annotations` uses for the
+/// metadata fast path.
+///
+/// Gated on `has_mount_dir`: a fragment with no real `mount/` layer derives
+/// no mount points regardless of what an annotation claims, so an
+/// annotation on a mount-less fragment is not drift, it is simply
+/// unconsumed. Without this gate, `derive_mount_points`'s empty result for
+/// an absent layer would compare unequal to any non-empty annotation and
+/// report a false positive.
+fn annotation_drift_warning(
+    fragment_name: &str,
+    has_mount_dir: bool,
+    annotations: Option<&serde_json::Value>,
+    derived: &[MountPoint],
+) -> Option<String> {
+    if !has_mount_dir {
+        return None;
+    }
+    let annotated = mounts_from_annotations(annotations?)?;
+    crate::mount::mount_annotation_drift(fragment_name, &annotated, derived)
+}
+
 /// Map an OCI manifest `annotations` object onto a `Fragment`.
 /// Returns `None` when a required key is missing or when the annotated name
 /// does not satisfy the fragment-name grammar; the caller falls back to
@@ -663,18 +696,17 @@ pub fn load_registry_fragment(image_ref: &str) -> Result<LoadedFragment> {
     // fragment.toml; a mounts annotation has no in-layer file, so its
     // counterpart is the derived targets themselves. Best effort: a registry
     // hiccup on a metadata read must not fail a generation whose
-    // authoritative content is already in hand.
-    if let Ok(Some(annotations)) = fetch_annotations(&image_with_digest) {
-        if let Some(annotated) = mounts_from_annotations(&annotations) {
-            if let Some(warning) = crate::mount::mount_annotation_drift(
-                metadata.fragment.name.as_str(),
-                &annotated,
-                &metadata.mount_points,
-            ) {
-                eprintln!("{}", warning);
-            }
-        }
-    }
+    // authoritative content is already in hand. The result is carried on
+    // `LoadedFragment` rather than printed here: this function is also
+    // `inspect`'s full-load path, and only generation should speak, the
+    // same caller-owned placement `empty_mount_notice` uses.
+    let annotations = fetch_annotations(&image_with_digest).ok().flatten();
+    let drift_warning = annotation_drift_warning(
+        metadata.fragment.name.as_str(),
+        metadata.has_mount_dir,
+        annotations.as_ref(),
+        &metadata.mount_points,
+    );
 
     Ok(LoadedFragment {
         fragment: metadata.fragment,
@@ -688,6 +720,7 @@ pub fn load_registry_fragment(image_ref: &str) -> Result<LoadedFragment> {
         repo_file_contents: metadata.repo_file_contents,
         mount_points: metadata.mount_points,
         has_mount_dir: metadata.has_mount_dir,
+        drift_warning,
     })
 }
 
@@ -717,6 +750,7 @@ pub fn load_registry_fragment_metadata_only(image_ref: &str) -> Result<LoadedFra
             repo_file_contents: std::collections::HashMap::new(),
             mount_points,
             has_mount_dir: false,
+            drift_warning: None,
         });
     }
 
@@ -862,6 +896,7 @@ mod tests {
             repo_file_contents: std::collections::HashMap::new(),
             mount_points: vec![],
             has_mount_dir: false,
+            drift_warning: None,
         }
     }
 
@@ -1956,22 +1991,82 @@ description = "test fragment"
     #[test]
     fn drift_check_compares_annotated_targets_against_derived_ones() {
         // The wiring in load_registry_fragment needs a registry, so this
-        // pins the decision the wiring delegates to, over the two values it
-        // passes: what the annotation says and what the layers derive.
+        // pins the decision load_registry_fragment carries on
+        // LoadedFragment.drift_warning, over the values annotation_drift_warning
+        // is given: whether there is a real mount/ layer, what the
+        // annotation says, and what the layers derive.
         let layers = fragment_layers(vec![mount_entry(
             "fragment/mount/etc/rhsm/rhsm.conf",
             b"conf",
         )]);
-        let derived = fragment_from_layers(&layers).unwrap().mount_points;
+        let metadata = fragment_from_layers(&layers).unwrap();
 
         let annotations = serde_json::json!({
             "com.github.marrusl.osfragment.mounts": "[\"/etc/pki/entitlement\"]"
         });
-        let annotated = mounts_from_annotations(&annotations).expect("the key is present");
 
-        let warning = crate::mount::mount_annotation_drift("epel", &annotated, &derived)
-            .expect("annotated and derived disagree");
+        let warning = annotation_drift_warning(
+            "epel",
+            metadata.has_mount_dir,
+            Some(&annotations),
+            &metadata.mount_points,
+        )
+        .expect("annotated and derived disagree");
         assert!(warning.contains("/etc/rhsm"), "got: {warning}");
         assert!(warning.contains("/etc/pki/entitlement"), "got: {warning}");
+    }
+
+    #[test]
+    fn drift_is_silent_when_the_annotation_matches_the_derived_targets() {
+        let layers = fragment_layers(vec![mount_entry(
+            "fragment/mount/etc/rhsm/rhsm.conf",
+            b"conf",
+        )]);
+        let metadata = fragment_from_layers(&layers).unwrap();
+
+        let annotations = serde_json::json!({
+            "com.github.marrusl.osfragment.mounts": "[\"/etc/rhsm\"]"
+        });
+
+        assert!(
+            annotation_drift_warning(
+                "epel",
+                metadata.has_mount_dir,
+                Some(&annotations),
+                &metadata.mount_points,
+            )
+            .is_none(),
+            "agreement between the annotation and the derived targets is not drift"
+        );
+    }
+
+    #[test]
+    fn drift_is_silent_when_the_fragment_has_no_mount_layer_at_all() {
+        // Regression test: an annotation with no real mount/ layer behind it
+        // used to compare a non-empty annotated list against the empty
+        // derived list `derive_mount_points` returns for an absent layer,
+        // reporting a false positive. `has_mount_dir` gates that away: no
+        // layer means nothing to disagree with.
+        let layers = fragment_layers(vec![]);
+        let metadata = fragment_from_layers(&layers).unwrap();
+        assert!(
+            !metadata.has_mount_dir,
+            "fixture carries no fragment/mount entry"
+        );
+
+        let annotations = serde_json::json!({
+            "com.github.marrusl.osfragment.mounts": "[\"/etc/pki/entitlement\"]"
+        });
+
+        assert!(
+            annotation_drift_warning(
+                "epel",
+                metadata.has_mount_dir,
+                Some(&annotations),
+                &metadata.mount_points,
+            )
+            .is_none(),
+            "no mount/ layer means the annotation has nothing to disagree with"
+        );
     }
 }

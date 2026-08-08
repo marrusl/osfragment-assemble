@@ -11,13 +11,19 @@ use crate::mount::empty_mount_notice;
 /// `list` never call it. That makes emission generation-only without
 /// threading a "should I print" flag through the shared loader. (Task 7
 /// adds this composition's sibling notice, "mounts but no package step",
-/// alongside this one.)
+/// alongside this one.) The annotation drift warning is carried on
+/// `LoadedFragment.drift_warning` by the loader for the same reason and
+/// printed here too, so the two generation-time mount diagnostics stay
+/// co-located.
 pub fn validate_composition(_manifest: &Manifest, fragments: &[LoadedFragment]) -> Result<()> {
     for f in fragments {
         if let Some(notice) =
             empty_mount_notice(f.fragment.name.as_str(), f.has_mount_dir, &f.mount_points)
         {
             eprintln!("{notice}");
+        }
+        if let Some(warning) = &f.drift_warning {
+            eprintln!("{warning}");
         }
     }
 
@@ -145,6 +151,7 @@ mod tests {
             repo_file_contents: std::collections::HashMap::new(),
             mount_points: vec![],
             has_mount_dir: false,
+            drift_warning: None,
         }
     }
 
@@ -270,6 +277,39 @@ mod tests {
             )
             .is_some(),
             "the evidence validate_composition reads must actually yield a notice"
+        );
+    }
+
+    /// A fragment carrying drift evidence still validates: the warning is a
+    /// stderr side effect this test cannot capture, so the substantive check
+    /// is that carrying `Some(drift_warning)` on `LoadedFragment` neither
+    /// fails validation nor gets dropped along the way to the call site
+    /// `validate_composition` prints it from.
+    #[test]
+    fn composition_with_drift_evidence_still_validates() {
+        let mut frag = test_fragment("drifted", vec![], vec![]);
+        frag.has_mount_dir = true;
+        frag.mount_points = vec![crate::mount::MountPoint::from_target("/etc/rhsm").unwrap()];
+        let annotated =
+            vec![crate::mount::MountPoint::from_target("/etc/pki/entitlement").unwrap()];
+        frag.drift_warning = crate::mount::mount_annotation_drift(
+            frag.fragment.name.as_str(),
+            &annotated,
+            &frag.mount_points,
+        );
+        let manifest = Manifest {
+            base: "registry.redhat.io/rhel10/rhel-bootc:10.0".into(),
+            source_path: "test-manifest.yaml".into(),
+            fragments: vec![crate::manifest::ManifestFragment {
+                image: "quay.io/test/drifted:1.0".into(),
+                packages: vec![],
+                mirror: None,
+            }],
+        };
+        assert!(validate_composition(&manifest, &[frag.clone()]).is_ok());
+        assert!(
+            frag.drift_warning.is_some(),
+            "the evidence validate_composition reads must actually carry a warning"
         );
     }
 }
