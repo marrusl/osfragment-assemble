@@ -12,9 +12,10 @@ Evidence base: a set of empirical runs performed 2026-08-08 on CentOS
 Stream 9 (SELinux enforcing, unsubscribed host, digest-pinned fragment
 served from that host's own registry) and on a macOS podman machine,
 recorded in `process-docs/skills/entitlement-build-mounts.md`, plus a
-trace of the current source. Every behavioral claim below cites one or
-the other. Nothing in this document is inferred from vendor
-documentation.
+trace of the current source. Behavioral claims below are of three
+kinds, and each is labelled where it appears: measured in one of those
+runs, read from source, or inferred from a measured mechanism. Nothing
+is taken from vendor documentation.
 
 ## The problem this document settles
 
@@ -205,8 +206,10 @@ mount point per directory that directly contains a file
 mount target without shipping a file at it, so a "declaration-only"
 exemplar is structurally impossible: a fileless `mount/` derives
 nothing, escapes the mandatory pin (`check_mount_digest_pins` skips
-fragments with no derived points), and emits no `--mount` flag. That
-is not a degraded exemplar; it is a fragment with no mounts at all.
+fragments with no derived points), and emits no `--mount` flag. These
+are source-trace claims; the fileless path was read, not executed.
+Either way the conclusion stands: that is not a degraded exemplar, it
+is a fragment with no mounts at all.
 
 Placeholder files therefore sit at exactly the live paths. Identical
 paths make the pair derive identical targets, which buys behavioral
@@ -218,22 +221,36 @@ that placeholder material produces.
 
 ## Instance one: RHEL subscription entitlement
 
-Everything in this section is measured, not asserted. The experiments
-are recorded in `process-docs/skills/entitlement-build-mounts.md`.
+Claims in this section are measured unless labelled otherwise; the
+labels mark the few that are inferences from a measured mechanism. The
+experiments are recorded in
+`process-docs/skills/entitlement-build-mounts.md`.
 
 ### The mount target is `/run/secrets/`, forced by control flow
 
 `rhsm/config.py` in the base image decides it is running in a
-container by testing `/etc/rhsm-host` and `/etc/pki/entitlement-host`,
-two symlinks the base ships pointing into `/run/secrets/`. When the
-test passes, it rewrites `ca_cert_dir` and `entitlementCertDir` to the
-`-host` paths, and the real paths stop being consulted.
+container by testing two paths the base ships as symlinks into
+`/run/secrets/`: `/etc/rhsm-host/` must be a directory, and
+`/etc/pki/entitlement-host/` must be a directory **and non-empty**
+(`any(os.walk(...))`). The non-emptiness clause is load-bearing twice
+over: it is why an unsubscribed host's empty injection does not flip
+container mode, and why the decoy in the experiment below had to be
+non-empty. When the test passes, configuration is read from
+`/etc/rhsm-host/rhsm.conf` rather than `/etc/rhsm/rhsm.conf`, which is
+the mechanism behind the `rhsm.conf` membership claim in the minimum
+set, and the parser rewrites `ca_cert_dir`, `repo_ca_cert`, and
+`entitlementCertDir` (the last only when it holds the default value)
+to the `-host` paths. The real paths stop being consulted, and the
+`repo_ca_cert` rewrite is the one the minimum-set section turns on.
 
-The decisive experiment: with a non-empty decoy at
-`/run/secrets/etc-pki-entitlement`, which is the standing condition on
-any subscribed build host, a fragment mounting the real paths
-(`/etc/pki/entitlement`, `/etc/rhsm`) is silently ignored and the
-build fails while the fragment is correct and complete. The real-path
+The decisive experiment: a build mounting a good entitlement at the
+real path `/etc/pki/entitlement`, plus a non-empty decoy at
+`/run/secrets/etc-pki-entitlement`, fails with the fragment's material
+silently ignored: the decoy flips container mode, `entitlementCertDir`
+is redirected to the `-host` path, and the real-path mount is never
+consulted. That decoy condition is the expected standing state on a
+subscribed build host, an inference from the `mounts.conf` symlink
+chain below; no subscribed host was itself tested. The real-path
 model works in isolation and loses on exactly the hosts most likely to
 build RHEL images. `/run/secrets/` is the only target the host cannot
 override, so it is the target.
@@ -243,9 +260,12 @@ override, so it is the target.
 Four files, and the durable statement of the set is by role rather
 than by filename: the entitlement certificate, its key, `rhsm.conf`,
 and whatever file `repo_ca_cert` in that `rhsm.conf` resolves to. For
-a stock CDN-direct configuration that resolution is `redhat-uep.pem`;
-Satellite, Katello, and proxied setups change it, and the by-role
-statement stays correct where a flat filename list would not.
+a stock CDN-direct configuration that resolution is `redhat-uep.pem`.
+Because `repo_ca_cert` is read from the mounted `rhsm.conf`, any
+configuration that points it elsewhere changes which file is required;
+Satellite, Katello, and proxied setups are the expected such cases,
+none of them tested. The by-role statement stays correct where a flat
+filename list would not.
 
 ```
 mount/run/secrets/etc-pki-entitlement/<serial>.pem       # entitlement cert
@@ -269,17 +289,22 @@ Each membership claim has an isolation result behind it:
   or none, fail with curl error 77.
 - `redhat-entitlement-authority.pem` is present in the base and in host
   dumps and is not shipped. Three findings close it out: a recursive
-  grep across the base's `site-packages` trees returns zero references
-  to it; the file that is consulted is named by the hardcoded default
-  `"repo_ca_cert": "%(ca_cert_dir)sredhat-uep.pem"`; and the one code
-  path that could have used it, the Candlepin connection's directory
-  trust store, is guarded by a not-in-container check and never runs
-  during a build.
+  grep across the base's `site-packages` trees and `/etc/rhsm` returns
+  zero references to it; the file that is consulted is named by the
+  hardcoded default `"repo_ca_cert": "%(ca_cert_dir)sredhat-uep.pem"`;
+  and the one code path that could have used it, the directory trust
+  store for the Candlepin connection, is short-circuited by
+  not-in-container guards on its callers (the dnf plugin and the
+  release-version lookup), regardless of `full_refresh_on_yum`, so no
+  configuration setting brings the file into play during a build.
 
 `redhat.repo` is not needed and not shipped. `rhel-bootc:latest`
 (10.2, measured) ships a completely empty `/etc/yum.repos.d/`; the
 subscription-manager dnf plugin generates the repo configuration at
-build time from the mounted certs, correct serial included. Shipping
+build time from the mounted certs, and a verification build confirms
+the generated entries name them in their `-host` form
+(`sslclientcert = /etc/pki/entitlement-host/<serial>.pem`, the serial
+a placeholder here as everywhere in this document). Shipping
 `redhat.repo` would also put a file directly in `mount/run/secrets/`,
 which makes `run/secrets` itself a mount point and collapses the two
 intended mounts into one by the nesting-prune rule. That collapsed
@@ -296,10 +321,14 @@ placeholder files use an obviously fake serial such as
 
 `containers-common` ships a `mounts.conf` that injects
 `/run/secrets` from `/usr/share/rhel/secrets` into every container and
-every build step, on every RPM-family builder. On a macOS podman
-machine that injection arrives pre-loaded with both CA certificates,
-because the machine VM has `subscription-manager-rhsm-certificates`
-installed. A naive subtraction test on such a host concludes the CA
+every build step. Measured on two builders, Fedora CoreOS 44 and
+CentOS Stream 9, with the same package shipping the same content in
+both; extending that to the rest of the RPM family is an extrapolation
+from those two points, not a survey. On a macOS podman machine the
+injection arrives pre-loaded with both CA certificates (measured); the
+attribution of those files to the VM's
+`subscription-manager-rhsm-certificates` package is inferred, not
+queried on the VM. A naive subtraction test on such a host concludes the CA
 files are unnecessary; they are not, the host was supplying them. The
 runs behind this document were controlled for it with two negative
 controls (nothing mounted must fail; an empty directory mounted over
@@ -308,12 +337,16 @@ results shadowed every path the host could have populated.
 
 ### Two diagnostics worth keeping
 
-From the CA isolation run, two facts that separate failure modes which
-otherwise present identically:
+Two facts that separate failure modes which otherwise present
+identically, with unequal evidence behind them:
 
-- Repo generation does not depend on the CA. A populated `redhat.repo`
-  together with curl error 77 means the CA file is missing; an empty
-  `redhat.repo` means the entitlement certificate is the problem.
+- Repo generation does not depend on the CA: all four CA-isolation
+  variants produced a fully populated `redhat.repo`, including the two
+  that failed. So a populated `redhat.repo` together with curl error
+  77 means the CA file is missing. The converse diagnostic, an empty
+  `redhat.repo` pointing at the entitlement certificate, rests on a
+  single observation (the clock-skew incident recorded with the runs)
+  and carries correspondingly less weight.
 - `sslcacert` in the generated output is copied from `repo_ca_cert`
   whether or not the file exists, so its presence in `redhat.repo` is
   not evidence the CA was mounted.
@@ -327,8 +360,11 @@ independent argument, and it is the stronger one because it is
 mechanical and assumes no adversary.
 
 At build time, `RUN --mount=from=<ref>` resolves against local storage
-first and contacts the registry on a miss (measured: with the image
-purged, the build printed the pull and proceeded). A tag reference can
+first and contacts the registry on a miss. Both halves are measured on
+the CentOS Stream 9 host: local-first, by a tag-referenced mount that
+still resolved from local storage while the registry was down; pull on
+miss, by the digest-pinned proof build printing the pull and
+proceeding after local storage was verified empty. A tag reference can
 therefore be shadowed by stale local content, and that failure is
 recorded as having actually happened in this repo's history
 (`process-docs/skills/registry-verification.md`). A digest reference
@@ -338,14 +374,18 @@ For the one fragment class where stale trust material is the worst
 possible substitution, the pin rule closes the hazard as a side
 effect of its trust purpose.
 
-The enforcement itself is registry-agnostic and network-free: the
+The enforcement itself is registry-agnostic and network-free, and the
+claims about it come from reading the source, not from the runs: the
 check is a text test on the manifest's own image reference
-(`src/validate.rs:159`, `declared.contains("@sha256:")`). `--pin-digests`
-does not satisfy it, because the digest must live in the user's own
-`image:` line to survive; and port-carrying references pin correctly,
-so the rule behaves identically for `localhost:5000` and for a real
-private registry. Nothing about the convention relaxes on a test
-stand-in.
+(`src/validate.rs:159`, `declared.contains("@sha256:")`), and
+`--pin-digests` does not satisfy it, because the digest must live in
+the user's own `image:` line to survive. The rejection path, a
+tag-referenced fragment with derived mounts, was not exercised in the
+runs; what the runs vouch for is the accepting side, where
+digest-pinned port-carrying references (`localhost:5000`,
+`localhost:5050`) generated and built correctly, so port-carrying refs
+do pin. The rule behaves identically for a test stand-in and a real
+private registry.
 
 ## The silent-failure cluster
 
@@ -366,18 +406,23 @@ convention itself requires.
    as a rule rather than a suggestion.
 
 2. **A decoy at `/run/secrets/etc-pki-entitlement` silently defeats a
-   real-path mount.** Measured, and it is the standing condition on
-   any subscribed build host, not an exotic one. The chosen
+   real-path mount.** The decoy build is measured. That the decoy
+   condition is the standing state on any subscribed build host is
+   inferred from the `mounts.conf` symlink chain; no subscribed build
+   host was itself tested. The chosen
    `/run/secrets/` target avoids it for instance one; any future
    instance whose consumer implements a similar host-redirect must be
    traced the same way before its paths are documented, because the
    failure produces no signal that a mount was ignored.
 
 3. **A stale `target/release` binary emits a Containerfile with no
-   mount flags and exits zero.** Observed directly: a binary two days
-   older than `src/mount.rs` printed no `mount/` section from
-   `inspect` and generated a mount-free Containerfile, which then
-   fails much later, at dnf, with a package-not-found error. Whether
+   mount flags and exits zero.** The mount-free Containerfile and the
+   zero exit were observed directly, from a binary two days older than
+   `src/mount.rs` that also printed no `mount/` section from
+   `inspect`. The downstream consequence, dnf failing much later with
+   a package-not-found error, was not run to completion; it is
+   inferred from the negative controls, which fail exactly that way
+   whenever no entitlement is mounted. Whether
    the release binary belongs in the tree at all is a repo hygiene
    question this document leaves open; it is listed because its
    failure lands in the same credential path with the same absence of
@@ -403,7 +448,9 @@ the acceptance test in decision 7 has explicit edges.
    other needed content masks the rest. Instance one dodges this
    because the `/run/secrets/` subdirectories hold nothing but the
    credential material; mounting `/etc/rhsm` instead would mask
-   `facts/` and `syspurpose/`, both of which the base populates. An
+   `syspurpose/`, which the base populates (measured on UBI 10;
+   `facts/` exists there too but is empty, so the masking cost rides
+   on `syspurpose/` alone). An
    instance whose credential path sits inside a load-bearing directory
    has no clean expression today.
 
@@ -528,6 +575,16 @@ Stated plainly, so review can weigh confidence rather than guess it.
   auto-injection is RPM-family packaging, so an Ubuntu builder is
   expected to be the strictly simpler case with no host contribution
   at all, but that is an expectation, not a measurement.
+- **No subscribed build host was tested.** The decoy experiment
+  simulates the subscribed-host condition; that the condition actually
+  obtains on such hosts is inferred from the `mounts.conf` symlink
+  chain, which was measured only on unsubscribed machines.
+- **The isolation evidence spans two environments.** The cert, key,
+  and `rhsm.conf` isolations ran on UBI 10 on the macOS podman
+  machine; only the CA isolation ran on `rhel-bootc` on the CentOS
+  Stream 9 host. The bases were measured to match on every consulted
+  path, but the full subtraction ladder was not repeated on
+  `rhel-bootc`.
 - **OpenShift on-cluster layering was not exercised for this
   convention.** The build-mounts spec records that entitlement
   fragments are unnecessary there; the remaining instances on that
