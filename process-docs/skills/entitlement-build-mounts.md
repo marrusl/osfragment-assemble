@@ -148,6 +148,13 @@ That variant works, and has a real advantage: it masks the host's `mounts.conf`
 injection completely, making the build host-independent. It costs a large stale
 file in the fragment. Choose deliberately; do not arrive there by accident.
 
+The derivation rule also has a silent edge: an **empty directory beside a
+populated one derives nothing** for the empty path, and the empty-mount notice
+fires only when the whole `mount/` holds no files. A fragment shipping some
+paths as bare directories (a partial exemplar, say) passes validation, quietly
+mounts less than intended, and fails much later at dnf with an error that
+points at credentials rather than at the missing mount.
+
 ## What the RHEL bootc base actually ships
 
 `registry.redhat.io/rhel10/rhel-bootc:latest` (10.2), measured:
