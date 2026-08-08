@@ -1,7 +1,7 @@
 [fragment]
 name = "nginx"
 version = "1.26"
-description = "Nginx web server — official repo, package, and service enablement"
+description = "Nginx web server: official repo, package, and service enablement"
 vendor = "F5 / Nginx Inc."
 
 [fragment.provides]

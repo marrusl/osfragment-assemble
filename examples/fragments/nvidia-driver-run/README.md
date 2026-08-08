@@ -29,11 +29,11 @@ more interesting claim than being able to carry a good one.
 
 ## Fragment files
 
-- [`fetch-run-installer.sh`](./fetch-run-installer.sh) — Downloads the pinned NVIDIA `.run` installer, verifies its sha256, and extracts the LICENSE files
-- [`fragment.toml`](./fragment.toml) — Fragment metadata; deliberately omits `packages.required` so the toolchain installs and removes in the same layer
-- [`hooks/entrypoint`](./hooks/entrypoint) — Installs the driver, compiling kernel modules for the image's kernel; runs as a single `RUN` so the installer and toolchain leave no bytes behind
-- [`tree/usr/lib/bootc/kargs.d/50-nvidia.toml`](./tree/usr/lib/bootc/kargs.d/50-nvidia.toml) — Kernel arguments that blacklist nouveau and enable nvidia-drm modesetting
-- [`tree/usr/lib/modprobe.d/nvidia-blacklist-nouveau.conf`](./tree/usr/lib/modprobe.d/nvidia-blacklist-nouveau.conf) — Modprobe configuration that blacklists nouveau
+- [`fetch-run-installer.sh`](./fetch-run-installer.sh): Downloads the pinned NVIDIA `.run` installer, verifies its sha256, and extracts the LICENSE files
+- [`fragment.toml`](./fragment.toml): Fragment metadata; deliberately omits `packages.required` so the toolchain installs and removes in the same layer
+- [`hooks/entrypoint`](./hooks/entrypoint): Installs the driver, compiling kernel modules for the image's kernel; runs as a single `RUN` so the installer and toolchain leave no bytes behind
+- [`tree/usr/lib/bootc/kargs.d/50-nvidia.toml`](./tree/usr/lib/bootc/kargs.d/50-nvidia.toml): Kernel arguments that blacklist nouveau and enable nvidia-drm modesetting
+- [`tree/usr/lib/modprobe.d/nvidia-blacklist-nouveau.conf`](./tree/usr/lib/modprobe.d/nvidia-blacklist-nouveau.conf): Modprobe configuration that blacklists nouveau
 
 ## Building the fragment image
 

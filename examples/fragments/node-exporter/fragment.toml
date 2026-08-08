@@ -1,7 +1,7 @@
 [fragment]
 name = "node-exporter"
 version = "1.8.0"
-description = "Prometheus Node Exporter — self-contained with EPEL repo"
+description = "Prometheus Node Exporter: self-contained with EPEL repo"
 
 [fragment.provides]
 repos = ["epel"]

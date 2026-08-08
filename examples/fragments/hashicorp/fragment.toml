@@ -1,7 +1,7 @@
 [fragment]
 name = "hashicorp"
 version = "1.0"
-description = "HashiCorp Vault — repo, package, and basic configuration"
+description = "HashiCorp Vault: repo, package, and basic configuration"
 vendor = "HashiCorp"
 
 [fragment.provides]

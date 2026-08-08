@@ -65,13 +65,13 @@ That is the entire substance of the fragment. Everything else in
 > recommended here that base images configure `/usr/local` be a regular
 > directory (i.e. the default).
 
-So there are two possible shapes, and which one you get is a property of the
+So there are two possibilities, and which one you get is a property of the
 base image, not of your build. Both are bad places for 259 MB of vendor payload,
 for different reasons:
 
-**If `/usr/local` is a regular directory** — which is what
+**If `/usr/local` is a regular directory** (which is what
 `centos-bootc:stream10`, `centos-bootc:stream9`, and `fedora-bootc:42` all ship
-today, all three checked 2026-08-04 — the install lands inside `/usr`, and `/usr`
+today, all three checked 2026-08-04), the install lands inside `/usr`, and `/usr`
 is mounted read-only on a running bootc system. The CLI works and updates with
 the image, so nothing looks wrong. What you have actually done is take the path
 the system reserves for the local administrator and fill it with image-owned,
@@ -80,8 +80,8 @@ read-only content. The uninstall instructions in AWS's own bundle
 an admin who legitimately wants to put something in `/usr/local` is now
 negotiating with your image for it.
 
-**If `/usr/local` is the ostree symlink to `/var/usrlocal`** — which bootc's docs
-describe as a choice for "final" images not intended to be derived from — the
+**If `/usr/local` is the ostree symlink to `/var/usrlocal`** (which bootc's docs
+describe as a choice for "final" images not intended to be derived from), the
 payload lands in `/var` instead, and bootc is explicit about what that means:
 content shipped in `/var` "is unpacked *only from the initial image* -
 subsequent changes to `/var` in a container image are not automatically
@@ -123,9 +123,9 @@ fragment is committed.
 
 ## What the entrypoint does
 
-This is the minimal shape a hostile-payload fragment can have: `hooks/entrypoint`
+This is the minimal form a hostile-payload fragment can have: `hooks/entrypoint`
 plus the vendor blob as hook material. There is no `tree/`, no
-`packages.required`, and no repo definition — the fragment is a script and a
+`packages.required`, and no repo definition: the fragment is a script and a
 binary, and the two arguments are the whole point.
 
 `hooks/entrypoint` is the only file the tool runs. It:
@@ -179,7 +179,7 @@ if you want byte-reproducible rebuilds.
 In image mode, keeping the CLI current stops being a thing you do to machines
 and becomes a property of how often you rebuild. Each rebuild pulls a newer base
 and reinstalls the pinned CLI into `/usr`, wholesale, with no upgrade path to go
-wrong — which is precisely what the `/var/usrlocal` shape would have taken away.
+wrong: precisely what the `/var/usrlocal` symlink would have taken away.
 The only deliberate maintenance event left is bumping the fragment's pinned
 version and re-recording its digests, a one-line change to a versioned artifact.
 The consuming Containerfile never changes at all.

@@ -1,7 +1,7 @@
 [fragment]
 name = "grafana"
 version = "11.0"
-description = "Grafana monitoring dashboard — repo, package, and service enablement"
+description = "Grafana monitoring dashboard: repo, package, and service enablement"
 vendor = "Grafana Labs"
 
 [fragment.provides]
