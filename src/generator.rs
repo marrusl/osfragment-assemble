@@ -146,11 +146,16 @@ pub fn generate_containerfile(
     // readability). Self-contained mode never emits these: nothing in the
     // build context comes from a named stage, and no fragment registry
     // reference may appear in the output.
-    if use_named_stages && !self_contained {
+    // A fragment consisting of metadata and mount/ alone is excluded: its
+    // reference is always emitted inline on the package RUN, so a stage for
+    // it would be consumed by nothing and would spend characters against the
+    // MachineOSConfig content limit for no reader.
+    let staged: Vec<&LoadedFragment> = fragments.iter().filter(|f| !f.is_pure_mount()).collect();
+    if use_named_stages && !self_contained && !staged.is_empty() {
         if !ocp {
             writeln!(out, "# --- Fragment stages ---")?;
         }
-        for loaded in fragments {
+        for loaded in &staged {
             let FragmentSource::Registry { ref image_ref } = loaded.source;
             writeln!(out, "FROM {} AS frag-{}", image_ref, loaded.fragment.name)?;
         }
@@ -2159,5 +2164,47 @@ RUN bootc container lint
         let output = generate_containerfile(&manifest, &[epel, cis], None, false, true).unwrap();
 
         assert_eq!(output, EXPECTED);
+    }
+
+    #[test]
+    fn a_pure_mount_fragment_gets_no_named_stage() {
+        let (mount_frag, mf_mount) = make_mount_fragment("entitlement", &["etc/rhsm/rhsm.conf"]);
+        let (mut epel, mf_epel) = make_repos_fragment("epel", "aaa111");
+        epel.manifest_index = 1;
+        let manifest = Manifest {
+            base: "quay.io/test/base:1".into(),
+            source_path: "test-manifest.yaml".into(),
+            fragments: vec![mf_mount, mf_epel],
+        };
+        let output =
+            generate_containerfile(&manifest, &[mount_frag, epel], None, false, false).unwrap();
+
+        assert!(
+            !output.contains("AS frag-entitlement"),
+            "a stage for a pure mount fragment would be consumed by nothing:\n{output}"
+        );
+        assert!(
+            output.contains("AS frag-epel"),
+            "fragments a COPY references still get their stage:\n{output}"
+        );
+        assert!(
+            output.contains("--mount=type=bind,from=quay.io/acme/entitlement@sha256:d00d"),
+            "and the mount still references the image inline:\n{output}"
+        );
+    }
+
+    #[test]
+    fn a_composition_of_only_pure_mount_fragments_emits_no_stage_section() {
+        let (mount_frag, mf_mount) = make_mount_fragment("entitlement", &["etc/rhsm/rhsm.conf"]);
+        let manifest = Manifest {
+            base: "quay.io/test/base:1".into(),
+            source_path: "test-manifest.yaml".into(),
+            fragments: vec![mf_mount],
+        };
+        let output = generate_containerfile(&manifest, &[mount_frag], None, false, false).unwrap();
+        assert!(
+            !output.contains("# --- Fragment stages ---"),
+            "an empty section banner is worse than no section:\n{output}"
+        );
     }
 }
