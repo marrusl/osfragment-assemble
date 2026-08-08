@@ -617,9 +617,13 @@ mod tests {
             err.contains("--materialize-mounts"),
             "names the flag: {err}"
         );
+        // The specific clause, not just "git": the message also mentions git
+        // when it points at --materialize-mounts and its .gitignore, so a
+        // bare contains("git") stays green even if the reason committing the
+        // context is dangerous were dropped from the message entirely.
         assert!(
-            err.contains("git"),
-            "leads with the custody change and the not-for-git warning: {err}"
+            err.contains("git does not record file modes"),
+            "leads with the custody change and the not-for-git rationale: {err}"
         );
     }
 
@@ -747,14 +751,20 @@ mod tests {
              mode its source layer carried"
         );
 
-        // The exception is scoped to mount/: everything else keeps the
-        // normal handoff mode.
+        // The exception is scoped to mount/: everything else keeps the normal
+        // handoff mode. Pinned to the exact mode rather than merely "not
+        // 0700", so a partial widening of restrict_mount_tree's scope, which
+        // would leave a non-mount path at some other tightened value, is
+        // caught too.
         let tree_mode = fs::metadata(dir.join("fragments/entitlement/tree"))
             .unwrap()
             .permissions()
             .mode()
             & 0o777;
-        assert_ne!(tree_mode, 0o700, "tree/ is not credential material");
+        assert_eq!(
+            tree_mode, OUTPUT_DIR_MODE,
+            "tree/ is not credential material and keeps the readable handoff mode"
+        );
     }
 
     #[test]
