@@ -1220,6 +1220,18 @@ mod tests {
         // Named FROM stage and named COPY ref for repo files
         assert!(output.contains("FROM quay.io/test/epel@sha256:aaa111 AS frag-epel"));
         assert!(output.contains("COPY --from=frag-epel /fragment/tree/etc/yum.repos.d/"));
+        // Byte-exact stage block: banner, the one FROM..AS line, blank
+        // line, then the next section. Pins ordering and spacing for the
+        // staged == fragments case (nothing filtered out).
+        assert!(
+            output.contains(
+                "# --- Fragment stages ---\n\
+                 FROM quay.io/test/epel@sha256:aaa111 AS frag-epel\n\
+                 \n\
+                 # --- Base ---\n"
+            ),
+            "got:\n{output}"
+        );
     }
 
     // --- OCP mode tests ---
@@ -2205,6 +2217,66 @@ RUN bootc container lint
         assert!(
             !output.contains("# --- Fragment stages ---"),
             "an empty section banner is worse than no section:\n{output}"
+        );
+    }
+
+    #[test]
+    fn a_mixed_mount_and_tree_fragment_keeps_its_stage_while_a_pure_mount_sibling_is_dropped() {
+        // The predicate the exclusion turns on: `is_pure_mount()` must
+        // distinguish "carries mounts and nothing else" from "carries
+        // mounts and also something a COPY or hook needs". A regression
+        // that excluded any fragment with mount_points, rather than only
+        // pure-mount ones, would drop this fragment's COPY silently while
+        // every other committed test still passed.
+        let (mut mixed, mf_mixed) = make_mount_fragment("cis", &["etc/rhsm/rhsm.conf"]);
+        mixed.tree_paths = vec![PathBuf::from("tree/usr/lib/sysctl.d/99-cis.conf")];
+        assert!(
+            !mixed.is_pure_mount(),
+            "a tree/ path must disqualify pure-mount status"
+        );
+
+        let (mut pure, mf_pure) =
+            make_mount_fragment("entitlement", &["etc/pki/entitlement/cert.pem"]);
+        pure.manifest_index = 1;
+        assert!(pure.is_pure_mount());
+
+        let manifest = Manifest {
+            base: "quay.io/test/base:1".into(),
+            source_path: "test-manifest.yaml".into(),
+            fragments: vec![mf_mixed, mf_pure],
+        };
+        let output = generate_containerfile(&manifest, &[mixed, pure], None, false, false).unwrap();
+
+        // Mixed fragment: keeps its named stage and the COPY that depends
+        // on it.
+        assert!(
+            output.contains("FROM quay.io/acme/cis@sha256:d00d AS frag-cis"),
+            "got:\n{output}"
+        );
+        assert!(
+            output.contains("COPY --from=frag-cis /fragment/tree/ /"),
+            "got:\n{output}"
+        );
+
+        // Pure-mount sibling: no stage, but its inline mount is still on
+        // the batched RUN.
+        assert!(!output.contains("AS frag-entitlement"), "got:\n{output}");
+        assert!(
+            output.contains("--mount=type=bind,from=quay.io/acme/entitlement@sha256:d00d"),
+            "got:\n{output}"
+        );
+
+        // Byte-exact stage block: the banner, only the mixed fragment's
+        // FROM..AS line (the pure-mount sibling's is absent, not just
+        // unasserted), blank line, then the next section.
+        assert!(
+            output.contains(
+                "# --- Fragment stages ---\n\
+                 FROM quay.io/acme/cis@sha256:d00d AS frag-cis\n\
+                 \n\
+                 # --- Base ---\n"
+            ),
+            "got:\n{output}"
         );
     }
 }
