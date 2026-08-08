@@ -91,7 +91,7 @@ RUN --mount=type=bind,from=<fragment>@sha256:...,source=/fragment/mount/etc/pki/
 
 with the self-contained variant reading `source=fragments/<name>/mount/<path>` and no `from=`.
 
-The manifest entry for a fragment carrying `mount/` must be pinned by digest. Two fragments mounting colliding targets is an error, as is a target that equals or contains `/etc/yum.repos.d` or `/etc/pki/rpm-gpg`. Symlinks and hardlinks are rejected in fragment layers, `mount/` included.
+A fragment whose `mount/` derives mount points must have its manifest entry pinned by digest; an empty `mount/` derives nothing and is not subject to pinning. Two fragments mounting colliding targets is an error, as is a target that equals or contains `/etc/yum.repos.d` or `/etc/pki/rpm-gpg`. Symlinks and hardlinks are rejected in fragment layers, `mount/` included.
 
 The builder never commits the mount source, which is a persistence guarantee and not a confidentiality one, since anything running in that RUN can read the mounted paths.
 
@@ -158,7 +158,7 @@ Annotation keys:
 - `com.github.marrusl.osfragment.packages.required`: JSON array of required package names
 - `com.github.marrusl.osfragment.mounts`: JSON array of mount target paths (e.g., `["/etc/pki/entitlement"]`)
 
-`com.github.marrusl.osfragment.mounts` has no `fragment.toml` counterpart: its authority is the derived targets, so generation cross-checks it whenever it pulls the layer and warns on drift, with layer content winning. Annotating buys this: `list` answers the mount question from registry metadata only when this key is present, and falls back to a full layer pull when it is absent, because metadata alone cannot tell a fragment that mounts nothing from one that never annotated. To set it, run `inspect` on the local fragment directory to see the derived targets, then pass them as `--annotation` on your own `podman build`.
+`com.github.marrusl.osfragment.mounts` has no `fragment.toml` counterpart: its authority is the derived targets, so generation cross-checks it against a fragment that has a real `mount/` layer and warns on drift, with layer content winning; an annotation on a mount-less fragment is unconsumed, not drift. Annotating buys this: `list` answers the mount question from registry metadata only when this key is present, and falls back to a full layer pull when it is absent, because metadata alone cannot tell a fragment that mounts nothing from one that never annotated. To set it, run `inspect` on the local fragment directory to see the derived targets, then pass them as `--annotation` on your own `podman build`.
 
 Annotations are **not** used during assembly; the tool always parses the in-layer `fragment.toml` for the authoritative fragment definition. Annotations are a read-only optimization.
 
