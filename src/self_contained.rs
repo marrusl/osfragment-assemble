@@ -52,6 +52,14 @@ const OUTPUT_DIR_MODE: u32 = 0o755;
 /// durable copy of it.
 const MOUNT_DIR_MODE: u32 = 0o700;
 
+/// Permission mode applied to every regular file in a materialized `mount/`
+/// subtree: owner read/write only. Credential-bearing mount files are
+/// normalized to this mode regardless of what the fragment's own layer
+/// carried; the same intentional exception to `OUTPUT_DIR_MODE`'s normally
+/// readable handoff contract that governs `MOUNT_DIR_MODE`, applied to
+/// files rather than directories.
+const MOUNT_FILE_MODE: u32 = 0o600;
+
 /// Refuse to regenerate into a directory that holds anything the tool did
 /// not write itself. Absent and empty directories are always safe; a
 /// directory containing the sentinel file (`.osfragment-assemble`) and no
@@ -122,11 +130,16 @@ fn check_target_not_symlink(dir: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Set every directory in `<fragment_dir>/mount` to [`MOUNT_DIR_MODE`].
+/// Set every directory in `<fragment_dir>/mount` to [`MOUNT_DIR_MODE`] and
+/// every regular file in it to [`MOUNT_FILE_MODE`].
 ///
 /// A no-op when the fragment carries no mount material. Each directory is
-/// read before it is restricted, so tightening a parent never blocks the
-/// walk into its children.
+/// read, and its files chmod'd, before the directory itself is restricted,
+/// so tightening a parent never blocks the walk into its children or the
+/// chmod of the files inside it. A 0700 directory only blocks live
+/// traversal; the sibling archive records each file's own mode
+/// independently, so leaving files at whatever the fragment's layer carried
+/// would still expose credential material once extracted elsewhere.
 #[cfg(unix)]
 fn restrict_mount_tree(fragment_dir: &Path) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
@@ -141,6 +154,9 @@ fn restrict_mount_tree(fragment_dir: &Path) -> Result<()> {
             let path = entry?.path();
             if path.is_dir() {
                 stack.push(path);
+            } else {
+                fs::set_permissions(&path, fs::Permissions::from_mode(MOUNT_FILE_MODE))
+                    .with_context(|| format!("restricting permissions on {}", path.display()))?;
             }
         }
         fs::set_permissions(&dir, fs::Permissions::from_mode(MOUNT_DIR_MODE))
@@ -629,15 +645,18 @@ mod tests {
     }
 
     #[test]
-    fn materialized_mount_directories_are_owner_only() {
+    fn materialized_mount_directories_and_files_are_owner_only() {
         use std::os::unix::fs::PermissionsExt;
 
+        // The mount file's source mode is deliberately permissive (0o644) so
+        // this test proves restrict_mount_tree normalizes it to 0o600 rather
+        // than merely preserving an already-secure input.
         let layer = build_fixture_layer(&[
             ("fragment/tree/etc/motd", b"hello", 0o644),
             (
                 "fragment/mount/etc/pki/entitlement/cert.pem",
                 b"secret",
-                0o600,
+                0o644,
             ),
         ]);
         let tmp = tempfile::tempdir().unwrap();
@@ -679,6 +698,17 @@ mod tests {
             );
         }
 
+        let cert_mode = fs::metadata(mount_root.join("etc/pki/entitlement/cert.pem"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(
+            cert_mode, 0o600,
+            "a mount file must be normalized to owner-only regardless of the \
+             mode its source layer carried"
+        );
+
         // The exception is scoped to mount/: everything else keeps the
         // normal handoff mode.
         let tree_mode = fs::metadata(dir.join("fragments/entitlement/tree"))
@@ -691,10 +721,14 @@ mod tests {
 
     #[test]
     fn the_archive_preserves_the_owner_only_mount_modes() {
+        // The mount file's source mode is deliberately permissive (0o644):
+        // the archive records each file's own mode independently of its
+        // parent directory, so this proves the normalized mode survives
+        // into the archive rather than merely blocking live traversal.
         let layer = build_fixture_layer(&[(
             "fragment/mount/etc/pki/entitlement/cert.pem",
             b"secret",
-            0o600,
+            0o644,
         )]);
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path().join("out");
@@ -722,23 +756,35 @@ mod tests {
         let bytes = fs::read(&archive).unwrap();
         let decoder = flate2::read::GzDecoder::new(&bytes[..]);
         let mut tar = tar::Archive::new(decoder);
-        let mut checked = 0;
+        let mut checked_dirs = 0;
+        let mut checked_files = 0;
         for entry in tar.entries().unwrap() {
             let entry = entry.unwrap();
             let path = entry.path().unwrap().to_string_lossy().to_string();
-            if path.contains("/mount") && entry.header().entry_type().is_dir() {
+            if !path.contains("/mount") {
+                continue;
+            }
+            if entry.header().entry_type().is_dir() {
                 assert_eq!(
                     entry.header().mode().unwrap() & 0o777,
                     0o700,
                     "archived directory {path} must carry the owner-only mode"
                 );
-                checked += 1;
+                checked_dirs += 1;
+            } else if entry.header().entry_type().is_file() {
+                assert_eq!(
+                    entry.header().mode().unwrap() & 0o777,
+                    0o600,
+                    "archived file {path} must carry the owner-only mode"
+                );
+                checked_files += 1;
             }
         }
         assert!(
-            checked > 0,
+            checked_dirs > 0,
             "the archive must contain the mount directories"
         );
+        assert!(checked_files > 0, "the archive must contain the mount file");
     }
 
     #[test]
