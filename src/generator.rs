@@ -280,11 +280,51 @@ pub fn generate_containerfile(
         }
     }
 
+    // Build mounts. The package phase already copies the config that belongs
+    // in the image; this is its second verb, mounting the material that must
+    // not persist. One flag per derived mount point, fragments in manifest
+    // order, and always inline: a build-mount reference is never a named
+    // stage, including under --pin-digests.
+    let mut mount_flags: Vec<String> = Vec::new();
+    for loaded in fragments {
+        let FragmentSource::Registry { ref image_ref } = loaded.source;
+        for point in &loaded.mount_points {
+            mount_flags.push(if self_contained {
+                // No registry reference may appear in this mode's output, so
+                // the material is read from the context instead, the same
+                // pattern hooks use.
+                format!(
+                    "--mount=type=bind,source={},target={},ro,z",
+                    point.context_source(&loaded.fragment.name),
+                    point.target()
+                )
+            } else {
+                format!(
+                    "--mount=type=bind,from={},source={},target={},ro,z",
+                    image_ref,
+                    point.layer_source(),
+                    point.target()
+                )
+            });
+        }
+    }
+
     if !all_packages.is_empty() {
         if !ocp {
             writeln!(out, "# --- Packages ---")?;
         }
-        writeln!(out, "RUN dnf install -y \\")?;
+        match mount_flags.split_first() {
+            // The unmounted form is byte-identical to what every existing
+            // manifest already generates.
+            None => writeln!(out, "RUN dnf install -y \\")?,
+            Some((first, rest)) => {
+                writeln!(out, "RUN {} \\", first)?;
+                for flag in rest {
+                    writeln!(out, "    {} \\", flag)?;
+                }
+                writeln!(out, "    dnf install -y \\")?;
+            }
+        }
         for pkg in &all_packages {
             writeln!(out, "        {} \\", pkg)?;
         }
@@ -469,6 +509,134 @@ mod tests {
             mirror: None,
         };
         (loaded, manifest_frag)
+    }
+
+    /// A fragment carrying metadata and `mount/` alone, pinned by digest as
+    /// build mounts require.
+    fn make_mount_fragment(name: &str, mount_files: &[&str]) -> (LoadedFragment, ManifestFragment) {
+        let pinned = format!("quay.io/acme/{}@sha256:d00d", name);
+        let files: Vec<PathBuf> = mount_files.iter().map(PathBuf::from).collect();
+        let loaded = LoadedFragment {
+            fragment: Fragment {
+                name: FragmentName::new(name).expect("test fragment name must be valid"),
+                version: "1.0".into(),
+                description: "test".into(),
+                vendor: None,
+                provides: FragmentProvides { repos: vec![] },
+                packages: FragmentPackages { required: vec![] },
+                conflicts: FragmentConflicts { fragments: vec![] },
+            },
+            tree_paths: vec![],
+            hook_paths: vec![],
+            source: FragmentSource::Registry {
+                image_ref: pinned.clone(),
+            },
+            resolved_digest: Some("sha256:d00d".into()),
+            manifest_index: 0,
+            repo_file_contents: std::collections::HashMap::new(),
+            mount_points: crate::mount::derive_mount_points(name, &files)
+                .expect("fixture derives mount points"),
+            has_mount_dir: true,
+            drift_warning: None,
+        };
+        let manifest_frag = ManifestFragment {
+            image: pinned,
+            packages: vec!["some-package".into()],
+            mirror: None,
+        };
+        (loaded, manifest_frag)
+    }
+
+    /// Every `--mount=` option string the output carries, trailing
+    /// continuation backslash removed.
+    fn mount_flags(output: &str) -> Vec<String> {
+        output
+            .lines()
+            .flat_map(|l| l.split_whitespace())
+            .filter(|t| t.starts_with("--mount="))
+            .map(|t| t.trim_end_matches('\\').to_string())
+            .collect()
+    }
+
+    #[test]
+    fn build_mounts_attach_to_the_batched_package_run() {
+        let (frag, mf) = make_mount_fragment("rhel-entitlement", &["etc/pki/entitlement/cert.pem"]);
+        let manifest = Manifest {
+            base: "quay.io/test/base:1".into(),
+            source_path: "test-manifest.yaml".into(),
+            fragments: vec![mf],
+        };
+        let output = generate_containerfile(&manifest, &[frag], None, false, false).unwrap();
+
+        assert!(
+            output.contains(
+                "RUN --mount=type=bind,from=quay.io/acme/rhel-entitlement@sha256:d00d,\
+                 source=/fragment/mount/etc/pki/entitlement,\
+                 target=/etc/pki/entitlement,ro,z \\"
+            ),
+            "got:\n{output}"
+        );
+        let dnf_line = output
+            .lines()
+            .position(|l| l.trim_start().starts_with("dnf install -y"))
+            .expect("the batched install line is still emitted");
+        let mount_line = output
+            .lines()
+            .position(|l| l.contains("--mount=type=bind,from=quay.io/acme"))
+            .expect("the mount line is emitted");
+        assert!(
+            mount_line < dnf_line,
+            "the mount attaches to that RUN:\n{output}"
+        );
+    }
+
+    #[test]
+    fn one_flag_per_derived_mount_point_in_manifest_order() {
+        let (first, mf_first) = make_mount_fragment("entitlement", &["etc/pki/entitlement/c.pem"]);
+        let (mut second, mf_second) = make_mount_fragment("rhsm", &["etc/rhsm/rhsm.conf"]);
+        second.manifest_index = 1;
+        let manifest = Manifest {
+            base: "quay.io/test/base:1".into(),
+            source_path: "test-manifest.yaml".into(),
+            fragments: vec![mf_first, mf_second],
+        };
+        let output =
+            generate_containerfile(&manifest, &[first, second], None, false, false).unwrap();
+
+        let flags = mount_flags(&output);
+        assert_eq!(flags.len(), 2, "one flag per derived point:\n{output}");
+        assert!(
+            flags[0].contains("target=/etc/pki/entitlement"),
+            "{flags:?}"
+        );
+        assert!(flags[1].contains("target=/etc/rhsm"), "{flags:?}");
+    }
+
+    #[test]
+    fn build_mounts_are_read_only_and_relabelled() {
+        let (frag, mf) = make_mount_fragment("entitlement", &["etc/pki/entitlement/c.pem"]);
+        let manifest = Manifest {
+            base: "quay.io/test/base:1".into(),
+            source_path: "test-manifest.yaml".into(),
+            fragments: vec![mf],
+        };
+        let output = generate_containerfile(&manifest, &[frag], None, false, false).unwrap();
+        let flags = mount_flags(&output);
+        assert_eq!(flags.len(), 1);
+        assert!(flags[0].ends_with(",ro,z"), "got: {}", flags[0]);
+    }
+
+    #[test]
+    fn a_composition_without_build_mounts_emits_the_run_line_unchanged() {
+        // Byte stability for every existing manifest: no mounts, no change.
+        let (epel, mf_epel) = make_repos_fragment("epel", "aaa111");
+        let manifest = Manifest {
+            base: "quay.io/test/base:1".into(),
+            source_path: "test-manifest.yaml".into(),
+            fragments: vec![mf_epel],
+        };
+        let output = generate_containerfile(&manifest, &[epel], None, false, false).unwrap();
+        assert!(output.contains("RUN dnf install -y \\\n"), "got:\n{output}");
     }
 
     /// The one invocation line every hook-carrying fragment gets, in every
