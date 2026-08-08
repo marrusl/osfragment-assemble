@@ -116,6 +116,14 @@ const HOOKS_ENTRYPOINT_TAR_PATH: &str = "fragment/hooks/entrypoint";
 /// uses.
 const MOUNT_TAR_PREFIX: &str = "fragment/mount";
 
+/// The OCI layer whiteout prefix: a tar entry whose base name starts with
+/// this marks its sibling as deleted in a lower layer, or, doubled as
+/// `.wh..wh..opq`, marks the entry's directory as opaque. A fragment is
+/// built `FROM scratch` with `COPY` only, so a well-formed fragment layer
+/// never has a lower layer to delete from and can never legitimately
+/// contain one.
+const OCI_WHITEOUT_PREFIX: &str = ".wh.";
+
 /// Execute bits (`u+x`, `g+x`, `o+x`). Root's `CAP_DAC_OVERRIDE` grants
 /// execute only when at least one of them is set, so this mask matches
 /// exactly what is runnable at build time.
@@ -183,6 +191,23 @@ fn validate_tar_entry(path: &Path, entry_type: tar::EntryType) -> Result<PathBuf
             path.to_string_lossy().escape_debug()
         )
     })?;
+    // Checked ahead of the traversal guard below: the opaque-directory
+    // marker `.wh..wh..opq` also contains `..` and would otherwise be
+    // rejected under that check's generic message instead of this one's,
+    // which names the actual problem and survives if the traversal check is
+    // ever narrowed to stop treating every `..` substring as traversal.
+    if path_str
+        .split('/')
+        .any(|component| component.starts_with(OCI_WHITEOUT_PREFIX))
+    {
+        bail!(
+            "OCI whiteout entry rejected in fragment layer: {}. A fragment is a \
+             FROM-scratch, COPY-only payload and must never carry a deletion \
+             marker; remove the file from the fragment image instead of \
+             whiting it out.",
+            path_str
+        );
+    }
     if path_str.contains("..") {
         bail!("path traversal detected in fragment layer: {}", path_str);
     }
@@ -451,16 +476,20 @@ fn fast_path_from_annotations(
 ///
 /// `None` means the key is absent, which is not drift: the annotation is
 /// optional and a fragment that never annotated its mounts is simply one
-/// `list` has to pull. An entry that does not parse as an absolute target is
-/// dropped rather than failing the read, matching how every other annotation
-/// here degrades toward the authoritative layer content.
+/// `list` has to pull. Unlike every other annotation here, this one is not
+/// a cache of something the layer also states independently: it is the
+/// exact set of mount targets, and there is no in-layer counterpart to fall
+/// back on for just the targets that failed to parse. So an entry that does
+/// not parse as an absolute target invalidates the whole annotation rather
+/// than being dropped from it; the caller falls back to a full layer pull,
+/// where the layer is authoritative and any drift surfaces.
 fn mounts_from_annotations(annotations: &serde_json::Value) -> Option<Vec<MountPoint>> {
     let raw = annotations.get(MOUNTS_ANNOTATION_KEY)?.as_str()?;
     let targets: Vec<String> = serde_json::from_str(raw).ok()?;
-    let mut mounts: Vec<MountPoint> = targets
-        .iter()
-        .filter_map(|t| MountPoint::from_target(t).ok())
-        .collect();
+    let mut mounts = Vec::with_capacity(targets.len());
+    for target in &targets {
+        mounts.push(MountPoint::from_target(target).ok()?);
+    }
     mounts.sort();
     Some(mounts)
 }
@@ -752,7 +781,7 @@ pub fn load_registry_fragment_metadata_only(image_ref: &str) -> Result<LoadedFra
     let digest = resolve_digest(image_ref)?;
     let image_with_digest = pin_to_digest(image_ref, &digest);
 
-    if let Some((fragment, mount_points)) = try_annotation_fast_path(image_ref)? {
+    if let Some((fragment, mount_points)) = try_annotation_fast_path(&image_with_digest)? {
         // Annotations present — return metadata without pulling layers.
         // tree_paths and hook_paths are unknown in this path;
         // inspect/list can display fragment metadata without them.
@@ -1243,6 +1272,28 @@ description = "test fragment"
                 false,
                 "symlink or hardlink",
             ),
+            // OCI whiteouts
+            (
+                "fragment/mount/etc/pki/entitlement/.wh.cert.pem",
+                EntryType::Regular,
+                false,
+                "whiteout",
+            ),
+            (
+                "fragment/mount/etc/pki/entitlement/.wh..wh..opq",
+                EntryType::Regular,
+                false,
+                "whiteout",
+            ),
+            // A component that merely starts with the same two letters as
+            // the whiteout prefix, but not the prefix itself, must still
+            // pass: the guard matches on `.wh.` and nothing broader.
+            (
+                "fragment/tree/etc/something.whatever",
+                EntryType::Regular,
+                true,
+                "",
+            ),
         ];
         for (path, entry_type, should_pass, expected_err) in &cases {
             let result = validate_tar_entry(Path::new(path), *entry_type);
@@ -1378,6 +1429,34 @@ description = "test fragment"
                 "policy={policy:?}"
             );
         }
+    }
+
+    /// The sibling of `mount_material_lands_on_disk_only_under_the_write_policy`:
+    /// that test proves the materialized file exists; this one proves its
+    /// bytes are the source layer entry's bytes, unmodified. Credential
+    /// material (entitlement certs and the like) is what lands here, so a
+    /// silent truncation or corruption in the write path is a custody bug,
+    /// not just a cosmetic one.
+    #[test]
+    fn materialized_mount_bytes_match_the_source_layer_entry() {
+        use crate::mount::MountMaterialization;
+
+        let cert_bytes =
+            b"-----BEGIN CERTIFICATE-----\nnot a real cert\n-----END CERTIFICATE-----\n";
+        let tarball = create_test_tarball(&[(
+            "fragment/mount/etc/pki/entitlement/cert.pem",
+            cert_bytes as &[u8],
+        )]);
+        let workdir = tempfile::tempdir().unwrap();
+        extract_fragment_payload_to_disk(&tarball, workdir.path(), MountMaterialization::Write)
+            .unwrap();
+
+        let materialized =
+            std::fs::read(workdir.path().join("mount/etc/pki/entitlement/cert.pem")).unwrap();
+        assert_eq!(
+            materialized, cert_bytes,
+            "materialized mount bytes must match the source layer entry exactly"
+        );
     }
 
     #[test]
@@ -1978,19 +2057,37 @@ description = "test fragment"
     }
 
     #[test]
-    fn a_malformed_mounts_annotation_drops_the_unusable_entries() {
-        // The annotations are a cache of what the layer says, and the layer
-        // is authoritative, so a bad entry costs its own visibility and
-        // nothing else.
+    fn a_malformed_mounts_annotation_invalidates_the_whole_fast_path() {
+        // The mounts annotation is an exact set, not a cache with an
+        // authoritative in-layer counterpart to fall back on for the
+        // targets that failed to parse. One bad entry must not silently
+        // shrink the reported set, so it invalidates the annotation and
+        // sends the caller to a full layer pull instead.
         let annotations = serde_json::json!({
-            "com.github.marrusl.osfragment.mounts": "[\"/etc/rhsm\", \"etc/relative\", \"/\"]"
+            "com.github.marrusl.osfragment.mounts": "[\"/etc/rhsm\", \"etc/relative\"]"
         });
-        let mounts = mounts_from_annotations(&annotations).expect("the key is present");
-        let targets: Vec<String> = mounts
-            .iter()
-            .map(crate::mount::MountPoint::target)
-            .collect();
-        assert_eq!(targets, vec!["/etc/rhsm"]);
+        assert!(
+            mounts_from_annotations(&annotations).is_none(),
+            "an unparseable target must invalidate the fast path, not drop silently"
+        );
+    }
+
+    #[test]
+    fn an_empty_mounts_annotation_is_a_real_answer_not_absence() {
+        // Pins the axis the no-pull decision rests on: the key ABSENT means
+        // "unknown, go pull the layer" (`None`), while the key present as
+        // an empty array means "this fragment genuinely mounts nothing"
+        // (`Some(vec![])`) and needs no pull at all. Collapsing the two
+        // would either force a needless pull or mis-report a mounting
+        // fragment as mount-free.
+        let annotations = serde_json::json!({
+            "com.github.marrusl.osfragment.mounts": "[]"
+        });
+        assert_eq!(
+            mounts_from_annotations(&annotations),
+            Some(vec![]),
+            "an empty array is a real, pull-free answer, not absence"
+        );
     }
 
     #[test]
