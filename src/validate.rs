@@ -130,22 +130,21 @@ pub fn check_repo_conflicts(fragments: &[LoadedFragment]) -> Result<()> {
 /// survives regardless of `--pin-digests` and needs no per-fragment
 /// retention machinery.
 pub fn check_mount_digest_pins(manifest: &Manifest, fragments: &[LoadedFragment]) -> Result<()> {
-    check_mount_digest_pins_with(manifest, fragments, |declared| {
-        crate::loader::resolve_digest(declared).ok()
-    })
+    check_mount_digest_pins_with(manifest, fragments, crate::loader::resolve_digest)
 }
 
 /// [`check_mount_digest_pins`] with the digest resolver injected.
 ///
-/// The resolver only runs on a path that is already about to abort — it
-/// exists to enrich the error, not to decide whether one is raised — so a
-/// test can drive a forced lookup failure through the real policy logic
-/// below without reaching the network, and confirm that failure still
-/// yields the same unpinned-reference error rather than a different one.
+/// `resolve` mirrors [`crate::loader::resolve_digest`]'s own signature
+/// rather than an already-swallowed `Option`, so the point where a resolver
+/// failure gets folded into "no resolved digest available" — the exact
+/// place the unpinned-reference contract lives, since that failure must
+/// enrich the error and never become a different one — sits inside this
+/// function where a test can drive it, instead of at the call site above.
 fn check_mount_digest_pins_with(
     manifest: &Manifest,
     fragments: &[LoadedFragment],
-    resolve: impl Fn(&str) -> Option<String>,
+    resolve: impl Fn(&str) -> Result<String>,
 ) -> Result<()> {
     for f in fragments {
         if f.mount_points.is_empty() {
@@ -159,8 +158,11 @@ fn check_mount_digest_pins_with(
         // load_all_fragments dropped the one it resolved, so read it again
         // rather than printing a placeholder for something the tool can go
         // get. This runs only on a path that is about to abort, so one
-        // registry read buys a fix the user can paste.
-        let resolved = f.resolved_digest.clone().or_else(|| resolve(declared));
+        // registry read buys a fix the user can paste. A resolver failure
+        // here is swallowed into "no digest available": message
+        // enrichment, not a new failure mode, so the unpinned-reference
+        // error below is what results either way.
+        let resolved = f.resolved_digest.clone().or_else(|| resolve(declared).ok());
         bail!(
             "{}",
             unpinned_mount_error(f.fragment.name.as_str(), declared, resolved.as_deref())
@@ -475,14 +477,17 @@ mod tests {
         );
     }
 
-    /// Drives a failing digest lookup through the real validation path
-    /// rather than just the message builder: an injected resolver that
-    /// always fails stands in for a `resolve_digest` that errored (network
-    /// down, bad ref, whatever). The contract that matters is that this
-    /// still surfaces the same unpinned-reference error with its placeholder
-    /// and skopeo guidance, never a distinct "lookup failed" error — a
-    /// regression at the `.ok()` conversion from `resolve_digest`'s `Result`
-    /// would otherwise go uncaught.
+    /// Drives an actual resolver *failure* (an `Err`, matching what
+    /// `resolve_digest` itself returns on a real lookup failure) through the
+    /// real validation path, not just the message builder. The contract
+    /// that matters is that `check_mount_digest_pins_with`'s own
+    /// `Err`-to-"no digest" swallowing still surfaces the unpinned-reference
+    /// error with its placeholder and skopeo guidance, and never leaks the
+    /// resolver's own failure text as a different error. Because the
+    /// injected closure returns `Result<String>` (the same type
+    /// `resolve_digest` returns), this exercises the real `.ok()`
+    /// conversion inside `check_mount_digest_pins_with` rather than
+    /// sidestepping it with a pre-swallowed `Option`.
     #[test]
     fn a_failing_resolver_still_yields_the_unpinned_placeholder_error() {
         let (mut loaded, mf) =
@@ -490,9 +495,14 @@ mod tests {
         loaded.resolved_digest = None; // force the fallback to the injected resolver
         let manifest = manifest_of(vec![mf]);
 
-        let err = check_mount_digest_pins_with(&manifest, &[loaded], |_| None)
-            .expect_err("an unpinned reference is still an error when digest resolution fails")
-            .to_string();
+        let err = check_mount_digest_pins_with(&manifest, &[loaded], |image_ref| {
+            Err(anyhow::anyhow!(
+                "skopeo digest lookup failed for {}: exit status 1",
+                image_ref
+            ))
+        })
+        .expect_err("an unpinned reference is still an error when digest resolution fails")
+        .to_string();
 
         assert!(
             err.contains("image: quay.io/acme/rhel-entitlement@sha256:..."),
@@ -503,13 +513,14 @@ mod tests {
             "shows how to obtain a digest: {err}"
         );
         assert!(
-            !err.contains("lookup failed"),
-            "must not leak resolve_digest's own error text as a different error: {err}"
+            !err.contains("skopeo digest lookup failed"),
+            "must not leak the resolver's own failure text as a different error: {err}"
         );
     }
 
-    /// Symmetric positive: an injected resolver that succeeds fills in the
-    /// digest it found, exercised through the same real validation path.
+    /// Symmetric positive: an injected resolver that succeeds (`Ok`, again
+    /// matching `resolve_digest`'s real return type) fills in the digest it
+    /// found, exercised through the same real validation path.
     #[test]
     fn a_succeeding_resolver_fills_in_the_digest_it_finds() {
         let (mut loaded, mf) =
@@ -517,11 +528,10 @@ mod tests {
         loaded.resolved_digest = None; // force the fallback to the injected resolver
         let manifest = manifest_of(vec![mf]);
 
-        let err = check_mount_digest_pins_with(&manifest, &[loaded], |_| {
-            Some("sha256:def456".to_string())
-        })
-        .expect_err("still unpinned in the manifest regardless of what the resolver found")
-        .to_string();
+        let err =
+            check_mount_digest_pins_with(&manifest, &[loaded], |_| Ok("sha256:def456".to_string()))
+                .expect_err("still unpinned in the manifest regardless of what the resolver found")
+                .to_string();
 
         assert!(
             err.contains("image: quay.io/acme/rhel-entitlement@sha256:def456"),
