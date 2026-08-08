@@ -13,6 +13,8 @@ A fragment is an OCI image with this directory structure under `/fragment/`:
 │   ├── etc/yum.repos.d/*.repo
 │   ├── etc/pki/rpm-gpg/RPM-GPG-KEY-*
 │   └── ...            # Arbitrary filesystem paths
+├── mount/             # Optional: material bind-mounted during the package step
+│   └── etc/pki/entitlement/*.pem
 └── hooks/             # Optional: build-time setup (any language)
     ├── entrypoint     # Required when hooks/ has content; the only file run
     └── lib/helper.sh  # Support material, never invoked by the tool
@@ -74,6 +76,25 @@ The generated Containerfile applies fragments in this order:
 
 Config files land after package installation to ensure fragment-supplied configurations are never overwritten by RPM defaults.
 
+## `mount/` Directory Layout
+
+The `mount/` subtree mirrors target paths exactly as `tree/` does. Detection is presence-based, with no `fragment.toml` section. Derivation collects every directory that directly contains a file and drops any nested inside another, so `mount/etc/rhsm/rhsm.conf` plus `mount/etc/rhsm/ca/cert.pem` yields one mount of `/etc/rhsm`. A regular file directly under `mount/` is a generation error. An empty `mount/` produces a notice.
+
+The emitted form is:
+
+```dockerfile
+RUN --mount=type=bind,from=<fragment>@sha256:...,source=/fragment/mount/etc/pki/entitlement,target=/etc/pki/entitlement,ro,z \
+    dnf install -y \
+        some-package \
+    && dnf clean all
+```
+
+with the self-contained variant reading `source=fragments/<name>/mount/<path>` and no `from=`.
+
+The manifest entry for a fragment carrying `mount/` must be pinned by digest. Two fragments mounting colliding targets is an error, as is a target that equals or contains `/etc/yum.repos.d` or `/etc/pki/rpm-gpg`. Symlinks and hardlinks are rejected in fragment layers, `mount/` included.
+
+The builder never commits the mount source, which is a persistence guarantee and not a confidentiality one, since anything running in that RUN can read the mounted paths.
+
 ## Hooks Contract
 
 If `/fragment/hooks/` contains any file, it must contain an executable regular file named `entrypoint`. That file is the only thing osfragment-assemble runs: once, as root, after packages are installed, with no arguments and no environment beyond what the build already provides. Fragment authors are responsible for setting the execute bit and for any required interpreters being available in the image at build time. The generated Containerfile bind-mounts the fragment's `hooks/` directory for the duration of a single `RUN` and invokes the entrypoint through it:
@@ -110,10 +131,11 @@ Fragments are built with this pattern:
 FROM scratch
 COPY fragment.toml /fragment/
 COPY tree/ /fragment/tree/
+COPY mount/ /fragment/mount/
 COPY hooks/ /fragment/hooks/
 ```
 
-No `RUN` commands, no base image. The fragment carries only the files needed for assembly. Omit the `tree/` or `hooks/` line if the fragment has no such directory.
+No `RUN` commands, no base image. The fragment carries only the files needed for assembly. Omit the `tree/`, `mount/`, or `hooks/` line if the fragment has no such directory.
 
 Each directory needs its own `COPY` with an explicit destination. A single `COPY fragment.toml tree/ hooks/ /fragment/` copies the *contents* of `tree/` and `hooks/` into `/fragment/`, so neither `/fragment/tree/` nor `/fragment/hooks/` exists and the fragment reads as empty. That form builds and pushes without error, so the mistake surfaces only when the tool loads the fragment.
 
@@ -134,6 +156,9 @@ Annotation keys:
 - `com.github.marrusl.osfragment.vendor`: vendor name (optional)
 - `com.github.marrusl.osfragment.provides.repos`: JSON array of repo IDs (e.g., `["epel"]`)
 - `com.github.marrusl.osfragment.packages.required`: JSON array of required package names
+- `com.github.marrusl.osfragment.mounts`: JSON array of mount target paths (e.g., `["/etc/pki/entitlement"]`)
+
+`com.github.marrusl.osfragment.mounts` has no `fragment.toml` counterpart: its authority is the derived targets, so generation cross-checks it whenever it pulls the layer and warns on drift, with layer content winning. Annotating buys this: `list` answers the mount question from registry metadata only when this key is present, and falls back to a full layer pull when it is absent, because metadata alone cannot tell a fragment that mounts nothing from one that never annotated. To set it, run `inspect` on the local fragment directory to see the derived targets, then pass them as `--annotation` on your own `podman build`.
 
 Annotations are **not** used during assembly; the tool always parses the in-layer `fragment.toml` for the authoritative fragment definition. Annotations are a read-only optimization.
 

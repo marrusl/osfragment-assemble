@@ -142,10 +142,10 @@ pub fn check_mount_digest_pins(manifest: &Manifest, fragments: &[LoadedFragment]
 ///
 /// `resolve` mirrors [`crate::loader::resolve_digest`]'s own signature
 /// rather than an already-swallowed `Option`, so the point where a resolver
-/// failure gets folded into "no resolved digest available" — the exact
-/// place the unpinned-reference contract lives, since that failure must
-/// enrich the error and never become a different one — sits inside this
-/// function where a test can drive it, instead of at the call site above.
+/// failure gets folded into "no resolved digest available" sits inside this
+/// function, where a test can drive it, instead of at the call site above.
+/// This is the exact place the unpinned-reference contract lives: a
+/// resolver failure must enrich the error and never become a different one.
 fn check_mount_digest_pins_with(
     manifest: &Manifest,
     fragments: &[LoadedFragment],

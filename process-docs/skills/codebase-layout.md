@@ -36,6 +36,7 @@ when they disagree.
 | `src/lib.rs` | Module declarations only, no logic |
 | `src/manifest.rs` | Parses the composition YAML into `Manifest` and `ManifestFragment`, rejecting unknown keys at the top level and inside fragment entries. Owns `FragmentSource` |
 | `src/fragment.rs` | The `fragment.toml` data model and parser. Owns the `FragmentName` newtype, `REPO_PREFIXES`, and `is_repo_path` |
+| `src/mount.rs` | Build mounts: the `MountPoint` newtype, the derivation from a fragment's `mount/` file paths to bind mount points, the render forms each surface needs, the mounts annotation key, and the notice and warning text functions. Consumed by `loader.rs`, `validate.rs`, `generator.rs`, `self_contained.rs`, `inspect.rs`, and `list.rs` |
 | `src/loader.rs` | Pulls fragment images via `skopeo`, reads metadata from OCI annotations or by walking layers, validates tar entries, and materializes fragment payload to disk. Produces `LoadedFragment`. Also loads a whole manifest's worth in order (`load_all_fragments`) and decides whether digests survive that load (`should_keep_fragment_digests`) |
 | `src/validate.rs` | Composition checks across loaded fragments: duplicate names, declared conflicts, repo file collisions |
 | `src/generator.rs` | `generate_containerfile`: emits the Containerfile. Also `split_image_ref` |
@@ -75,6 +76,7 @@ Flags on the assembly path:
 | `--pin-digests` | off | With `--self-contained`, affects the base image only |
 | `--ocp [FILE]` | `machineosbuild.yaml` when passed bare | Emits a MachineOSConfig alongside the Containerfile |
 | `--self-contained <DIR>` | off | Conflicts with `--ocp` and `--output` |
+| `--materialize-mounts` | off | Requires `--self-contained`; writes fragment `mount/` material into the build context, owner-only |
 | `--pool <NAME>` | `worker` | Meaningful only with `--ocp` |
 
 ## Emitted output
@@ -92,7 +94,10 @@ guarantee is covered in
 **Self-contained build context** (`write_output` in `src/self_contained.rs`)
 is a directory containing `Containerfile`, `manifest.yaml`, `fragments/`, and
 the `.osfragment-assemble` sentinel file, plus a sibling `<dir>.tar.gz` written
-by `create_archive`.
+by `create_archive`. Under `--materialize-mounts`, each fragment carrying
+`mount/` also gets that subtree written into `fragments/<name>/mount/`, with
+its directories at `0700` rather than the `0755` the rest of the tree uses,
+plus a `.gitignore` covering `fragments/*/mount/`.
 
 **MachineOSConfig** (`src/ocp.rs`) wraps the Containerfile with a size cap on
 the embedded content. The environment it targets is described in
