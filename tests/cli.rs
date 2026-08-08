@@ -19,6 +19,17 @@ fn inspect_local_directory() {
 }
 
 #[test]
+fn inspect_without_mounts_prints_no_mount_section() {
+    // Every shipped example fragment is mountless, so the section must be
+    // absent rather than rendered empty.
+    let mut cmd = Command::cargo_bin("osfragment-assemble").unwrap();
+    cmd.args(["inspect", "examples/fragments/epel"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("mount/").not());
+}
+
+#[test]
 fn inspect_tailscale_shows_hook() {
     let mut cmd = Command::cargo_bin("osfragment-assemble").unwrap();
     cmd.args(["inspect", "examples/fragments/tailscale"])
