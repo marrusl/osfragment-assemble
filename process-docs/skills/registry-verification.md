@@ -36,8 +36,8 @@ not need the file.
 `load_registry_fragment_metadata_only` tries annotations first and falls back to
 a full layer pull. Command mapping:
 
-- `list` — metadata-only, so annotations are used when present.
-- `inspect` — always the full load, because it prints tree and hook paths that
+- `list`: metadata-only, so annotations are used when present.
+- `inspect`: always the full load, because it prints tree and hook paths that
   the annotations do not carry.
 
 Testing an annotation change with `inspect` therefore proves nothing about the
@@ -68,7 +68,7 @@ way to confirm they survived the push.
 
 A doc example is supposed to be real tool output, but the fragments it names
 (`quay.io/marrusl2/fragments/...`) are the ones a breaking change has not been
-applied to yet — they are exactly what the change stops loading. Pointing the
+applied to yet: they are exactly what the change stops loading. Pointing the
 manifest at `localhost:5050` produces a genuine run with the wrong refs in it,
 and hand-editing the host back afterwards produces output that is no longer
 genuine.
@@ -102,8 +102,8 @@ published (pre-change) fragment. Build and push before generating.
 
 `COPY --from=<ref>` and `RUN --mount=from=<ref>` both resolve against podman's
 local storage first. If a tag like `quay.io/marrusl2/fragments/grafana:11.0` is
-already present locally — which it always is after a rebuild-and-push script,
-because the script builds under the published name — podman never contacts the
+already present locally (which it always is after a rebuild-and-push script,
+because the script builds under the published name), podman never contacts the
 registry, and the build tests whatever that local copy happens to contain.
 
 This produced a build failure on 2026-08-04 that looked nothing like its cause:
@@ -136,7 +136,7 @@ happening by accident.
 
 Measured 2026-08-04: `epel:10`, `awscli-zip:2.36.16`, and
 `nvidia-driver-run:610.57.04` are `arm64`, while `grafana:11.0` and
-`cis-hardening:2.1` are `amd64` — the originals were pushed from a different
+`cis-hardening:2.1` are `amd64`: the originals were pushed from a different
 machine than the later ones. Nothing breaks, because fragment payload is
 architecture-independent files, but every build on an arm64 host prints
 
@@ -153,7 +153,7 @@ uniform, and expect the warning rather than treating it as a new fault.
 Deriving annotation arguments from `fragment.toml`, or checking a manifest's
 annotation map, invites a one-liner. Do not. Inside a single-quoted shell string
 the shell passes backslashes through literally, so escaped quotes land in the
-Python source in places the parser rejects — reliably inside f-string
+Python source in places the parser rejects; reliably inside f-string
 expressions, which is exactly where JSON and dict literals want them:
 
 ```bash

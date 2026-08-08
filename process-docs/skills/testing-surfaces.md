@@ -24,7 +24,7 @@ conventions that keep new tests consistent with the suite.
   `make_hook_fragment` helpers rather than hand-rolling `LoadedFragment`.
 - `resolved_digest: Some(..)` on any fragment switches emission to named
   stages (`COPY --from=frag-<name>`); `None` everywhere emits inline
-  registry refs (`COPY --from=<image_ref>`). Pick deliberately — assertions
+  registry refs (`COPY --from=<image_ref>`). Pick deliberately: assertions
   on the `--from=` form depend on it.
 - The hook invocation line is the `HOOK_INVOCATION` const, indentation
   included; `hook_invocation_lines` / `frag_hook_tokens` exist for
@@ -99,7 +99,7 @@ registry access, so its `Manifest:` provenance line has no test; the
 parse-site test in `manifest.rs` (`parsed_manifest_records_its_source_path`)
 and the generator header test are the coverage for that contract. Hook
 script *behavior* in `examples/fragments/*/hooks/` (what an entrypoint does
-to an image) has no offline execution pattern — only its structure is
+to an image) has no offline execution pattern; only its structure is
 testable, via `inspect`.
 
 The annotation drift warning's *stream* is unpinnable for the same reason.

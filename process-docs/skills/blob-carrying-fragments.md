@@ -100,7 +100,7 @@ newer upstream kernels, so "the driver supports 6.12" is not sufficient
 reasoning. NVIDIA 580.95.05 failed to build against `6.12.0-254.el10` with
 `implicit declaration of function 'DRM_ERROR'`, `'struct __drm_crtcs_state' has
 no member named 'state'`, `too few arguments to function 'pci_resize_resource'`,
-and `'const struct dma_map_ops' has no member named 'map_resource'` — all
+and `'const struct dma_map_ops' has no member named 'map_resource'`: all
 symptoms of the kernel being *newer* than the driver's feature detection
 expects, not older. Reach for a newer driver branch when those appear.
 
@@ -127,7 +127,7 @@ paths are recreated by every `dnf` invocation and removed by whichever step
 cleans up after itself, so an earlier step's diligence proves nothing about what
 ships. On the demo composition the generator's package step and the `awscli-zip`
 hook both cleaned up correctly, and the image still carried all four warnings
-because the `nvidia-driver-run` hook — the last step to run `dnf` — did not
+because the `nvidia-driver-run` hook (the last step to run `dnf`) did not
 (measured 2026-08-05). **Attribute this residue by walking the intermediate
 layers** (`podman run <layer-id> ls /run/rhsm`), never by reading the hooks:
 reading produced the wrong answer twice.
@@ -185,7 +185,7 @@ and removing it in the same layer.
 
 ## A fragment may carry `hooks/` with no `tree/`
 
-`awscli-zip` is the first example shaped that way and the loader handles it —
+`awscli-zip` is the first example built that way and the loader handles it:
 `inspect` reports the fragment with only a `hooks/` listing. Omit the
 `COPY tree/` line from `Containerfile.fragment` entirely; do not ship an empty
-`tree/` to keep the shape uniform.
+`tree/` to keep the layout uniform.

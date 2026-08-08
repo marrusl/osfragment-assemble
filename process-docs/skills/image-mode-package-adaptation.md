@@ -29,7 +29,7 @@ documents `plugins = data/plugins` and mentions no bundled path at all, and the
 binary carries no `bundled_plugins_path` setting to grep for.
 
 **The server's own startup log is the authority.** Started with the unit file's
-arguments — including `cfg:default.paths.data=/var/lib/grafana` — it logs:
+arguments (including `cfg:default.paths.data=/var/lib/grafana`), it logs:
 
 ```
 level=info msg="Path Plugins" path="[/var/lib/grafana/plugins /usr/share/grafana/data/plugins-bundled]"
@@ -44,7 +44,7 @@ grafana.com on first start. The packaging works around
 introduces this in the process.
 
 The fragment's fix is therefore to **undo the `%post` move** rather than invent
-a third location — restoring the files where the package ships them, which is
+a third location: restoring the files where the package ships them, which is
 both where the server reads and already under `/usr`.
 
 Boot the service and read its log before designing around a path. Prove the
@@ -58,7 +58,7 @@ Clearing it needs both halves addressed, and they want different things:
 
 | reported as | what it flags | how to clear it |
 |---|---|---|
-| `Found content in /var missing systemd tmpfiles.d entries` | every path under `/var` — **directories and symlinks included** — with no `tmpfiles.d` entry | ship a `tmpfiles.d` fragment declaring them |
+| `Found content in /var missing systemd tmpfiles.d entries` | every path under `/var` (**directories and symlinks included**) with no `tmpfiles.d` entry | ship a `tmpfiles.d` fragment declaring them |
 | `Found non-directory/non-symlink files in /var` | regular files only | get the files out of `/var` |
 
 Removing the files therefore shrinks the warning without clearing it: the
@@ -73,7 +73,7 @@ it wants**, so the fix can be copied out of the warning:
 d /var/lib/grafana 0755 grafana grafana - -
 ```
 
-Declaring the directories is not just lint appeasement — it is what makes the
+Declaring the directories is not just lint appeasement: it is what makes the
 package work on a fresh `/var`, which is the state image mode actually boots
 into.
 
@@ -89,8 +89,8 @@ declaration stays portable:
 u     grafana -  "grafana user" /usr/share/grafana /sbin/nologin
 ```
 
-A single `u` line covers the matching group too — the base's own `chrony.conf`
-is exactly this shape, and its user and group carry different IDs (994 and 992)
+A single `u` line covers the matching group too: the base's own `chrony.conf`
+does exactly that, and its user and group carry different IDs (994 and 992)
 without being flagged.
 
 ## Check `rpm -V` as a second opinion
@@ -99,5 +99,5 @@ without being flagged.
 install, because the rpmdb still records them where the package put them and
 `%post` moved them elsewhere. That reading is free and points straight at
 content a `%post` relocated. After the fragment undoes the move, the same
-command reports nothing — a useful signal that the fragment restored the
+command reports nothing: a useful signal that the fragment restored the
 package's intended layout rather than inventing its own.

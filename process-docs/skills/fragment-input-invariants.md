@@ -27,8 +27,8 @@ but code added inside `src/fragment.rs`, including its `mod tests`, can write
 `FragmentName("../../escape".to_string())` and the compiler will accept it. Do
 not add a bypass constructor there. There are exactly two construction sites:
 
-- `parse_fragment_toml` — the authoritative path, returns `Err`.
-- `fragment_from_annotations` in `src/loader.rs` — the OCI annotation fast
+- `parse_fragment_toml`: the authoritative path, returns `Err`.
+- `fragment_from_annotations` in `src/loader.rs`: the OCI annotation fast
   path, returns `None` so the caller falls back to layer extraction, where the
   in-layer `fragment.toml` is parsed and validated properly. Annotations are a
   cache of the TOML, so falling back to the authoritative value is correct;
