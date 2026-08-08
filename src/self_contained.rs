@@ -5,6 +5,7 @@
 
 use crate::loader::LoadedFragment;
 use crate::manifest::FragmentSource;
+use crate::mount::MountMaterialization;
 use anyhow::{bail, Context, Result};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -233,7 +234,9 @@ pub fn write_output(
         manifest_path,
         containerfile,
         fragments,
-        crate::loader::materialize_fragment,
+        |image_ref, dest| {
+            crate::loader::materialize_fragment(image_ref, dest, MountMaterialization::Skip)
+        },
     )
 }
 
@@ -495,7 +498,11 @@ mod tests {
                     "quay.io/test/cis:1" => &cis_layer,
                     other => panic!("unexpected image_ref in test: {other}"),
                 };
-                crate::loader::extract_fragment_payload_to_disk(layer, dest)
+                crate::loader::extract_fragment_payload_to_disk(
+                    layer,
+                    dest,
+                    MountMaterialization::Skip,
+                )
             },
         )
         .unwrap();
@@ -548,7 +555,11 @@ mod tests {
             "FROM example\n",
             &fragments,
             |_image_ref, dest| {
-                crate::loader::extract_fragment_payload_to_disk(&hooks_only_layer, dest)
+                crate::loader::extract_fragment_payload_to_disk(
+                    &hooks_only_layer,
+                    dest,
+                    MountMaterialization::Skip,
+                )
             },
         )
         .unwrap();
@@ -698,7 +709,11 @@ mod tests {
                     "quay.io/test/hooks-only:1" => &hooks_only_entries,
                     other => panic!("unexpected image_ref in test: {other}"),
                 };
-                crate::loader::extract_fragment_payload_to_disk(&build_fixture_layer(entries), dest)
+                crate::loader::extract_fragment_payload_to_disk(
+                    &build_fixture_layer(entries),
+                    dest,
+                    MountMaterialization::Skip,
+                )
             },
         )
         .unwrap();
@@ -819,7 +834,8 @@ mod tests {
 
         let workdir = tempfile::tempdir().unwrap();
         let dest = workdir.path().join("frag");
-        crate::loader::extract_fragment_payload_to_disk(&layer, &dest).unwrap();
+        crate::loader::extract_fragment_payload_to_disk(&layer, &dest, MountMaterialization::Skip)
+            .unwrap();
 
         let hook_path = dest.join("hooks/setup.sh");
         let hook_mode = fs::metadata(&hook_path).unwrap().permissions().mode() & 0o777;

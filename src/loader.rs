@@ -8,7 +8,7 @@ use crate::fragment::{
 };
 use crate::generator::pin_to_digest;
 use crate::manifest::{FragmentSource, Manifest};
-use crate::mount::{derive_mount_points, MountPoint, MOUNTS_ANNOTATION_KEY};
+use crate::mount::{derive_mount_points, MountMaterialization, MountPoint, MOUNTS_ANNOTATION_KEY};
 
 #[derive(Debug, Clone)]
 pub struct LoadedFragment {
@@ -315,9 +315,10 @@ fn extract_repo_file_contents_from_bytes(
     Ok(contents)
 }
 
-/// Write a layer's `fragment/tree/` and `fragment/hooks/` payload to disk
-/// under `dest_dir/tree` and `dest_dir/hooks`. Shares the same tar-entry
-/// security validation as the metadata-only extractors above.
+/// Write a layer's `fragment/tree/`, `fragment/hooks/`, and, under
+/// [`MountMaterialization::Write`], `fragment/mount/` payload to disk under
+/// `dest_dir`. Shares the same tar-entry security validation as the
+/// metadata-only extractors above.
 ///
 /// `pub(crate)` rather than private: `src/self_contained.rs`'s tests
 /// compose this directly with `create_archive` over a fixture layer to
@@ -328,7 +329,11 @@ fn extract_repo_file_contents_from_bytes(
 /// Extraction streams entry-by-entry, so on `Err` `dest_dir` may contain
 /// partially written files from entries processed before the failing one;
 /// callers must treat it as unusable rather than a valid partial result.
-pub(crate) fn extract_fragment_payload_to_disk(compressed: &[u8], dest_dir: &Path) -> Result<()> {
+pub(crate) fn extract_fragment_payload_to_disk(
+    compressed: &[u8],
+    dest_dir: &Path,
+    mounts: MountMaterialization,
+) -> Result<()> {
     let decoder = GzDecoder::new(compressed);
     let mut archive = tar::Archive::new(decoder);
 
@@ -346,6 +351,14 @@ pub(crate) fn extract_fragment_payload_to_disk(compressed: &[u8], dest_dir: &Pat
             dest_dir.join("tree").join(rel)
         } else if let Ok(rel) = path.strip_prefix("fragment/hooks") {
             dest_dir.join("hooks").join(rel)
+        } else if let Ok(rel) = path.strip_prefix(MOUNT_TAR_PREFIX) {
+            // Skipped unless the caller opts in: materializing mount
+            // material is a custody change, not a packaging detail, and the
+            // default output must not make a durable copy of it.
+            match mounts {
+                MountMaterialization::Skip => continue,
+                MountMaterialization::Write => dest_dir.join("mount").join(rel),
+            }
         } else {
             continue;
         };
@@ -362,16 +375,21 @@ pub(crate) fn extract_fragment_payload_to_disk(compressed: &[u8], dest_dir: &Pat
 }
 
 /// Pull a fragment image by reference and materialize its tree/hooks
-/// payload to disk under `dest_dir`. Reuses `pull_layer_bytes`, the same
+/// payload to disk under `dest_dir`, and its `mount/` payload as well under
+/// [`MountMaterialization::Write`]. Reuses `pull_layer_bytes`, the same
 /// skopeo-copy-then-walk-layers path `load_registry_fragment` uses; only
 /// the sink differs (files on disk instead of an in-memory path list).
 ///
 /// On `Err`, `dest_dir` may contain partially written files from an
 /// earlier layer or an earlier entry within the failing layer; callers
 /// must treat it as unusable rather than a valid partial result.
-pub fn materialize_fragment(image_ref: &str, dest_dir: &Path) -> Result<()> {
+pub fn materialize_fragment(
+    image_ref: &str,
+    dest_dir: &Path,
+    mounts: MountMaterialization,
+) -> Result<()> {
     for layer_bytes in pull_layer_bytes(image_ref)? {
-        extract_fragment_payload_to_disk(&layer_bytes, dest_dir)?;
+        extract_fragment_payload_to_disk(&layer_bytes, dest_dir, mounts)?;
     }
     Ok(())
 }
@@ -1320,7 +1338,8 @@ description = "test fragment"
         ]);
 
         let workdir = tempfile::tempdir().unwrap();
-        extract_fragment_payload_to_disk(&tarball, workdir.path()).unwrap();
+        extract_fragment_payload_to_disk(&tarball, workdir.path(), MountMaterialization::Skip)
+            .unwrap();
 
         let extracted_tree =
             std::fs::read(workdir.path().join("tree/etc/yum.repos.d/epel.repo")).unwrap();
@@ -1330,13 +1349,46 @@ description = "test fragment"
     }
 
     #[test]
+    fn mount_material_lands_on_disk_only_under_the_write_policy() {
+        use crate::mount::MountMaterialization;
+
+        // (policy, mount file exists on disk afterward)
+        let cases = [
+            (MountMaterialization::Skip, false),
+            (MountMaterialization::Write, true),
+        ];
+        for (policy, expected) in cases {
+            let tarball = create_test_tarball(&[
+                ("fragment/tree/etc/motd", b"hello" as &[u8]),
+                ("fragment/mount/etc/pki/entitlement/cert.pem", b"secret"),
+            ]);
+            let workdir = tempfile::tempdir().unwrap();
+            extract_fragment_payload_to_disk(&tarball, workdir.path(), policy).unwrap();
+
+            assert!(
+                workdir.path().join("tree/etc/motd").is_file(),
+                "tree payload is unaffected by the mount policy"
+            );
+            assert_eq!(
+                workdir
+                    .path()
+                    .join("mount/etc/pki/entitlement/cert.pem")
+                    .is_file(),
+                expected,
+                "policy={policy:?}"
+            );
+        }
+    }
+
+    #[test]
     fn payload_extraction_rejects_traversal_like_other_extractors() {
         let tarball = create_test_tarball(&[
             ("../etc/passwd", b"evil"),
             ("fragment/tree/etc/foo.conf", b"data"),
         ]);
         let workdir = tempfile::tempdir().unwrap();
-        let result = extract_fragment_payload_to_disk(&tarball, workdir.path());
+        let result =
+            extract_fragment_payload_to_disk(&tarball, workdir.path(), MountMaterialization::Skip);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("traversal"));
     }
@@ -1367,8 +1419,9 @@ description = "test fragment"
         ]);
 
         let workdir = tempfile::tempdir().unwrap();
-        let err = extract_fragment_payload_to_disk(&tarball, workdir.path())
-            .expect_err("a non-UTF-8 entry name must be rejected, not mangled onto disk");
+        let err =
+            extract_fragment_payload_to_disk(&tarball, workdir.path(), MountMaterialization::Skip)
+                .expect_err("a non-UTF-8 entry name must be rejected, not mangled onto disk");
         assert!(
             err.to_string().contains("non-UTF-8"),
             "wrong error for a non-UTF-8 entry name: {err}"
@@ -1385,7 +1438,8 @@ description = "test fragment"
         }]);
 
         let workdir = tempfile::tempdir().unwrap();
-        extract_fragment_payload_to_disk(&tarball, workdir.path()).unwrap();
+        extract_fragment_payload_to_disk(&tarball, workdir.path(), MountMaterialization::Skip)
+            .unwrap();
 
         let dir_path = workdir.path().join("tree/etc/empty-dir");
         let metadata = std::fs::metadata(&dir_path).unwrap();
@@ -1812,7 +1866,8 @@ description = "test fragment"
             ]);
 
             let workdir = tempfile::tempdir().unwrap();
-            extract_fragment_payload_to_disk(&tarball, workdir.path()).unwrap();
+            extract_fragment_payload_to_disk(&tarball, workdir.path(), MountMaterialization::Skip)
+                .unwrap();
             assert_eq!(
                 std::fs::read(workdir.path().join("tree/etc/app.conf")).unwrap(),
                 b"key=value\n",
