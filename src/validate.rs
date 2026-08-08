@@ -688,22 +688,43 @@ mod tests {
         // Deepened to "etc/pki/tls/..." to keep each case's intent (ancestor
         // collision; textual-prefix non-collision) without touching a
         // generator-reserved path.
-        let cases: &[(&[&str], &[&str], bool)] = &[
+        // The 4th element names the target path(s) the error must contain
+        // when the case collides, locking the spec's "collision errors name
+        // the shared/overlapping target" contract in place. Empty for the
+        // non-colliding cases, where there is no error to check.
+        type CollisionCase = (
+            &'static [&'static str],
+            &'static [&'static str],
+            bool,
+            &'static [&'static str],
+        );
+        let cases: &[CollisionCase] = &[
             // Identical targets.
             (
                 &["etc/pki/entitlement/a.pem"],
                 &["etc/pki/entitlement/b.pem"],
                 true,
+                &["/etc/pki/entitlement"],
             ),
             // One target is an ancestor of the other.
-            (&["etc/pki/tls/a.pem"], &["etc/pki/tls/mirror/b.pem"], true),
+            (
+                &["etc/pki/tls/a.pem"],
+                &["etc/pki/tls/mirror/b.pem"],
+                true,
+                &["/etc/pki/tls", "/etc/pki/tls/mirror"],
+            ),
             // Unrelated locations compose fine.
-            (&["etc/pki/entitlement/a.pem"], &["etc/rhsm/b.conf"], false),
+            (
+                &["etc/pki/entitlement/a.pem"],
+                &["etc/rhsm/b.conf"],
+                false,
+                &[],
+            ),
             // Sharing a textual prefix is not sharing a path.
-            (&["etc/pki/tls/a.pem"], &["etc/pkix/tls/b.pem"], false),
+            (&["etc/pki/tls/a.pem"], &["etc/pkix/tls/b.pem"], false, &[]),
         ];
 
-        for (first, second, collides) in cases {
+        for (first, second, collides, expected_paths) in cases {
             let fragments = vec![
                 mount_fragment_at("rhel-entitlement", first),
                 mount_fragment_at("internal-mirror", second),
@@ -724,6 +745,12 @@ mod tests {
                     err.contains("internal-mirror"),
                     "names both fragments: {err}"
                 );
+                for path in *expected_paths {
+                    assert!(
+                        err.contains(path),
+                        "names the colliding target {path}: {err}"
+                    );
+                }
             }
         }
     }
@@ -788,5 +815,23 @@ mod tests {
             mirror: None,
         }]);
         assert!(unattached_mount_notice(&selected, &fragments).is_none());
+
+        // No mount-carrying fragment at all: nothing to notice about,
+        // regardless of what the manifest installs.
+        let no_mounts = vec![test_fragment("plain", vec![], vec![])];
+        assert!(
+            unattached_mount_notice(&empty, &no_mounts).is_none(),
+            "no mount-carrying fragment means nothing to report"
+        );
+
+        // A package step driven by the fragment's own packages.required,
+        // not the manifest's per-entry selection, still emits the batched
+        // dnf RUN the mounts attach to, so the notice must stay silent.
+        let mut required_frag = mount_fragment_at("rhel-entitlement", &["etc/rhsm/rhsm.conf"]);
+        required_frag.fragment.packages.required = vec!["some-package".into()];
+        assert!(
+            unattached_mount_notice(&empty, &[required_frag]).is_none(),
+            "packages.required still drives a package step"
+        );
     }
 }
