@@ -38,17 +38,19 @@ non-empty decoy at `/run/secrets/etc-pki-entitlement` fails with
 The `/run/secrets` target also masks nothing the base needs, whereas mounting
 `/etc/rhsm` would mask `facts/` and `syspurpose/`.
 
-## Minimum viable set: five files
+## Minimum viable set: exactly four files
 
 ```
 mount/run/secrets/etc-pki-entitlement/<serial>.pem
 mount/run/secrets/etc-pki-entitlement/<serial>-key.pem
 mount/run/secrets/rhsm/rhsm.conf
 mount/run/secrets/rhsm/ca/redhat-uep.pem
-mount/run/secrets/rhsm/ca/redhat-entitlement-authority.pem
 ```
 
-`redhat.repo` is **not** required. The `subscription-manager` dnf plugin
+**Do not ship `redhat-entitlement-authority.pem`.** It sits next to
+`redhat-uep.pem` in the host dump and is unused by this path.
+
+`redhat.repo` is **not** required either. The `subscription-manager` dnf plugin
 regenerates it inside the image from the mounted entitlement, with the correct
 cert serial in `sslclientcert`. Shipping it also triggers the mount collapse
 described below.
@@ -59,12 +61,50 @@ Non-obvious members of the set:
   `repo_ca_cert` interpolation never resolves. The failure prints the raw
   `%(ca_cert_dir)sredhat-uep.pem` in a curl error, which does not look like a
   missing-config problem.
-- **The CA certs are required even though the base ships them** at
+- **`redhat-uep.pem` is required even though the base ships it** at
   `/etc/rhsm/ca/`. Once `in_container()` is True that path has been rewritten to
-  `/etc/rhsm-host/ca/`, so the base's copies are unreachable.
+  `/etc/rhsm-host/ca/`, so the base's copy is unreachable.
 
-Not yet isolated: whether `redhat-entitlement-authority.pem` is load-bearing.
-Only `redhat-uep.pem` appears in observed failures.
+### Which CA, precisely
+
+Isolated with four fragment variants differing only in `ca/`, on `rhel-bootc`,
+on a host whose `mounts.conf` targets all dangle:
+
+| `ca/` contents | Result |
+|---|---|
+| uep + authority | pass |
+| **uep only** | **pass** |
+| authority only | fail, `Curl error (77): Problem with the SSL CA cert` |
+| empty | fail, same error |
+
+`redhat-entitlement-authority.pem` is referenced by **no code anywhere** in the
+image (recursive grep over both `site-packages` trees and `/etc/rhsm` returns
+zero hits). The file that matters is named by a hardcoded default,
+`rhsm/config.py`'s `"repo_ca_cert": "%(ca_cert_dir)sredhat-uep.pem"`, consumed at
+`repolib.py:502` when writing each repo entry.
+
+The one path that could have used it never runs in a container: `ca_cert_dir` is
+a *directory* trust store for the Candlepin connection (`rhsm/connection.py:274`),
+and both the dnf plugin and `repolib.py:319` guard that connection with
+`not config.in_container()`. That short-circuits **regardless of
+`full_refresh_on_yum`**, so no setting brings the file back into play.
+
+**The durable rule** (correct for Satellite and mirrored setups too, where
+`repo_ca_cert` points at that infrastructure's own CA instead):
+
+> carry the entitlement cert, its key, `rhsm.conf`, and whatever file
+> `repo_ca_cert` in that `rhsm.conf` resolves to.
+
+### Two diagnostic facts from the same run
+
+- **`redhat.repo` generation does not depend on the CA.** All four variants
+  produced the full 182 sections, including the two that failed. A populated
+  `redhat.repo` plus curl 77 means the CA is missing; an *empty* `redhat.repo`
+  means the entitlement cert is the problem instead.
+- **`sslcacert` in the generated file is not evidence the CA exists.** Every
+  variant emitted `sslcacert = /etc/rhsm-host/ca/redhat-uep.pem`, including the
+  ones with no such file mounted. The value is copied from `repo_ca_cert`
+  unconditionally.
 
 ## The build host auto-injects `/run/secrets`, and it will contaminate a test
 
@@ -220,7 +260,17 @@ correctly. `cargo` may not be on PATH; it lives under
 Entitlement material is a private key. It must never enter the working tree, be
 staged, or be pushed to any remote, including quay.
 
-When cleaning up a host afterwards, `podman rmi` by tag is **not sufficient**: an
-untagged dangling layer can still hold the key. Verify with a filename search for
-the cert serial, and run the registry with **no volume** so its blobs die with
-the container.
+When cleaning up a host afterwards, `podman rmi` by tag is **not sufficient**, and
+neither is `podman image prune -f`. An image whose tag was removed keeps its
+repository name, shows as `repo:<none>`, is therefore not "dangling", survives
+the prune, and still holds the key. Remove those by **image ID**.
+
+Verify by filename search for the cert serial rather than by reading
+`podman images`:
+
+```bash
+find "$HOME" /tmp -name '<serial>*'
+find "$HOME/.local/share/containers/storage" -path '*fragment/mount*'
+```
+
+Run the test registry with **no volume** so its blobs die with the container.
