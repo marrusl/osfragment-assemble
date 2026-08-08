@@ -313,6 +313,54 @@ pub fn create_archive(dir: &Path) -> Result<PathBuf> {
     Ok(archive_path)
 }
 
+/// Refuse to write build-mount material into a self-contained context
+/// unless the user asked for it by name.
+///
+/// Self-contained output carries no registry references by design, so mount
+/// material cannot arrive as an inline `from=` and has to be materialized
+/// into the context and its sibling archive. That is a custody change rather
+/// than a packaging detail, which is why it is gated rather than noticed.
+pub fn check_mount_materialization(
+    dir: &Path,
+    fragments: &[LoadedFragment],
+    materialize_mounts: bool,
+) -> Result<()> {
+    if materialize_mounts {
+        return Ok(());
+    }
+
+    let mut landing: Vec<String> = Vec::new();
+    for loaded in fragments {
+        for point in &loaded.mount_points {
+            landing.push(format!(
+                "  {} (fragment '{}')",
+                dir.join(point.context_source(&loaded.fragment.name))
+                    .display(),
+                loaded.fragment.name
+            ));
+        }
+    }
+    if landing.is_empty() {
+        return Ok(());
+    }
+
+    bail!(
+        "--self-contained would write build-mount material into the build context. \
+         These paths would land on disk:\n{}\n\
+         and the same bytes would be copied into the sibling archive {}. Self-contained \
+         output carries no registry references, so mount material cannot arrive by \
+         reference and has to be materialized. Treat that as a custody change: the copy \
+         is durable, and git does not record file modes, so committing the context would \
+         publish owner-only material world-readable. If that is what you intend, re-run \
+         with --materialize-mounts, which writes the mount subtrees owner-only and adds a \
+         .gitignore covering fragments/*/mount/. Otherwise generate without \
+         --self-contained, where the material is mounted from a digest-pinned reference \
+         instead of being materialized into the context.",
+        landing.join("\n"),
+        archive_path_for(dir).display()
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -429,6 +477,80 @@ mod tests {
             has_mount_dir: false,
             drift_warning: None,
         }
+    }
+
+    fn mount_carrying_fragment(name: &str, mount_files: &[&str]) -> LoadedFragment {
+        let mut loaded = test_loaded_fragment(name);
+        let files: Vec<PathBuf> = mount_files.iter().map(PathBuf::from).collect();
+        loaded.mount_points =
+            crate::mount::derive_mount_points(name, &files).expect("fixture derives");
+        loaded
+    }
+
+    #[test]
+    fn self_contained_refuses_mount_material_without_the_flag() {
+        let fragments = vec![mount_carrying_fragment(
+            "rhel-entitlement",
+            &["etc/pki/entitlement/cert.pem"],
+        )];
+        let err = check_mount_materialization(Path::new("out"), &fragments, false)
+            .expect_err("materializing credential material is a custody change")
+            .to_string();
+
+        assert!(
+            err.contains("rhel-entitlement"),
+            "names the fragment: {err}"
+        );
+        assert!(
+            err.contains("out/fragments/rhel-entitlement/mount/etc/pki/entitlement"),
+            "names the exact path that would land on disk: {err}"
+        );
+        assert!(
+            err.contains("out.tar.gz"),
+            "names the sibling archive: {err}"
+        );
+        assert!(
+            err.contains("--materialize-mounts"),
+            "names the flag: {err}"
+        );
+        assert!(
+            err.contains("git"),
+            "leads with the custody change and the not-for-git warning: {err}"
+        );
+    }
+
+    #[test]
+    fn self_contained_proceeds_with_the_flag() {
+        let fragments = vec![mount_carrying_fragment(
+            "rhel-entitlement",
+            &["etc/pki/entitlement/cert.pem"],
+        )];
+        assert!(check_mount_materialization(Path::new("out"), &fragments, true).is_ok());
+    }
+
+    #[test]
+    fn a_composition_without_mount_material_is_never_gated() {
+        let fragments = vec![test_loaded_fragment("epel")];
+        assert!(check_mount_materialization(Path::new("out"), &fragments, false).is_ok());
+    }
+
+    #[test]
+    fn the_gate_names_every_offending_fragment_and_path() {
+        let fragments = vec![
+            mount_carrying_fragment("entitlement", &["etc/pki/entitlement/c.pem"]),
+            mount_carrying_fragment("mirror", &["etc/pki/tls/mirror/client.pem"]),
+        ];
+        let err = check_mount_materialization(Path::new("build/ctx"), &fragments, false)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("build/ctx/fragments/entitlement/mount/etc/pki/entitlement"),
+            "{err}"
+        );
+        assert!(
+            err.contains("build/ctx/fragments/mirror/mount/etc/pki/tls/mirror"),
+            "{err}"
+        );
     }
 
     /// Builds a minimal fragment layer tarball for tests that need to
