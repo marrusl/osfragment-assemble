@@ -11,8 +11,10 @@ the subject.
 Evidence base: a set of empirical runs performed 2026-08-08 on CentOS
 Stream 9 (SELinux enforcing, unsubscribed host, digest-pinned fragment
 served from that host's own registry) and on a macOS podman machine,
-recorded in `process-docs/skills/entitlement-build-mounts.md`, plus a
-trace of the current source. Behavioral claims below are of three
+extended 2026-08-09 with example-composition and matched-pair runs on
+a registered RHEL 10 host, all recorded in
+`process-docs/skills/entitlement-build-mounts.md`, plus a trace of the
+current source. Behavioral claims below are of three
 kinds, and each is labelled where it appears: measured in one of those
 runs, read from source, or inferred from a measured mechanism. Nothing
 is taken from vendor documentation.
@@ -49,18 +51,23 @@ and does not change for this convention.
 layer that owns authentication, and the builder commits none of it
 either way. The failure is contained, but it is not self-diagnosing,
 and this document does not claim otherwise. For instance one the
-failure has two forms: missing or wrong CA material produces a
-populated generated repo file and a TLS error that names the
-certificate problem (curl error 77), which is loud and diagnosable; a
-bad entitlement certificate produces an empty generated repo file and
-then a package-not-found error that names no credential at all. A
-placeholder entitlement certificate is the second kind by
-construction, so a composition built from the example fails in the
-mode that does not announce itself. (The evidence weights behind the
-two rows are given with the diagnostics in the instance-one section.)
-The fix is still a one-line `image:` swap in the manifest, but
-reaching it requires knowing the pairing convention, which is part of
-why decision 5 puts the signal on every surface a reader sees.
+failure has two forms, both measured. Missing or wrong CA material
+produces a populated generated repo file and a TLS error that names
+the certificate problem (curl error 77), which is loud and
+diagnosable. A bad entitlement certificate, which a placeholder is by
+construction, generates no repository file at all, and what the build
+prints then depends on the rest of the composition, measured across
+three compositions: when anything else enabled a repository (another
+fragment's repo file, or a base that ships one), the failure is
+package-not-found, the common case; when nothing did, on `rhel-bootc`
+whose `/etc/yum.repos.d/` ships empty, it is the louder error that no
+enabled repositories exist. The single-fragment case is not
+hypothetical; it is the shipped example manifest's own composition.
+Nothing in any case names a credential, a file, or a fragment, so the
+naming convention carries the whole diagnostic burden either way. The
+fix is still a one-line `image:` swap in the manifest, but reaching
+it requires knowing the pairing convention, which is part of why
+decision 5 puts the signal on every surface a reader sees.
 
 The refusal to validate needs stating carefully, because it is three
 refusals of different strength, and the original argument ran them
@@ -88,15 +95,31 @@ these credentials were never theirs. A wrong signal is worse than no
 signal, so the placeholder is obviously fake rather than plausibly
 stale.
 
+Placeholder construction is itself a design decision, and a measured
+crash settles it rather than taste. A placeholder written as ordinary
+prose between PEM markers can kill the build with a bare SIGSEGV,
+exit 139, no repository file, nothing named. Bisected to a single
+character: a colon anywhere in a PEM body crashes
+`rhsm.certificate.create_from_file` at `certificate2.py:106` in
+`python3-subscription-manager-rhsm-1.30.12-1.el10` (aarch64), with a
+65-byte reproducer requiring no entitlement, while `openssl x509`
+parses the same bytes cleanly, which places the fault in
+subscription-manager's C extension rather than in certificate
+handling generally. The convention therefore specifies the
+construction: a throwaway self-signed certificate, with any
+explanatory preamble kept colon-free. The behavior is recorded for an
+upstream report; this document describes it and asserts nothing
+beyond the description.
+
 **Cost.** The failure arrives at build time, not generation time.
 Generation treats example and live identically (there is no separate
 validation subcommand; the checks run as a phase of generation), so
 composing the wrong half is caught by dnf, minutes into a build,
 rather than by the tool, seconds into generation, and the error it is
 caught with does not name the placeholder. The failure signature is
-also scheme-dependent: instance one's two forms are in the record,
-other schemes' are not, and a hypothetical scheme that fails open
-would fail quietly, with nothing for the tool to notice.
+also scheme-dependent: instance one's two forms are measured, other
+schemes' are not, and a hypothetical scheme that fails open would
+fail quietly, with nothing for the tool to notice.
 
 ### 2. This is the general pattern, not an entitlement feature
 
@@ -317,9 +340,9 @@ build context and its sibling archive, where the live fragment would
 write real credential material durably to disk, which is exactly the
 custody change the tool's own gate warns about. Past that, the
 difference is the package-step failure placeholder material produces,
-stated honestly under decision 1: for instance one, an empty
-generated repo file and a package-not-found error, not a failure that
-names the credential.
+stated honestly under decision 1: for instance one, no generated
+repository file and a composition-dependent error, package-not-found
+in the common case, with nothing naming the credential.
 
 ## Instance one: RHEL subscription entitlement
 
@@ -345,17 +368,37 @@ set, and the parser rewrites `ca_cert_dir`, `repo_ca_cert`, and
 to the `-host` paths. The real paths stop being consulted, and the
 `repo_ca_cert` rewrite is the one the minimum-set section turns on.
 
-The decisive experiment: a build mounting a good entitlement at the
-real path `/etc/pki/entitlement`, plus a non-empty decoy at
+The decisive experiment was run twice, with increasing strength.
+First with a simulated decoy: a build mounting a good entitlement at
+the real path `/etc/pki/entitlement`, plus a non-empty decoy at
 `/run/secrets/etc-pki-entitlement`, fails with the fragment's material
 silently ignored: the decoy flips container mode, `entitlementCertDir`
 is redirected to the `-host` path, and the real-path mount is never
-consulted. That decoy condition is the expected standing state on a
-subscribed build host, an inference from the `mounts.conf` symlink
-chain below; no subscribed host was itself tested. The real-path
-model works in isolation and loses on exactly the hosts most likely to
+consulted. Then measured on a registered RHEL 10 host, where the
+standing condition is an enumeration rather than an inference from
+the `mounts.conf` symlink chain: the host's injection populates
+`/run/secrets/etc-pki-entitlement` with two entries, non-empty, and
+`in_container()` returns True. On that host a matched pair settles
+the target choice. The same fragment carrying the same placeholder,
+mounted at `/etc/pki/entitlement`, builds successfully, with the
+mounted material silently ignored in favor of the host's own
+credential; mounted at `/run/secrets/etc-pki-entitlement`, it fails,
+because the mount was consulted and shadowed the host. An `ls` inside
+the RUN shows the placeholder present at the target in both builds,
+so the difference is consultation, not delivery. The real-path model
+works in isolation and loses on exactly the hosts most likely to
 build RHEL images. `/run/secrets/` is the only target the host cannot
-override, so it is the target.
+override, so it is the target, and that is now a measurement rather
+than an argument.
+
+The same pair of hosts states the design's founding sentence as an
+experiment. One credential authenticated the same build twice:
+host-coupled on the registered machine through automatic injection,
+where a fragment mounting the real paths is not even consulted, and
+artifact-coupled on the unsubscribed machine through a digest-pinned
+fragment that is the only source there is. What the pair proves is
+that a host's own credential can be decoupled from that host; neither
+host alone shows it.
 
 ### The real-path model is baked into the shipped surfaces
 
@@ -445,6 +488,34 @@ example nor any public document carries a real one. The example's
 placeholder files use an obviously fake serial such as
 `0000000000000000.pem`.
 
+### What an entitled build commits, and whose property it is
+
+Measured with `podman image mount` on the committed filesystem, and
+the method is part of the finding: on a subscribed host `podman run`
+re-applies the host's injection and shows the host's files rather
+than the image's, so only an image mount answers this question. A
+plain entitled build using podman's automatic passthrough, with no
+fragment anywhere, commits `/etc/yum.repos.d/redhat.repo`: 98130
+bytes, 182 sections, 182 `sslclientcert` lines naming the entitlement
+serial, and no key material. The fragment path produces the same
+residue, byte-for-byte in size. The committed serial-bearing repo
+file is therefore the baseline behavior of every entitled build, not
+a cost this design introduces; the fragment matches the status quo
+exactly and adds nothing to it.
+
+A hook-side cleanup of that file was considered and is not viable,
+for a structural reason that outlives the question. Nothing the
+package step writes can be cleaned fragment-side: hooks execute in a
+later RUN, so a `rm` there writes a whiteout and the bytes remain
+recoverable in the package-step layer, the same layer mechanic
+`process-docs/skills/containerfile-layer-semantics.md` already
+records for `COPY` plus `RUN rm -rf`, and the same reason `mount/`
+exists at all. The only placement that keeps bytes out of the image
+is inside the generator-emitted RUN that created them, which is tool
+surface, not fragment surface. Given the baseline above, the cleanup
+was also unnecessary; the structural half is recorded because it
+generalizes to anything the package step writes.
+
 ### The confound any reproducer will hit
 
 `containers-common` ships a `mounts.conf` that injects
@@ -471,10 +542,13 @@ identically, with unequal evidence behind them:
 - Repo generation does not depend on the CA: all four CA-isolation
   variants produced a fully populated `redhat.repo`, including the two
   that failed. So a populated `redhat.repo` together with curl error
-  77 means the CA file is missing. The converse diagnostic, an empty
-  `redhat.repo` pointing at the entitlement certificate, rests on a
-  single observation (the clock-skew incident recorded with the runs)
-  and carries correspondingly less weight.
+  77 means the CA file is missing. The converse diagnostic is firmer
+  than first recorded, and different: a bad entitlement certificate
+  produces no `redhat.repo` at all, measured across three
+  compositions, so the check is `ls /etc/yum.repos.d`, and absent
+  means the entitlement. A present file with zero sections has been
+  observed exactly once, from a certificate not yet valid under a
+  skewed clock; that remains the single-observation case.
 - `sslcacert` in the generated output is copied from `repo_ca_cert`
   whether or not the file exists, so its presence in `redhat.repo` is
   not evidence the CA was mounted.
@@ -569,15 +643,20 @@ convention itself requires.
    for this, which is why the proposed format text below states the
    requirement as a rule rather than a suggestion.
 
-3. **A decoy at `/run/secrets/etc-pki-entitlement` silently defeats a
-   real-path mount.** The decoy build is measured. That the decoy
-   condition is the standing state on any subscribed build host is
-   inferred from the `mounts.conf` symlink chain; no subscribed build
-   host was itself tested. The chosen
-   `/run/secrets/` target avoids it for instance one; any future
-   instance whose consumer implements a similar host-redirect must be
-   traced the same way before its paths are documented, because the
-   failure produces no signal that a mount was ignored.
+3. **A real-path mount on a subscribed host is silently ignored.**
+   Measured twice: once with a simulated decoy, and once as a matched
+   pair on a registered RHEL 10 host, where the same placeholder
+   fragment mounted at `/etc/pki/entitlement` built successfully with
+   its material ignored in favor of the host's injected credential,
+   and mounted at `/run/secrets/etc-pki-entitlement` was consulted
+   and failed the build. The standing condition is enumerated, not
+   inferred: the subscribed host's injection populates
+   `/run/secrets/etc-pki-entitlement` non-empty, and container mode
+   is on. The chosen `/run/secrets/` target avoids it for instance
+   one; any future instance whose consumer implements a similar
+   host-redirect must be traced the same way before its paths are
+   documented, because the failure produces no signal that a mount
+   was ignored.
 
 4. **A stale `target/release` binary emits a Containerfile with no
    mount flags and exits zero.** The mount-free Containerfile and the
@@ -763,11 +842,16 @@ this design is approved. It is quoted here rather than applied.
 > same `mount/` section for both, and switching between them is a
 > one-line `image:` change in the manifest. Placeholder material does
 > not authenticate, and the failure does not name the placeholder: for
-> entitlement-style credentials a placeholder certificate produces an
-> empty generated repo file and a package-not-found error, while only
-> missing CA material fails with a TLS error that names a certificate.
-> Diagnosing a failed build therefore starts from which half of the
-> pair the manifest names, not from the error text.
+> entitlement-style credentials a placeholder certificate generates no
+> repository file, and the build then fails package-not-found when
+> anything else in the composition enabled a repository, or with a
+> no-enabled-repositories error when nothing did. Only missing CA
+> material fails with a TLS error that names a certificate. Diagnosing
+> a failed build therefore starts from which half of the pair the
+> manifest names, not from the error text. Construct placeholders to
+> be structurally inert: a throwaway self-signed certificate, with any
+> explanatory preamble kept free of colons, since at least one
+> consumer parser crashes outright on a colon between PEM markers.
 >
 > Naming carries the distinction, on both the fragment name and the
 > image repository. The example appends `-example` to the live
@@ -830,23 +914,12 @@ Stated plainly, so review can weigh confidence rather than guess it.
   auto-injection is RPM-family packaging, so an Ubuntu builder is
   expected to be the strictly simpler case with no host contribution
   at all, but that is an expectation, not a measurement.
-- **No subscribed build host was tested.** The decoy experiment
-  simulates the subscribed-host condition; that the condition actually
-  obtains on such hosts is inferred from the `mounts.conf` symlink
-  chain, which was measured only on unsubscribed machines.
 - **The isolation evidence spans two environments.** The cert, key,
   and `rhsm.conf` isolations ran on UBI 10 on the macOS podman
   machine; only the CA isolation ran on `rhel-bootc` on the CentOS
   Stream 9 host. The bases were measured to match on every consulted
   path, but the full subtraction ladder was not repeated on
   `rhel-bootc`.
-- **No example composition was built end to end.** The failure
-  signature stated for placeholder material in decision 1 is derived
-  from the recorded certificate-defect runs (entitlement absent, cert
-  without key, key without cert) and the clock-skew incident, not
-  from a build of an actual example fragment carrying placeholder
-  bytes. The two-row statement is the honest reading of that record;
-  a placeholder-bytes build has not itself been run.
 - **OpenShift on-cluster layering was not exercised for this
   convention.** The build-mounts spec records that entitlement
   fragments are unnecessary there; the remaining instances on that
