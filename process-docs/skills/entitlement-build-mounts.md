@@ -1,7 +1,15 @@
 # RHEL entitlement as a build mount
 
-Proven end to end 2026-08-08 against a live entitlement, on two builders and
-three base images. What follows is measured, not inferred, except where marked.
+Proven end to end 2026-08-08 and 2026-08-09 against a live entitlement, on two
+builders and three base images, including one registered RHEL host. What follows
+is measured, not inferred, except where marked.
+
+**Provenance of the test material, stated because it changes what was proven.**
+The entitlement used throughout is a registered RHEL host's own, extracted from
+that host. It was carried to an unsubscribed builder as a fragment and worked
+there. The claim that establishes is that a credential can be decoupled from the
+machine it belongs to and delivered as a pinned artifact. It is not a claim that
+one machine's credential was used across a fleet of others.
 
 ## The mount target is `/run/secrets/`, and the reason is control flow
 
@@ -302,51 +310,127 @@ which names nothing at all. **Placeholder entitlement material should be a
 syntactically valid throwaway self-signed certificate**, with any explanation in
 a colon-free preamble above the `BEGIN` line, where PEM readers ignore it.
 
-## What a placeholder actually fails with
+## What a placeholder actually fails with, and why the message varies
 
-Measured end to end, tool-generated Containerfile, digest-pinned example
-fragment, `rhel-bootc` base. A valid but non-entitlement certificate at the live
-paths produces exactly this, and nothing else:
+Measured end to end with tool-generated Containerfiles and a digest-pinned
+example fragment. A valid but non-entitlement certificate at the live paths
+**never generates a repository file at all**. What dnf then says depends on
+whether anything else in the build supplies one:
+
+| Composition | Base | Message |
+|---|---|---|
+| entitlement fragment alone | `rhel-bootc` | `Error: There are no enabled repositories in "/etc/yum.repos.d", ...` |
+| entitlement fragment + any repo-providing fragment | `rhel-bootc` | `No match for argument: <pkg>` / `Error: Unable to find a match: <pkg>` |
+| placeholder shadowing the host's injection | `ubi10/ubi` | `No match for argument: <pkg>` |
+
+Package-not-found is the general case. The louder message needs two conditions
+at once: the composition contributes no repo file, and the base ships none.
+`rhel-bootc`'s empty `/etc/yum.repos.d/` is what supplies the second, so this is
+not evidence about entitlement at all. Do not quote the louder message as *the*
+placeholder failure signature; the durable statement is **no repository file is
+generated**, checkable with `ls /etc/yum.repos.d`.
+
+The certificate itself parses: rhsm reads it as an `IdentityCertificate`, finds
+no entitlement, and generates nothing. Because repo generation never runs, the CA
+is never consulted, so a placeholder CA is never the reported cause. The CA can
+only be the reported problem when the entitlement is good.
+
+## Measured on a registered host, not inferred
+
+The earlier version of this file reasoned about subscribed build hosts from the
+`mounts.conf` symlink chain. Measured directly on RHEL 10.2,
+`containers-common-5.8-2.el10`, registered:
+
+During an ordinary build with no explicit mounts, podman injects
 
 ```
-Updating Subscription Management repositories.
-subscription-manager is operating in container mode.
-Error: There are no enabled repositories in "/etc/yum.repos.d", "/etc/yum/repos.d", "/etc/distro.repos.d".
+/run/secrets/etc-pki-entitlement/<serial>.pem      <- 2 entries, NON-EMPTY
+/run/secrets/etc-pki-entitlement/<serial>-key.pem
+/run/secrets/redhat.repo
+/run/secrets/rhsm/{rhsm.conf,ca/{redhat-uep,redhat-entitlement-authority}.pem}
+/run/secrets/rhsm/{facts/insights-client.facts,syspurpose/{syspurpose,valid_fields}.json}
 ```
 
-`/etc/yum.repos.d/` is empty afterwards. Not `No match for argument`, and not an
-empty `redhat.repo`. The certificate itself parses: rhsm reads it as an
-`IdentityCertificate`, finds no entitlement, and generates nothing.
+Both container-mode probes pass and `rhsm.config.in_container()` returns `True`.
+The non-empty clause is satisfied by the host, unasked, on every build.
 
-Because repo generation never runs, the CA is never consulted, so a placeholder
-CA is never the reported cause. The CA can only be the reported problem when the
-entitlement is good.
+**The decoy result is therefore real, and here it is as a matched pair.** One
+fragment, one placeholder certificate and key, two mount targets, everything else
+identical:
 
-## The built image carries the entitlement serial
+| Mount target | Build |
+|---|---|
+| `/etc/pki/entitlement` (the real path) | **succeeds** — the mount is silently ignored, the host's injection wins |
+| `/run/secrets/etc-pki-entitlement` | **fails** — the mount is consulted and shadows the host |
+
+`ls` inside both RUNs shows the placeholder files present at the target, so the
+mount happened either way. Only its effect differed. This is why `/run/secrets/`
+is the target: it is the only one the host cannot override.
+
+## The built image carries the entitlement serial, and always has
 
 The mount is not committed, but the `redhat.repo` the dnf plugin generates at
-build time is. Measured on an image built from a live entitlement fragment: 182
-sections, 182 lines of
-`sslclientcert = /etc/pki/entitlement-host/<serial>.pem`. `/etc/pki/entitlement`
-and `/run/secrets` are both empty in that image, so no key material, but the
-serial identifies the subscription and it persists in a layer. Strip or
-regenerate that file before publishing anything built this way.
+build time is: 98130 bytes, 182 sections, 182 lines of
+`sslclientcert = /etc/pki/entitlement-host/<serial>.pem`. No key material
+(`/etc/pki/entitlement` empty, `/run/secrets` absent), but the serial identifies
+the subscription and it persists in a layer. Strip or regenerate that file before
+publishing anything built this way.
 
-## Two digest sources for one image do not agree
+**This is not the fragment's doing.** An entitled build on a registered host with
+podman's automatic passthrough and no fragment anywhere commits the identical
+file, same byte size, same 182 serial-naming lines. Measured on both paths. A
+fragment that carried the credential is no worse than the status quo here.
 
-Measured with `rhel10/rhel-bootc:latest`, arm64, into the same local registry:
+**Verify committed content with `podman image mount`, never `podman run`.** On a
+subscribed host `podman run` re-applies the `/run/secrets` injection, so a
+listing of that path shows the host's files and tells you nothing about the
+image. `podman unshare bash -c 'm=$(podman image mount <img>); ls -A "$m/run/secrets"'`
+reads the layers.
 
-| Path in | Manifest digest |
-|---|---|
-| `skopeo copy` from `registry.redhat.io` | `sha256:3f693b10...` |
-| `podman push` from local storage | `sha256:8bf0a283...` |
+**Deleting it from a hook does not work.** Hooks run in their own `RUN`, after the
+package `RUN` that wrote the file, so `rm` writes a whiteout and the bytes stay
+recoverable in the earlier layer. Only a removal inside the RUN that created the
+file keeps the bytes out, and that RUN is generator-emitted. See
+`containerfile-layer-semantics.md`.
 
-Same content, both `application/vnd.oci.image.manifest.v1+json`. The source is an
-OCI index; skopeo copies the selected child manifest verbatim while podman
-regenerates one from its own store. Fragment images built by `podman build` and
-pushed by `podman push` kept their digest across a registry wipe and re-push, so
-the divergence is between transports, not between pushes. This matters to any
-future work that lets a manifest pin a digest read from local storage.
+## A local digest is not a registry digest, and the cause is recompression
+
+`skopeo copy` is byte-faithful: registry to registry, the destination digest
+equals the source manifest's digest exactly. Verified against
+`rhel10/rhel-bootc:latest`'s arm64 child and again by copying `ubi10/ubi` into a
+`dir:` destination and hashing the result.
+
+`podman push` is not, and it is not a format question. Pushing the same image
+from local storage published a different manifest digest, and comparing the two
+manifests directly: same byte length, same media type, same annotations,
+**identical config digest**, and **65 of 66 layer digests different**, each pushed
+layer slightly larger. An identical config digest means identical diffIDs, so the
+content is the same and only the compressed blobs differ. Local storage does not
+keep compressed layer bytes, so every push re-gzips and mints new blob digests.
+
+`--format` does not fix it. Default and `--format oci` produce one digest,
+`--format v2s2` another, and neither reproduces the upstream one. And `skopeo copy`
+*from* the local registry reproduces podman's digest, because skopeo faithfully
+copies whatever its source holds. The transports agree; the rewrite happens on the
+way out of local storage.
+
+**The rule, measured on a throwaway image:**
+
+```
+built here, never pushed      local    sha256:d81a6237...
+after podman push             registry sha256:a091884a...   <- different
+podman rmi, then pull back    local    sha256:a091884a...   <- local now matches
+re-push that pulled copy      registry sha256:a091884a...   <- stable
+```
+
+`skopeo inspect containers-storage:` agrees with `podman image inspect` at every
+step. So a local image has one digest whose meaning depends on provenance: for an
+image **built** here it is not what a registry will assign; for an image **pulled**
+here it is. Take a pin from the registry, never from `podman image inspect`.
+
+This is the gating constraint on any future `containers-storage:` fragment source:
+a digest read from local storage for a freshly built fragment is one nobody else
+can resolve, and the mandatory pin rule would be satisfied by a wrong string.
 
 ## Local registry that survives a reboot
 

@@ -63,17 +63,28 @@ the material is real, and add it back for any published example.
 
 ## What failure looks like
 
-Building against this example reaches the package step and stops there:
+Building against this example reaches the package step and stops there. The
+durable part is that **no repository file is generated at all**: subscription
+manager enters container mode, reads a certificate that carries no entitlement,
+and writes nothing to `/etc/yum.repos.d/`.
+
+What dnf then reports depends on whether anything else in the composition
+supplies a repository. In most compositions it is a missing package:
 
 ```
 Updating Subscription Management repositories.
 subscription-manager is operating in container mode.
-Error: There are no enabled repositories in "/etc/yum.repos.d", "/etc/yum/repos.d", "/etc/distro.repos.d".
+No match for argument: rhel-system-roles
+Error: Unable to find a match: rhel-system-roles
 ```
 
-No repository file is generated at all, and nothing in that output names the
-placeholder. Diagnosing a failed build therefore starts from which half of the
-pair the manifest names, not from the error text.
+If this fragment is the only one in the composition and the base ships no
+repository files of its own, as `rhel-bootc` does not, the message is instead
+`Error: There are no enabled repositories in "/etc/yum.repos.d", ...`.
+
+Nothing in either output names the placeholder. Diagnosing a failed build
+therefore starts from which half of the pair the manifest names, not from the
+error text.
 
 ## Editing the placeholder files
 
