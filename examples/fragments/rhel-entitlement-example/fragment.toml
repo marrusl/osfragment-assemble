@@ -1,0 +1,5 @@
+[fragment]
+name = "rhel-entitlement-example"
+version = "1"
+description = "Placeholder entitlement material at the live paths; authenticates nothing"
+vendor = "osfragment-assemble examples"

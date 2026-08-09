@@ -1,0 +1,27 @@
+apiVersion: osfragment/v1alpha1
+kind: Composition
+
+# A RHEL base, paired with a RHEL entitlement fragment. The pairing matters: the
+# entitlement authorizes content, and the product certificate the RHEL base ships
+# at /etc/pki/product-default/ is what maps that content onto enabled
+# repositories. A CentOS base carries no product certificate, so the same
+# fragment mounts correctly, enters container mode, and enables nothing.
+base: registry.redhat.io/rhel10/rhel-bootc:latest
+
+# The fragment carries mount/ material, so its entry is pinned by digest.
+#
+# This digest is the example fragment built from
+# examples/fragments/rhel-entitlement-example/, which ships placeholder files at
+# the live paths and authenticates nothing. Build the fragment against your own
+# entitlement material, publish it to a registry you control, and re-pin:
+#
+#   podman build -f Containerfile.fragment -t <your-registry>/rhel-entitlement:1 .
+#   podman push <your-registry>/rhel-entitlement:1
+#   skopeo inspect docker://<your-registry>/rhel-entitlement:1 --format '{{.Digest}}'
+#
+# The live half drops the -example suffix from both the fragment name and the
+# repository, so a manifest entry says which half it names even though a pinned
+# reference shows no tag.
+fragments:
+  - image: quay.io/marrusl2/fragments/rhel-entitlement-example@sha256:5d876bd0ea54a7ba18ddeacbc90760c305dbe43c988b2df8363046e7fa59600f
+    packages: [rhel-system-roles]
