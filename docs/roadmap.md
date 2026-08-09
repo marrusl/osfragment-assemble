@@ -100,8 +100,6 @@ first, then coverage.
 
 Individually minor, collectively the surface someone else has to learn.
 
-- Replace the bespoke rejected-key mechanism with serde's unknown-field
-  denial. Two tracked halves of one change, to be decided together.
 - Validate or drop the manifest `apiVersion` field. Any string currently
   parses silently, including retired ones.
 - A generation mode enum replacing the boolean pair that distinguishes
@@ -117,17 +115,11 @@ Individually minor, collectively the surface someone else has to learn.
 ## The OpenShift on-cluster path
 
 Emitting a MachineOSConfig for on-cluster builds is a requirement the rest of
-the ecosystem does not carry. Everything here that verifies needs a live
-cluster; the two API-schema fixes do not.
+the ecosystem does not carry. The v1 API migration and the architecture
+casing fix shipped; what remains needs a design decision or a live cluster.
 
-- Migrate the emitted MachineOSConfig from v1alpha1 to v1. Current clusters
-  reject the alpha form; this is the blocking item for the track.
-- Emit the architecture value with the casing the v1 API requires.
 - Design for the 4096-character ceiling on the MachineOSConfig Containerfile
   field. An eight-fragment composition already sits near the wall.
-- A declared non-bootc base combined with on-cluster output emits two
-  divergent artifacts from one invocation. A semantics decision rather than
-  a bug.
 - Confirm a live on-cluster build accepts the current hook mount form.
 
 ## Examples and documentation
