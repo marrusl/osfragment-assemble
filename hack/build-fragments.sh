@@ -193,8 +193,10 @@ build_arch_specific() {
     # Drop any stale local list so a re-run starts from a clean manifest.
     podman manifest rm "${ref}" 2>/dev/null || true
     podman manifest create "${ref}"
-    podman manifest add "${ref}" "containers-storage:${name}-amd64"
-    podman manifest add "${ref}" "containers-storage:${name}-arm64"
+    # podman stores `-t <name>-<arch>` as localhost/<name>-<arch>:latest; the
+    # containers-storage transport needs that full name, not the short tag.
+    podman manifest add "${ref}" "containers-storage:localhost/${name}-amd64:latest"
+    podman manifest add "${ref}" "containers-storage:localhost/${name}-arm64:latest"
 
     echo "==> ${name}: annotating index"
     annotate_index "${ref}" "${dir}/fragment.toml"
