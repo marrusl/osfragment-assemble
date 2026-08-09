@@ -135,15 +135,24 @@ Deliberately excluded from the sweep:
 
 - The four user-facing strings in source (`src/mount.rs:80`,
   `src/mount.rs:169`, `src/mount.rs:214`, `src/validate.rs:232`).
-  They are tool surface, and they are tracked as their own change
-  with its own review. The design recorded a single sweep covering
-  docs and error text together; that scope was since split, and this
-  spec carries the documentation half only.
+  They are tool surface, carried on the public roadmap
+  (`docs/roadmap.md`) as their own change with its own review. The
+  design recorded a single sweep covering docs and error text
+  together; that scope was since split, and this spec carries the
+  documentation half only.
 - `process-docs/` content (the build-mounts spec, skills files). Specs
   are point-in-time records under the documentation authority order,
   not teaching surfaces, and are not edited to track later knowledge.
 - Test code in `src/`, which exercises real-path fixtures as data.
   Tests are not a teaching surface.
+
+One adjacent drift fix rides the same edit to
+`docs/fragment-format.md`: line 49 claims the `description` field is
+"Displayed by `inspect` and `list`", and neither command prints it
+(verified against `src/inspect.rs` and `src/list.rs`; the field
+appears only in test fixtures). The sweep replaces the claim with what
+is true of the field. It is folded in because the same file is being
+edited and the drift has been recorded before without landing.
 
 ## Deliverable 3: the README example index
 
@@ -152,7 +161,11 @@ The example-fragments list in `README.md` gains an entry for
 corrected. The entry's one-line description must carry the placeholder
 assertion rather than presenting the fragment as ready to use: it
 ships placeholder material at the live paths and authenticates
-nothing. Per the documentation authority order, whoever edits the
+nothing. The sentence carrying the count currently reads "contains 10
+ready-to-use fragments"; the same edit drops the ready-to-use framing
+(for example, "contains 11 example fragments"), because a corrected
+count under the old framing would introduce, as ready to use, an entry
+whose description says it is not. Per the documentation authority order, whoever edits the
 README checks `docs/fragment-format.md` for the same facts, and this
 spec's deliverables 1 and 2 are the counterpart of that check.
 
@@ -174,6 +187,13 @@ them, and any future edit to them, to the convention:
   registry custody rule, the failure signature (no repository file is
   generated, and the error text varies by composition without naming
   the placeholder), and the colon rule.
+- The example's README states the fourth required file by role, as
+  whatever `repo_ca_cert` in the shipped `rhsm.conf` resolves to, and
+  names Satellite and proxied configurations as cases that resolve it
+  elsewhere. `redhat-uep.pem` appears only as the stock CDN-direct
+  resolution, never as the rule. The design states the minimum set by
+  role rather than by filename, and this criterion is what keeps a
+  future edit from collapsing the role back into a filename.
 - The manifest's comments record why the base must be a RHEL base
   (the product certificate) and how to build, publish, and re-pin the
   live half.
@@ -192,36 +212,50 @@ them, and any future edit to them, to the convention:
    directories deriving a single mount.
 4. The example-fragments list in `README.md` includes
    `rhel-entitlement-example`, its count matches the number of entries
-   in `examples/fragments/`, and its description states that the
-   material is placeholder and authenticates nothing.
-5. `osfragment-assemble inspect examples/fragments/rhel-entitlement-example/`
-   derives exactly two mount targets, `/run/secrets/etc-pki-entitlement`
-   and `/run/secrets/rhsm`.
-6. `grep -c ":" ` over each `.pem` file under the example's `mount/`
-   returns zero.
+   in `examples/fragments/`, its description states that the material
+   is placeholder and authenticates nothing, and the sentence carrying
+   the count no longer describes the set as ready to use.
+5. `./target/release/osfragment-assemble inspect
+   examples/fragments/rhel-entitlement-example/`, with the binary
+   built from current HEAD, derives exactly two mount targets,
+   `/run/secrets/etc-pki-entitlement` and `/run/secrets/rhsm`.
+6. `! grep -q ":" <file>` succeeds for each `.pem` file under the
+   example's `mount/`. (Stated in this polarity so the check exits
+   zero exactly when the criterion is met.)
 7. A reader holding only `docs/fragment-format.md` and the example
    directory can author both halves of a pair: the landed subsection
    states the pairing, the exact-paths rule, the suffix rule on both
    fields, the placeholder construction rule, the pin requirement on
    both halves, and the registry custody rule, and the example
    exhibits each of them.
+8. `docs/fragment-format.md` no longer claims the `description` field
+   is displayed by `inspect` or `list`, and what it says about the
+   field instead is true of the current commands.
+9. The three tool-side exclusions named under Out of scope (the four
+   source strings, generation-time mount-target reporting, and local
+   container storage as a fragment source) each appear as an entry on
+   `docs/roadmap.md`.
 
 ## Out of scope
 
 Named so nothing here reads as forgotten. Each item is deliberate, and
-each has its own home.
+each names its home: a design section for the settled matters, and the
+public roadmap (`docs/roadmap.md`) for the work that continues
+elsewhere.
 
 - **Any tool change.** Structural validation of `mount/` contents was
   considered in the design (decision 1) and not taken. There is no
   flag, no new subcommand, no annotation work.
 - **The four real-path source strings** (`src/mount.rs:80`, `:169`,
-  `:214`, `src/validate.rs:232`). Tracked as their own change with
-  its own review; see deliverable 2.
-- **Generation-time reporting of derived mount targets.** The chosen
-  mitigation for the design's silent-failure item 1, the moved mount
-  root. It is a tool change and is tracked separately.
-- **Local container storage as a fragment source.** Tracked
-  separately; it revisits how the digest pin is computed, and this
+  `:214`, `src/validate.rs:232`). Carried on the roadmap as their own
+  change with its own review; see deliverable 2.
+- **Generation-time reporting of derived mount targets.** A mitigation
+  for the design's silent-failure item 1, the moved mount root. The
+  design itself proposes no mechanism changes for the silent-failure
+  cluster; the selection of this fix postdates it and is recorded on
+  the roadmap. It is a tool change and is not part of this spec.
+- **Local container storage as a fragment source.** Carried on the
+  roadmap; it revisits how the digest pin is computed, and this
   convention takes the pin rule exactly as the build-mounts spec
   states it.
 - **Hook-phase mounts.** Left open by the design ("Where mounts
