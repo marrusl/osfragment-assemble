@@ -136,11 +136,50 @@ permanently. Putting a repo definition in `mount/` would make it
 vanish from the built image, breaking day-2 updates on the deployed
 system.
 
-**Cost.** Authors must understand the split; a credential misplaced
-into `tree/` builds successfully and leaks. The tool does not police
-the boundary, because deciding which bytes are credentials is content
-inspection, and the tool does not inspect content. The masking
-semantics also differ: `COPY tree/ /` merges, a bind mount shadows its
+The split has a deliberate escape hatch, and it is not a flag. An
+author who wants credential material persisted in the image places it
+under `tree/` and takes custody of the consequence by that placement:
+`tree/` is already the persistence primitive, so the capability
+exists without any new tool surface. There is explicitly no opt-in
+flag for persisting `mount/` material; a flag's only function would
+be making the anti-pattern ergonomic, and it would duplicate what
+placement already expresses.
+
+The day-2 question, what a deployed host uses once the build-time
+mount is gone, resolves differently per instance, and is stated here
+rather than left for a reader to discover. Instance one resolves
+through in-image registration: the `rhel10/rhel-bootc` image ships
+`rhc`, `subscription-manager`, and `insights-client` (verified
+against that image's manifest, not asserted of RHEL generally;
+`centos-bootc:stream10` also carries `rhc`), so the image carries no
+credential but carries the acquirer, driven at provision time with an
+activation key, a lower-value fleet-scale credential exchanged per
+host for host-scoped certificates. The build-time symlink plumbing
+plays no part in that story: on a booted host `/run/secrets` is
+unpopulated, the container-mode test fails, and subscription-manager
+runs in host mode against the real paths. The generic mirror case
+resolves through provision-time placement into `/etc`, referenced
+from the `tree/` repo file; bootc ships no single opinionated secrets
+mechanism, and its own `building/secrets` documentation reserves
+machine-local `/etc` and `/var` for exactly this and names the
+bootstrap-secret pattern. Mirror mTLS with no provisioning
+infrastructure at all is a stated limit of the convention, not a
+feature to build.
+
+One category refinement keeps the instances from flattening into a
+single kind: a proxy CA bundle is not a secret. It is public trust
+material, and it can legitimately ride `tree/` and persist in the
+image; it appears among the `mount/` instances because a shop may
+prefer not to bake a proxy's CA into every image, not because
+confidentiality demands the mount.
+
+**Cost.** Authors must understand the split; a credential accidentally
+placed in `tree/` builds successfully and leaks. The tool does not
+police the boundary, because deciding which bytes are credentials is
+content inspection, and the tool does not inspect content, so the
+escape hatch above is the same act performed deliberately and nothing
+in the artifact distinguishes intent. The masking semantics also
+differ: `COPY tree/ /` merges, a bind mount shadows its
 target directory, so moving a file between the halves changes more
 than persistence.
 
@@ -445,8 +484,15 @@ identically, with unequal evidence behind them:
 The build-mounts spec pinned mount-carrying fragments for a trust
 reason: a movable tag on an artifact that injects trust material is an
 invisible substitution point. The empirical work adds a second,
-independent argument, and it is the stronger one because it is
-mechanical and assumes no adversary.
+independent argument. The two cover disjoint failure classes rather
+than ranking against each other: the trust argument covers adversarial
+tag movement, the mechanical argument covers accidental staleness, and
+which one is load-bearing depends on the builder. On a long-lived
+builder with populated local storage, staleness is the live hazard; on
+an ephemeral CI builder, local storage is empty, nothing stale exists
+to shadow anything, and the mechanical argument is vacuous exactly
+there while the trust argument is untouched. Neither dominates, both
+are needed, and the pin is the single control that serves both.
 
 At build time, `RUN --mount=from=<ref>` resolves against local storage
 first and contacts the registry on a miss. That sentence packs three
@@ -469,8 +515,8 @@ repository's own recorded 2026-08-04 incident
 `grafana:11.0` shadowed the good published fragment and produced an
 exit-127 failure. A digest reference closes that hazard, and this step
 is reasoning from the mechanism rather than a measurement: local
-storage is content-addressed, so a local hit on `@sha256:X` is by
-definition the bytes the registry would have served. For the one
+storage is content-addressed, so a local hit on `@sha256:X` resolves
+to the same bytes the registry would have served. For the one
 fragment class where stale trust material is the worst possible
 substitution, the pin rule closes the hazard as a side effect of its
 trust purpose.
@@ -490,7 +536,7 @@ private registry.
 
 ## The silent-failure cluster
 
-Five ways to be wrong with no signal, all in the path that carries
+Six ways to be wrong with no signal, all in the path that carries
 credentials. They are named here precisely so review can weigh them;
 this document proposes no mechanism changes for them beyond what the
 convention itself requires.
@@ -559,13 +605,28 @@ convention itself requires.
    fails silently is the survey surface a consumer would use to ask
    which fragments mount material.
 
+6. **A RHEL entitlement paired with a CentOS base produces the same
+   symptom with nothing wrong in the mechanism.** Measured: on
+   `centos-bootc:stream10` the same fragment enters container mode,
+   `redhat.repo` is written, zero RHEL repositories come up enabled,
+   and the install fails package-not-found. The gap is the product
+   certificate, which maps entitlement content sets onto enabled
+   repositories; the CentOS base ships none, and the mount plumbing
+   works identically on both bases. Unlike the other five, this one
+   is not the mechanism's fault, and a user picks their base
+   knowingly, so it gets no warning prose in user-facing docs; a
+   correct example manifest is the instrument for it. It earns its
+   line here because at debugging time the symptom is
+   indistinguishable from the other five: a correct-looking build
+   failing package-not-found, with no message naming the actual gap.
+
 ## Limits, stated as boundaries
 
 Three boundaries of the design, not defects discovered later. The
 first two are limits of what the mechanism can express, stated so the
-acceptance test in decision 7 has explicit edges; the third is a
-limit of what deletion achieves on a builder that has pulled the live
-half.
+acceptance test in decision 7 has explicit edges; the third is
+builder-side custody: what persists on a builder that has pulled the
+live half, and what label those bytes wear.
 
 1. **Environment-variable authentication cannot be expressed.**
    Derivation is presence-based on files; no file means no mount
@@ -587,20 +648,34 @@ half.
    instance whose credential path sits inside a load-bearing directory
    has no clean expression today.
 
-3. **Deleting a pulled live fragment does not remove its bytes.**
-   Measured twice in the evidence base, both times the hard way:
-   after `podman rmi` by tag, the image survives as `repo:<none>`,
-   still holding the credential material; it retains a repository
-   name, so it is not "dangling" and `podman image prune -f` does not
-   remove it either. Removal requires the image ID, and verification
-   requires a filename search of the storage tree rather than reading
-   `podman images`. Decision 4 governs who can pull the live
+3. **Builder-side custody: the resident bytes, and their label.**
+   Two facts about any builder that has pulled the live half, stated
+   as facts about the mechanism and no further. First, deletion does
+   not do what it looks like. Measured twice in the evidence base,
+   both times the hard way: after `podman rmi` by tag, the image
+   survives as `repo:<none>`, still holding the credential material;
+   it retains a repository name, so it is not "dangling" and
+   `podman image prune -f` does not remove it either. Removal
+   requires the image ID, and verification requires a filename search
+   of the storage tree rather than reading `podman images`. Second,
+   the resident bytes wear a shared label. Build mounts are emitted
+   `ro,z`, and `z` applies a shared container SELinux label to the
+   fragment's content in local storage, readable by any container of
+   the shared container type on that builder. `z` rather than `Z` is
+   deliberate: `Z` would relabel files on a self-contained build,
+   where the mount source is a materialized directory in the user's
+   own build context, stamping a private per-container category onto
+   files the user owns, permanently, a known podman footgun rather
+   than a theoretical concern. Nor can the option be split by mode:
+   `MountPoint::mount_flag` (`src/mount.rs:116`) owns the flag's byte
+   format in exactly one place for both emission forms, deliberately,
+   so they cannot drift; one flag serves two source kinds, and `Z` is
+   wrong for one of them. Decision 4 governs who can pull the live
    fragment; nothing in this design governs what persists on a
-   builder after someone believes they deleted it, and the
-   never-committed guarantee does not cover it, because the residue
-   lives in the builder's image store, not in a committed layer. This
-   is a boundary, stated so it is not mistaken for a guarantee; a
-   custody solution is out of scope by decision 6.
+   builder afterwards or how it is labelled, and the never-committed
+   guarantee does not cover it, because the residue lives in the
+   builder's image store, not in a committed layer. What anyone
+   should do about any of this is custody, out of scope by decision 6.
 
 ## Where mounts attach: a decision left open
 
