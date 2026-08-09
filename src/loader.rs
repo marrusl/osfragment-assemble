@@ -659,10 +659,14 @@ fn fragment_from_layers(layer_bytes_list: &[Vec<u8>]) -> Result<LayeredMetadata>
     let mut all_mount_files: Vec<PathBuf> = Vec::new();
 
     for layer_bytes in layer_bytes_list {
-        if fragment.is_none() {
-            if let Ok(toml_content) = extract_fragment_toml_from_bytes(layer_bytes) {
-                fragment = Some(parse_fragment_toml(&toml_content)?);
-            }
+        // Last-wins, consistent with the entrypoint merge below: layers
+        // arrive bottom-first, so the topmost (most-derived) layer's
+        // fragment.toml wins. A fragment derived from another fragment
+        // therefore publishes its own name, version, and packages rather
+        // than the base's, matching the derive-and-republish workflow in
+        // docs/rationales.md.
+        if let Ok(toml_content) = extract_fragment_toml_from_bytes(layer_bytes) {
+            fragment = Some(parse_fragment_toml(&toml_content)?);
         }
 
         let entries = extract_layer_entries(layer_bytes)?;
@@ -1238,6 +1242,54 @@ description = "test fragment"
         ]);
         let result = extract_fragment_toml_from_bytes(&tarball);
         assert!(result.is_err());
+    }
+
+    /// A fragment derived from another fragment publishes its own identity.
+    ///
+    /// Layers arrive bottom-first, so the base fragment's `fragment.toml` is
+    /// encountered before the derived one's. The merge must be last-wins,
+    /// matching the entrypoint merge, so the topmost (most-derived) layer's
+    /// name, version, and packages win. First-wins would republish the base
+    /// vendor's identity, breaking the derive-and-republish workflow in
+    /// docs/rationales.md.
+    #[test]
+    fn derived_fragment_publishes_its_own_identity_not_the_base() {
+        let base_toml: &[u8] = br#"[fragment]
+name = "base-fragment"
+version = "1.0"
+description = "the base a consumer derives from"
+
+[fragment.packages]
+required = ["base-pkg"]
+"#;
+        let derived_toml: &[u8] = br#"[fragment]
+name = "derived-fragment"
+version = "2.0"
+description = "the consumer's own republished fragment"
+
+[fragment.packages]
+required = ["derived-pkg"]
+"#;
+        // Bottom-first: base layer, then the derived layer on top.
+        let layers = vec![
+            create_test_tarball(&[("fragment/fragment.toml", base_toml)]),
+            create_test_tarball(&[("fragment/fragment.toml", derived_toml)]),
+        ];
+
+        let metadata = fragment_from_layers(&layers).expect("a derived fragment loads");
+        assert_eq!(
+            metadata.fragment.name, "derived-fragment",
+            "the derived fragment must publish its own name, not the base's"
+        );
+        assert_eq!(
+            metadata.fragment.version, "2.0",
+            "the derived fragment must publish its own version, not the base's"
+        );
+        assert_eq!(
+            metadata.fragment.packages.required,
+            vec!["derived-pkg"],
+            "the derived fragment must publish its own packages, not the base's"
+        );
     }
 
     #[test]
