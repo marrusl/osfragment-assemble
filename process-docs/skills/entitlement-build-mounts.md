@@ -99,8 +99,15 @@ and both the dnf plugin and `repolib.py:319` guard that connection with
 
 - **`redhat.repo` generation does not depend on the CA.** All four variants
   produced the full 182 sections, including the two that failed. A populated
-  `redhat.repo` plus curl 77 means the CA is missing; an *empty* `redhat.repo`
-  means the entitlement cert is the problem instead.
+  `redhat.repo` plus curl 77 means the CA is missing.
+- **Three states of `redhat.repo`, three different causes.** Populated means the
+  entitlement parsed and carried content sets, so any failure past that point is
+  CA or network. Written but with zero sections means the certificate parsed and
+  is not currently valid: that is the clock-skew signature below, where
+  `notBefore` had not arrived. **Absent** means the certificate did not carry an
+  entitlement at all, which is what a placeholder produces. Check with
+  `ls /etc/yum.repos.d`, and note that absent looks identical to the base image's
+  own shipped state, so it reads as "unchanged" rather than "broken".
 - **`sslcacert` in the generated file is not evidence the CA exists.** Every
   variant emitted `sslcacert = /etc/rhsm-host/ca/redhat-uep.pem`, including the
   ones with no such file mounted. The value is copied from `repo_ca_cert`
@@ -262,6 +269,115 @@ All three vanished after `cargo build --release`. The doubled digest is not a
 correctly. `cargo` may not be on PATH; it lives under
 `~/.rustup/toolchains/<toolchain>/bin/`.
 
+## A colon in a placeholder PEM segfaults subscription-manager
+
+Measured 2026-08-09 on `rhel-bootc` 10.2, aarch64,
+`python3-subscription-manager-rhsm-1.30.12-1.el10`. A PEM file whose body
+contains a colon crashes `rhsm.certificate.create_from_file` with SIGSEGV, at
+`rhsm/certificate2.py:106`, `_certificate.load(path)`. Minimal reproducer, no
+entitlement required:
+
+```
+-----BEGIN CERTIFICATE-----
+a
+b
+c
+d: e
+-----END CERTIFICATE-----
+```
+
+Colon anywhere in the body: SIGSEGV. Colon absent: clean Python exception, exit
+1. `openssl x509` on the same bytes exits 1 either way, so this is
+subscription-manager's C extension, not OpenSSL.
+
+The consequence for build mounts: a placeholder certificate written as prose
+between PEM markers is one ordinary English sentence away from turning a
+diagnosable build failure into
+
+```
+while running runtime: exit status 139
+```
+
+which names nothing at all. **Placeholder entitlement material should be a
+syntactically valid throwaway self-signed certificate**, with any explanation in
+a colon-free preamble above the `BEGIN` line, where PEM readers ignore it.
+
+## What a placeholder actually fails with
+
+Measured end to end, tool-generated Containerfile, digest-pinned example
+fragment, `rhel-bootc` base. A valid but non-entitlement certificate at the live
+paths produces exactly this, and nothing else:
+
+```
+Updating Subscription Management repositories.
+subscription-manager is operating in container mode.
+Error: There are no enabled repositories in "/etc/yum.repos.d", "/etc/yum/repos.d", "/etc/distro.repos.d".
+```
+
+`/etc/yum.repos.d/` is empty afterwards. Not `No match for argument`, and not an
+empty `redhat.repo`. The certificate itself parses: rhsm reads it as an
+`IdentityCertificate`, finds no entitlement, and generates nothing.
+
+Because repo generation never runs, the CA is never consulted, so a placeholder
+CA is never the reported cause. The CA can only be the reported problem when the
+entitlement is good.
+
+## The built image carries the entitlement serial
+
+The mount is not committed, but the `redhat.repo` the dnf plugin generates at
+build time is. Measured on an image built from a live entitlement fragment: 182
+sections, 182 lines of
+`sslclientcert = /etc/pki/entitlement-host/<serial>.pem`. `/etc/pki/entitlement`
+and `/run/secrets` are both empty in that image, so no key material, but the
+serial identifies the subscription and it persists in a layer. Strip or
+regenerate that file before publishing anything built this way.
+
+## Two digest sources for one image do not agree
+
+Measured with `rhel10/rhel-bootc:latest`, arm64, into the same local registry:
+
+| Path in | Manifest digest |
+|---|---|
+| `skopeo copy` from `registry.redhat.io` | `sha256:3f693b10...` |
+| `podman push` from local storage | `sha256:8bf0a283...` |
+
+Same content, both `application/vnd.oci.image.manifest.v1+json`. The source is an
+OCI index; skopeo copies the selected child manifest verbatim while podman
+regenerates one from its own store. Fragment images built by `podman build` and
+pushed by `podman push` kept their digest across a registry wipe and re-push, so
+the divergence is between transports, not between pushes. This matters to any
+future work that lets a manifest pin a digest read from local storage.
+
+## Local registry that survives a reboot
+
+Rootless Quadlet, verified across an actual reboot:
+
+```ini
+# ~/.config/containers/systemd/local-registry.container
+[Container]
+ContainerName=local-registry
+Image=docker.io/library/registry:2
+PublishPort=5000:5000
+Volume=local-registry-data:/var/lib/registry
+
+[Service]
+Restart=always
+
+[Install]
+WantedBy=default.target
+```
+
+`sudo loginctl enable-linger <user>` is the part that is easy to miss: without
+it the user manager does not start at boot and the unit never runs. Then
+`systemctl --user daemon-reload && systemctl --user start local-registry`.
+
+`registry:2` has deletes disabled by default, so removing a pushed image needs
+`REGISTRY_STORAGE_DELETE_ENABLED=true` plus a garbage collection pass. For a
+test registry holding credential material it is faster and more certain to stop
+the unit, `podman volume rm -f <volume>`, start it again, and re-push the
+keepers. Re-pushed fragment images keep their digests, so pinned manifests
+survive that.
+
 ## Credential hygiene
 
 Entitlement material is a private key. It must never enter the working tree, be
@@ -280,4 +396,25 @@ find "$HOME" /tmp -name '<serial>*'
 find "$HOME/.local/share/containers/storage" -path '*fragment/mount*'
 ```
 
-Run the test registry with **no volume** so its blobs die with the container.
+**Never verify with `find / -xdev`.** On a stock CentOS Stream 9 install `/home`
+is a separate logical volume, so `-xdev` stops at the mount point and reports
+nothing while the certificate and key are sitting in `~/fragments` and in the
+rootless image store. Measured: `sudo find / -xdev -name '<serial>*'` returned
+zero results on a host holding four copies.
+
+For a keeper, three places hold the material and they need separate treatment:
+the fragment source tree, the rootless image store
+(`.../storage/overlay/<layer>/diff/fragment/mount/...`, uncompressed), and the
+registry's volume (compressed, filenames are digests, so no name or content
+search finds it). `podman rmi` reaches only the second.
+
+Run a throwaway test registry with **no volume** so its blobs die with the
+container. A registry meant to survive reboots needs a volume, and that volume
+is then a durable copy of every credential ever pushed to it.
+
+## Transferring a fragment tree off a Mac
+
+`tar czf -` on macOS writes AppleDouble `._*` companion files into the archive.
+Unpacked on the builder, that puts a regular file directly under `mount/`, which
+is a generation error, and `._<name>` siblings beside every real file. Set
+`COPYFILE_DISABLE=1` for the tar, or build the tree on the builder.
