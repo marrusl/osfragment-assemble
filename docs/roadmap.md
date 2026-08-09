@@ -140,12 +140,10 @@ demonstrated by a fragment someone can pull, or it is a claim.
   mode is shown.
 - Document the `provides.repos` field in the format specification; today it
   appears only as an annotation key.
-- Correct two stale behavior claims, on repo deduplication and on
-  annotation-readable conflicts, that appear across three documents.
 - A rationale entry on why build-only toolchain packages belong in a hook's
   entrypoint rather than the declared package list.
-- Process-docs hygiene: move shipped specifications to implemented status and
-  correct several recorded claims that drifted from the code.
+- Process-docs hygiene: correct several recorded claims that drifted from the
+  code.
 
 ## Test suite
 
