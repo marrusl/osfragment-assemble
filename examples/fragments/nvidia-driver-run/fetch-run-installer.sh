@@ -21,12 +21,13 @@ FRAGMENT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LICENSE_IN_IMAGE="${FRAGMENT_DIR}/tree/usr/share/licenses/nvidia-driver-run/LICENSE"
 LICENSE_WITH_BLOB="${FRAGMENT_DIR}/hooks/LICENSE"
 
-# sha256 of each published installer, captured by downloading it from NVIDIA's
-# official location on 2026-08-04. Re-capture on every version bump. An
-# architecture with no recorded digest is refused rather than installed
-# unverified.
+# sha256 of each published installer, captured by downloading each from NVIDIA's
+# official location (aarch64 on 2026-08-04, x86_64 on 2026-08-09). Re-capture on
+# every version bump. An architecture with no recorded digest is refused rather
+# than installed unverified.
 sha256_for_arch() {
     case "$1" in
+    x86_64) echo "b2e935c66b83bb00c0c857bc8e0ee0fd52de9286b40c9cc1eec29a7ce7eb116d" ;;
     aarch64) echo "40279facc0429a93b0b8ec97bf59391a3d2207609894f8271b7253a14c3f8f9e" ;;
     *) return 1 ;;
     esac

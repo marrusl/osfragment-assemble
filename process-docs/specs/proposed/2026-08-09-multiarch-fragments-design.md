@@ -176,10 +176,22 @@ fragment is the demanding case); the tool adds nothing to it.
 2. **Each list carries both platforms:** after push, `skopeo inspect --raw
    docker://quay.io/marrusl2/fragments/<name>:<tag>` shows an index with
    `linux/amd64` and `linux/arm64` entries.
-3. **End to end:** assemble `examples/manifests/full.yaml` with `podman
-   build --platform linux/amd64`, confirm the `amd64` fragment variants are
-   pulled and the image builds, and confirm the native `arm64` path still
-   builds.
+3. **End to end:** first purge the local fragment images the manifest names,
+   so the assemble pulls the pushed manifest lists rather than whatever the
+   build script left in local storage. A stale local image silently shadows
+   the published one, because `COPY --from` and `RUN --mount` both resolve
+   local storage before the registry:
+
+   ```bash
+   for r in epel:10 tailscale:1.82.0 grafana:11.0 postgresql:17 \
+            hashicorp:1.0 cis-hardening:2.1 node-exporter:1.8.0 nginx:1.26; do
+       podman rmi -f "quay.io/marrusl2/fragments/$r" 2>/dev/null || true
+   done
+   ```
+
+   Then assemble `examples/manifests/full.yaml` with `podman build --platform
+   linux/amd64`, confirm the `amd64` fragment variants are pulled and the image
+   builds, and confirm the native `arm64` path still builds.
 
 ## Out of scope
 

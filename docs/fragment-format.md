@@ -206,3 +206,21 @@ Unknown manifest keys are rejected as parse errors, at the top level and inside 
 Package installation is deduplicated across all fragments; if multiple fragments request the same package, it's installed once.
 
 Repo deduplication: If multiple fragments provide `.repo` files with the same filename, the tool compares their content. Identical content is silently deduplicated (last fragment wins). Different content for the same repo ID causes the build to fail.
+
+## Multi-Arch Fragments
+
+A fragment can be published as a multi-arch manifest list: an OCI image index
+over per-architecture manifests (for the example fragments, `linux/amd64` and
+`linux/arm64`). Two rules apply when a manifest consumes such a fragment.
+
+- **Pin the index digest, never a per-arch instance digest.** For a manifest
+  list, `skopeo inspect --format '{{.Digest}}'` returns the digest of the
+  top-level index, and that is the value to write in a manifest's `image:`
+  reference. A per-arch instance digest points at a single architecture and
+  defeats platform resolution: the build pulls that architecture regardless of
+  the platform it targets.
+- **A published list must include every target architecture.** A list that is
+  missing the build's target arch is a hard error at assemble time. This is
+  stricter than a single-arch image, which only warns: a single-arch image used
+  as a `COPY --from` source into a foreign-arch build warns on the platform
+  mismatch and proceeds, whereas an incomplete list stops the build.
