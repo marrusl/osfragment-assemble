@@ -71,9 +71,6 @@ The build-mounts mechanism shipped. This work hardens the surfaces around it.
 - Document the transparency-log caveat: signing a credential fragment with a
   default keyless flow publishes its repository name and digest to a public
   log, which cuts against a private-registry custody model.
-- State the build-mounts custody boundary in the design explainer now that
-  the mechanism has shipped: the tool authenticates package acquisition and
-  is not a secrets manager.
 
 ## Self-contained mode
 
