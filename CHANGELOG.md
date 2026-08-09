@@ -45,6 +45,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The manifest `apiVersion` is validated** - The field was parsed but never checked, so any string passed, including the retired `bootc.io/v1alpha1`. A manifest must now declare `apiVersion: osfragment/v1alpha1`; any other value fails the parse with a message naming what was found and what was expected.
+
 - **A derived fragment publishes its own identity, not the base's** - Fragment layers arrive bottom-first, and the `fragment.toml` metadata merge (name, version, packages) took the first layer to carry the file while the entrypoint merge took the last. Because the base sits at the bottom, a fragment derived from another fragment and republished came out carrying the base vendor's name, version, and package list instead of its own. The metadata merge is now last-wins like the entrypoint merge, so the topmost, most-derived layer wins and a republished fragment keeps its own identity. This is the derive-and-republish workflow documented in `docs/rationales.md`.
 
 - **Digest pinning no longer doubles an existing digest** - A manifest entry already written as `registry/repo@sha256:...` produced `registry/repo@sha256:...@sha256:...`, in the emitted `FROM` lines under `--pin-digests`, and in the internal digest-pinned fragment references `--self-contained` resolves during load and materialization (`src/loader.rs`), which are never emitted but still drove the registry pull. Build mounts require the manifest to pin, so this stops being reachable only by manifests that pinned voluntarily.

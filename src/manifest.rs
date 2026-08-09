@@ -6,9 +6,9 @@ pub enum FragmentSource {
     Registry { image_ref: String },
 }
 
-// ManifestYaml fields are read during serde deserialization but not
-// accessed directly after parse_manifest transforms them into Manifest.
-// The dead_code warning is expected and does not indicate unused code.
+// `kind` is deserialized but never read again; the dead_code allow below
+// covers it. `apiVersion` is validated in parse_manifest, and `base` and
+// `fragments` are transformed into Manifest.
 //
 // deny_unknown_fields: the manifest is user-authored external input, and a
 // misspelled or removed key (baseType, once a real field) must fail the
@@ -64,9 +64,21 @@ impl ManifestFragment {
     }
 }
 
+/// The only manifest apiVersion this tool accepts. The retired
+/// `bootc.io/v1alpha1` and anything else fail the parse.
+const EXPECTED_API_VERSION: &str = "osfragment/v1alpha1";
+
 pub fn parse_manifest(content: &str, source_path: &str) -> Result<Manifest> {
     let raw: ManifestYaml =
         serde_yaml::from_str(content).context("failed to parse manifest YAML")?;
+
+    if raw.api_version != EXPECTED_API_VERSION {
+        bail!(
+            "unsupported manifest apiVersion {:?}: expected {:?}",
+            raw.api_version,
+            EXPECTED_API_VERSION
+        );
+    }
 
     let base = raw
         .base
@@ -136,6 +148,43 @@ fragments:
             manifest.fragments[0].mirror.as_deref(),
             Some("https://rpm-mirror.internal.corp/grafana/")
         );
+    }
+
+    /// The current apiVersion parses. Every other fixture in this module
+    /// relies on it too, so a regression here surfaces widely, but the
+    /// accept case is pinned explicitly beside its reject counterpart.
+    #[test]
+    fn accepts_current_api_version() {
+        assert!(parse_manifest(MINIMAL_YAML, "test-manifest.yaml").is_ok());
+    }
+
+    /// Any apiVersion other than `osfragment/v1alpha1`, including the retired
+    /// `bootc.io/v1alpha1`, fails the parse with a message that names both
+    /// what was found and what was expected.
+    #[test]
+    fn rejects_unsupported_api_version() {
+        for bad_version in ["bootc.io/v1alpha1", "osfragment/v1", "wrong"] {
+            let yaml = format!(
+                r#"
+apiVersion: {bad_version}
+kind: Composition
+base: quay.io/centos-bootc/centos-bootc:stream10
+fragments:
+  - image: quay.io/test/epel:10
+"#
+            );
+            let err = parse_manifest(&yaml, "test-manifest.yaml")
+                .expect_err("an unsupported apiVersion must fail the parse");
+            let full = format!("{err:#}");
+            assert!(
+                full.contains(bad_version),
+                "error must name the value found ({bad_version}), got: {full}"
+            );
+            assert!(
+                full.contains("osfragment/v1alpha1"),
+                "error must name the expected apiVersion, got: {full}"
+            );
+        }
     }
 
     /// The generated Containerfile's `# Manifest:` header and `list`'s
