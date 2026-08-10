@@ -92,9 +92,7 @@ jobs:
           ref: ${{ github.event.release.tag_name }}
 
       - name: Install build dependencies
-        run: |
-          dnf install -y rpm-build rust cargo git
-          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+        run: dnf install -y rpm-build rust cargo
 
       - name: Build SRPM
         run: |
@@ -115,9 +113,12 @@ jobs:
 
           # Vendor dependencies so the SRPM is self-contained
           # (Mock builds in an isolated environment without network)
+          # Use tar instead of git archive because the container checkout
+          # may not have a .git directory.
           STAGING=$(mktemp -d)
-          git archive --format=tar.gz --prefix=osfragment-assemble-${VERSION}/ HEAD \
-              | tar -xz -C "$STAGING"
+          mkdir -p "$STAGING/osfragment-assemble-${VERSION}"
+          tar cf - --exclude-vcs --exclude=target . \
+              | tar xf - -C "$STAGING/osfragment-assemble-${VERSION}"
           cd "$STAGING/osfragment-assemble-${VERSION}"
           cargo vendor
           mkdir -p .cargo
