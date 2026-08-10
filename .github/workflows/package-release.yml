@@ -1,0 +1,214 @@
+name: Package release
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+jobs:
+  build-binaries:
+    strategy:
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            name: darwin-arm64
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-24.04-arm
+            name: linux-arm64
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            name: linux-amd64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name }}
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install musl tools
+        if: contains(matrix.target, 'musl')
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Build release binary
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Rename binary
+        run: |
+          cp target/${{ matrix.target }}/release/osfragment-assemble \
+             osfragment-assemble-${{ matrix.name }}
+
+      - name: Compute SHA256
+        run: sha256sum osfragment-assemble-${{ matrix.name }} > sha256-${{ matrix.name }}.txt
+
+      - name: Upload SHA256 as CI artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sha256-${{ matrix.name }}
+          path: sha256-${{ matrix.name }}.txt
+
+      - name: Upload binary to release
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const file = 'osfragment-assemble-${{ matrix.name }}';
+            const assets = await github.paginate(
+              github.rest.repos.listReleaseAssets,
+              {
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                release_id: context.payload.release.id,
+                per_page: 100,
+              }
+            );
+            const existing = assets.find((a) => a.name === file);
+            if (existing) {
+              await github.rest.repos.deleteReleaseAsset({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                asset_id: existing.id,
+              });
+            }
+            await github.rest.repos.uploadReleaseAsset({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              release_id: context.payload.release.id,
+              name: file,
+              data: fs.readFileSync(file),
+            });
+
+  build-srpm:
+    runs-on: ubuntu-latest
+    container: fedora:latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name }}
+
+      - name: Install build dependencies
+        run: dnf install -y rpm-build rust cargo git
+
+      - name: Build SRPM
+        run: |
+          SPEC_VERSION=$(sed -n 's/^Version:[[:space:]]*//p' packaging/osfragment-assemble.spec)
+          CARGO_VERSION=$(sed -n 's/^version[[:space:]]*=[[:space:]]*"\(.*\)"/\1/p' Cargo.toml | head -1)
+          RPM_CARGO_VERSION=$(echo "$CARGO_VERSION" | sed 's/-/~/')
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          RPM_TAG_VERSION=$(echo "$TAG_VERSION" | sed 's/-/~/')
+          if [ "$SPEC_VERSION" != "$RPM_CARGO_VERSION" ]; then
+            echo "Version mismatch: spec=$SPEC_VERSION Cargo.toml=$CARGO_VERSION (normalized: $RPM_CARGO_VERSION)" >&2
+            exit 1
+          fi
+          if [ "$SPEC_VERSION" != "$RPM_TAG_VERSION" ]; then
+            echo "Version mismatch: spec=$SPEC_VERSION tag=$TAG_VERSION (normalized: $RPM_TAG_VERSION)" >&2
+            exit 1
+          fi
+          VERSION=$SPEC_VERSION
+
+          # Vendor dependencies so the SRPM is self-contained
+          # (Mock builds in an isolated environment without network)
+          STAGING=$(mktemp -d)
+          git archive --format=tar.gz --prefix=osfragment-assemble-${VERSION}/ HEAD \
+              | tar -xz -C "$STAGING"
+          cd "$STAGING/osfragment-assemble-${VERSION}"
+          cargo vendor
+          mkdir -p .cargo
+          printf '[source.crates-io]\nreplace-with = "vendored-sources"\n\n[source.vendored-sources]\ndirectory = "vendor"\n' \
+              > .cargo/config.toml
+          cd -
+
+          mkdir -p ~/rpmbuild/SOURCES
+          tar czf ~/rpmbuild/SOURCES/osfragment-assemble-${VERSION}.tar.gz \
+            -C "$STAGING" osfragment-assemble-${VERSION}
+          rm -rf "$STAGING"
+
+          rpmbuild -bs packaging/osfragment-assemble.spec
+          cp ~/rpmbuild/SRPMS/*.src.rpm .
+
+      - name: Upload SRPM to release
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const assets = await github.paginate(
+              github.rest.repos.listReleaseAssets,
+              {
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                release_id: context.payload.release.id,
+                per_page: 100,
+              }
+            );
+            for (const file of fs.readdirSync('.')) {
+              if (!file.endsWith('.src.rpm')) continue;
+              const existing = assets.find((asset) => asset.name === file);
+              if (existing) {
+                await github.rest.repos.deleteReleaseAsset({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  asset_id: existing.id,
+                });
+              }
+              await github.rest.repos.uploadReleaseAsset({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                release_id: context.payload.release.id,
+                name: file,
+                data: fs.readFileSync(file),
+              });
+            }
+
+  update-homebrew:
+    needs: build-binaries
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download SHA256 artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: sha256-darwin-arm64
+
+      - name: Compute formula metadata
+        id: binary_meta
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          REPO: ${{ github.repository }}
+        run: |
+          SHA=$(cut -d' ' -f1 sha256-darwin-arm64.txt)
+          VERSION="${RELEASE_TAG#v}"
+          URL="https://github.com/${REPO}/releases/download/${RELEASE_TAG}/osfragment-assemble-darwin-arm64"
+          echo "sha256=$SHA" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "url=$URL" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout tap repo
+        uses: actions/checkout@v4
+        with:
+          repository: marrusl/homebrew-osfragment-assemble
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+
+      - name: Update formula and push
+        env:
+          VERSION: ${{ steps.binary_meta.outputs.version }}
+          SHA256: ${{ steps.binary_meta.outputs.sha256 }}
+          URL: ${{ steps.binary_meta.outputs.url }}
+        run: |
+          sed -i \
+            -e "s|version \".*\"|version \"${VERSION}\"|" \
+            -e "s|url \".*\"|url \"${URL}\"|" \
+            -e "s|sha256 \".*\"|sha256 \"${SHA256}\"|" \
+            Formula/osfragment-assemble.rb
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/osfragment-assemble.rb
+          if git diff --cached --quiet; then
+            echo "No formula changes to commit"
+            exit 0
+          fi
+          git commit -m "Update osfragment-assemble to v${VERSION}"
+          git push origin main
