@@ -1,6 +1,6 @@
 //! Build mounts: the `mount/` directory a fragment may carry, and the
 //! derivation from its file paths to the bind mounts the generator attaches
-//! to the batched package step.
+//! to the package step and to every hook step.
 //!
 //! A bind mount shadows its target directory rather than merging into it, so
 //! the derived unit is a directory and never a file: every directory under
@@ -21,7 +21,7 @@ pub const MOUNTS_ANNOTATION_KEY: &str = "com.github.marrusl.osfragment.mounts";
 /// The sentence every surface that renders mount targets closes with, held
 /// in one place so `inspect` and `list` cannot drift apart.
 pub const MOUNT_SECTION_NOTE: &str =
-    "mounted during the package step, never committed by the builder";
+    "mounted during package and hook steps, never committed by the builder";
 
 /// A path the generator's own package phase writes to before the batched dnf
 /// RUN. A mount target that equals or contains one of these hides it for
@@ -100,11 +100,11 @@ impl MountPoint {
         format!("fragments/{}/mount/{}", fragment, self.0.display())
     }
 
-    /// Render this mount point as a `--mount=` flag for the batched package
-    /// RUN. The option skeleton and key order (`type=bind`, `from=`
-    /// optional, `source=`, `target=`, `ro`, `z`) are defined in exactly
-    /// this one place, so the generator's two emission forms cannot drift
-    /// apart on it.
+    /// Render this mount point as a `--mount=` flag for a build RUN: the
+    /// package step and every hook step both attach it. The option skeleton
+    /// and key order (`type=bind`, `from=` optional, `source=`, `target=`,
+    /// `ro`, `z`) are defined in exactly this one place, so the generator's
+    /// two emission forms cannot drift apart on it.
     ///
     /// `from` is the inline registry reference for the default output
     /// form, or `None` for the self-contained form, which carries no
@@ -165,7 +165,7 @@ pub fn derive_mount_points(
                  directory that directly contains a file, so a file at the top of mount/ \
                  would mount the filesystem root and every other mount point would be \
                  pruned as nested inside it. Move it to the path it should appear at \
-                 during the package step, for example \
+                 during the build, for example \
                  mount/etc/pki/entitlement/{}.",
                 fragment_name,
                 file.display(),
@@ -209,9 +209,9 @@ pub fn empty_mount_notice(
     (has_mount_dir && derived.is_empty()).then(|| {
         format!(
             "notice: fragment '{}' carries a mount/ directory holding no files, so it \
-             derives no build mounts and nothing is mounted into the package step. Put \
-             the material at the path it should appear at during that step, for example \
-             mount/etc/pki/entitlement/cert.pem.",
+             derives no build mounts and nothing is mounted into the package or hook \
+             steps. Put the material at the path it should appear at during the build, \
+             for example mount/etc/pki/entitlement/cert.pem.",
             fragment_name
         )
     })

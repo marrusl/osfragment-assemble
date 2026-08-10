@@ -277,7 +277,7 @@ mod tests {
 [fragment]
 name = "rhel-entitlement"
 version = "1.0"
-description = "RHEL entitlement certificates for the package step"
+description = "RHEL entitlement certificates for the build"
 "#;
 
     fn write_mount_fragment(dir: &Path) {

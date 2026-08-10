@@ -13,7 +13,7 @@ A fragment is an OCI image with this directory structure under `/fragment/`:
 │   ├── etc/yum.repos.d/*.repo
 │   ├── etc/pki/rpm-gpg/RPM-GPG-KEY-*
 │   └── ...            # Arbitrary filesystem paths
-├── mount/             # Optional: material bind-mounted during the package step
+├── mount/             # Optional: material bind-mounted during package and hook steps
 │   └── etc/pki/entitlement/*.pem
 └── hooks/             # Optional: build-time setup (any language)
     ├── entrypoint     # Required when hooks/ has content; the only file run
@@ -80,20 +80,28 @@ Config files land after package installation to ensure fragment-supplied configu
 
 The `mount/` subtree mirrors target paths exactly as `tree/` does. Detection is presence-based, with no `fragment.toml` section. Derivation collects every directory that directly contains a file and drops any nested inside another, so `mount/etc/rhsm/rhsm.conf` plus `mount/etc/rhsm/ca/cert.pem` yields one mount of `/etc/rhsm`. A regular file directly under `mount/` is a generation error. An empty `mount/` produces a notice.
 
-The emitted form is:
+Every derived mount attaches to each build step that can run a package manager: the batched `dnf install` and every hook `RUN`. Hooks routinely shell out to `dnf` against the base repositories, and the tool cannot introspect a hook, so the credential mounts ride every hook step unconditionally rather than only the package step. The emitted forms are:
 
 ```dockerfile
 RUN --mount=type=bind,from=<fragment>@sha256:...,source=/fragment/mount/etc/pki/entitlement,target=/etc/pki/entitlement,ro,z \
     dnf install -y \
         some-package \
     && dnf clean all
+
+RUN --mount=type=bind,from=<fragment>@sha256:...,source=/fragment/hooks,target=/frag-hooks,z \
+    --mount=type=bind,from=<fragment>@sha256:...,source=/fragment/mount/etc/pki/entitlement,target=/etc/pki/entitlement,ro,z \
+    /frag-hooks/entrypoint
 ```
 
-with the self-contained variant reading `source=fragments/<name>/mount/<path>` and no `from=`.
+with the self-contained variant reading `source=fragments/<name>/mount/<path>` and no `from=`. The hook step's own `/frag-hooks` mount rides the `RUN` line and the credential mounts follow it.
 
 A fragment whose `mount/` derives mount points must have its manifest entry pinned by digest; an empty `mount/` derives nothing and is not subject to pinning. Two fragments mounting colliding targets is an error, as is a target that equals or contains `/etc/yum.repos.d` or `/etc/pki/rpm-gpg`. Symlinks and hardlinks are rejected in fragment layers, `mount/` included.
 
-The builder never commits the mount source, which is a persistence guarantee and not a confidentiality one, since anything running in that RUN can read the mounted paths.
+The generator never commits the mount source, which is a persistence guarantee and not a confidentiality one: anything running in that `RUN` can read the mounted paths. Because the mounts now ride hook `RUN`s, and a hook is fragment-supplied code running as root, never-committed is a property of the generator alone: a hook could copy the mounted material into a layer. Pair an entitlement fragment only with hook fragments you trust. The `ro` flag keeps the mount read-only, which also blocks a hook from persisting writes back through it, such as a stray `subscription-manager refresh`.
+
+On a subscribed RHEL build host the build already injects the host's own entitlements into every step, so an entitlement fragment is redundant there. Omit it when you build on a subscribed host. There is no flag to suppress the mounts: the tool generates a static Containerfile and cannot know the eventual build host.
+
+In self-contained mode the credential mount reads from a stable context path rather than a pinned digest, so rotating the credential material does not change the `RUN` text and does not invalidate a cached package or hook step. Rebuild with `--no-cache`, or bump the manifest version, after rotating credentials in a self-contained context. In registry mode the pinned digest is part of the `RUN` text, so a rotated credential changes the digest and busts the cache on its own.
 
 ## Hooks Contract
 

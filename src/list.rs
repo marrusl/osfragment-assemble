@@ -5,7 +5,7 @@ use crate::manifest::Manifest;
 use crate::mount::{MountPoint, MOUNT_SECTION_NOTE};
 
 /// The continuation line under a fragment's table row, naming what it mounts
-/// into the package step. `None` when the fragment mounts nothing.
+/// into the package and hook steps. `None` when the fragment mounts nothing.
 ///
 /// A line rather than a column: adding a column would rewrite the table for
 /// every fragment, and most fragments carry no mounts at all.

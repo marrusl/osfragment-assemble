@@ -11,7 +11,7 @@ use crate::mount::GENERATOR_WRITTEN_PATHS;
 /// path (both self-contained and normal) always runs, while `inspect` and
 /// `list` never call it. That makes emission generation-only without
 /// threading a "should I print" flag through the shared loader. (Task 7
-/// adds this composition's sibling notice, "mounts but no package step",
+/// adds this composition's sibling notice, "mounts but no dnf-capable step",
 /// alongside this one.) The annotation drift warning is carried on
 /// `LoadedFragment.drift_warning` by the loader for the same reason and
 /// printed here too, so the two generation-time mount diagnostics stay
@@ -199,7 +199,7 @@ fn unpinned_mount_error(name: &str, declared: &str, resolved: Option<&str>) -> S
     format!(
         "fragment '{}' carries build mounts but its manifest entry is not pinned to a \
          digest: {}. A movable tag on an artifact that injects trust material into the \
-         package step is an invisible substitution point: whoever can move the tag can \
+         build is an invisible substitution point: whoever can move the tag can \
          swap a credential or a CA bundle and redirect the whole package fetch. Pin it \
          by digest in the manifest:\n\
          \x20   image: {}{}",
@@ -248,7 +248,7 @@ pub fn check_mount_overlaps(fragments: &[LoadedFragment]) -> Result<()> {
                             "fragments '{}' and '{}' mount build material at colliding paths: \
                              {} and {}. Two mount targets collide when either equals or is an \
                              ancestor of the other, because the inner mount is hidden by the \
-                             outer one for the whole package step. First wins on credentials \
+                             outer one for the whole build step. First wins on credentials \
                              produces silent authentication mysteries, so this is refused \
                              rather than resolved. Change one fragment's mount/ subtree so \
                              the targets are unrelated paths, or compose only one of them.",
@@ -265,14 +265,14 @@ pub fn check_mount_overlaps(fragments: &[LoadedFragment]) -> Result<()> {
     Ok(())
 }
 
-/// Notice for a composition that carries build mounts and installs no
-/// packages.
+/// Notice for a composition that carries build mounts but has no dnf-capable
+/// step for them to attach to.
 ///
-/// Build mounts attach to the batched dnf RUN, and that RUN is emitted only
-/// when something is being installed. With nothing to install there is
-/// nothing to attach to, and the mounts are silently absent from the output.
-/// Reported rather than refused: the composition is well formed, and the
-/// missing piece is a package selection the user still has to make.
+/// Build mounts attach to the batched dnf RUN and to every hook RUN. A
+/// composition with no packages to install and no hooks to run emits neither,
+/// so the mounts are silently absent from the output. Reported rather than
+/// refused: the composition is well formed, and the missing piece is a
+/// package selection or a hook fragment the user still has to add.
 pub fn unattached_mount_notice(
     manifest: &Manifest,
     fragments: &[LoadedFragment],
@@ -286,19 +286,26 @@ pub fn unattached_mount_notice(
         return None;
     }
 
-    let installs_anything = fragments
+    // A dnf-capable step is anything a build mount now rides: the batched
+    // package RUN, or a hook RUN. Hooks routinely shell out to dnf against the
+    // base repos, and the tool cannot introspect them, so credential mounts
+    // attach to every hook RUN too. With either present the mounts are
+    // emitted, and this notice would be false.
+    let installs_packages = fragments
         .iter()
         .any(|f| !f.fragment.packages.required.is_empty())
         || manifest.fragments.iter().any(|mf| !mf.packages.is_empty());
-    if installs_anything {
+    let has_hook_step = fragments.iter().any(|f| !f.hook_paths.is_empty());
+    let has_dnf_capable_step = installs_packages || has_hook_step;
+    if has_dnf_capable_step {
         return None;
     }
 
     Some(format!(
-        "notice: {} carries build mounts, but this composition installs no packages, so \
-         there is no dnf step for them to attach to and no mount is emitted. Select \
-         packages on a fragment entry in the manifest, or publish the fragment with \
-         packages.required set.",
+        "notice: {} carries build mounts, but this composition installs no packages and \
+         runs no hooks, so there is no build step for them to attach to and no mount is \
+         emitted. Select packages on a fragment entry in the manifest, add a fragment \
+         that carries hooks, or publish the fragment with packages.required set.",
         mounting
             .iter()
             .map(|n| format!("fragment '{}'", n))
@@ -832,6 +839,36 @@ mod tests {
         assert!(
             unattached_mount_notice(&empty, &[required_frag]).is_none(),
             "packages.required still drives a package step"
+        );
+    }
+
+    #[test]
+    fn mounts_with_hooks_and_no_packages_produce_no_notice() {
+        // Build mounts now ride every hook RUN, so a composition with mounts
+        // and hooks but no packages does emit the mounts (on the hook steps).
+        // The old notice claimed no mount is emitted, which would now be a
+        // false positive. A hook fragment alongside the mount is enough to
+        // silence it.
+        let mut mount_frag = mount_fragment_at("rhel-entitlement", &["etc/rhsm/rhsm.conf"]);
+        mount_frag.hook_paths = vec![PathBuf::from("entrypoint")];
+        let empty = manifest_of(vec![ManifestFragment {
+            image: "quay.io/acme/rhel-entitlement@sha256:abc".into(),
+            packages: vec![],
+            mirror: None,
+        }]);
+        assert!(
+            unattached_mount_notice(&empty, &[mount_frag]).is_none(),
+            "a hook step is a dnf-capable step the mounts attach to"
+        );
+
+        // Two fragments: a pure-mount fragment and a separate hook fragment,
+        // still no packages. The hook fragment supplies the dnf-capable step.
+        let mount_only = mount_fragment_at("entitlement", &["etc/pki/entitlement/c.pem"]);
+        let mut hook_only = test_fragment("awscli", vec![], vec![]);
+        hook_only.hook_paths = vec![PathBuf::from("entrypoint")];
+        assert!(
+            unattached_mount_notice(&empty, &[mount_only, hook_only]).is_none(),
+            "the hook fragment's RUN is where the mounts attach"
         );
     }
 }

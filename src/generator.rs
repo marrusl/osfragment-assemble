@@ -5,6 +5,16 @@ use crate::fragment::is_repo_path;
 use crate::loader::LoadedFragment;
 use crate::manifest::{FragmentSource, Manifest};
 
+/// Comment emitted once above the credential build mounts in generated
+/// output. The tool cannot know the build host at generate time, so this
+/// in-file note is the primary channel for the subscribed-host caveat: it
+/// travels with the Containerfile to wherever the build runs.
+const CREDENTIAL_MOUNT_COMMENT: &str = "\
+# Build mounts below assume a build host with no entitlement of its own. A\n\
+# subscribed RHEL build host injects its own entitlements into every build\n\
+# step, so these mounts are redundant there; omit the entitlement fragment\n\
+# when you build on a subscribed host.";
+
 /// Split a container image reference into (name, optional_tag).
 ///
 /// The tag separator is the last `:` that appears after the last `/`.
@@ -51,6 +61,29 @@ fn copy_from_source(loaded: &LoadedFragment, use_named_stages: bool) -> String {
     } else {
         let FragmentSource::Registry { ref image_ref } = loaded.source;
         image_ref.clone()
+    }
+}
+
+/// Emit a `RUN` whose leading `--mount` flag rides the `RUN ` line, each
+/// further flag is a four-space-indented continuation line, and `command` is
+/// the final line. The package step and every hook step both build their RUN
+/// this way, so the two sites cannot drift on the continuation formatting.
+///
+/// `command` is written verbatim as the last line: pass a trailing `\` when
+/// more lines follow it (the package step's `dnf install -y \`, continued by
+/// the package list) and none when it is the whole command (a hook's
+/// `/frag-hooks/entrypoint`). With no flags the result is `RUN <command>`,
+/// byte-identical to what an unmounted step emits.
+fn write_mounted_run(out: &mut String, flags: &[String], command: &str) -> std::fmt::Result {
+    match flags.split_first() {
+        None => writeln!(out, "RUN {}", command),
+        Some((first, rest)) => {
+            writeln!(out, "RUN {} \\", first)?;
+            for flag in rest {
+                writeln!(out, "    {} \\", flag)?;
+            }
+            writeln!(out, "    {}", command)
+        }
     }
 }
 
@@ -309,18 +342,15 @@ pub fn generate_containerfile(
         if !ocp {
             writeln!(out, "# --- Packages ---")?;
         }
-        match mount_flags.split_first() {
-            // The unmounted form is byte-identical to what every existing
-            // manifest already generates.
-            None => writeln!(out, "RUN dnf install -y \\")?,
-            Some((first, rest)) => {
-                writeln!(out, "RUN {} \\", first)?;
-                for flag in rest {
-                    writeln!(out, "    {} \\", flag)?;
-                }
-                writeln!(out, "    dnf install -y \\")?;
-            }
+        // The credential mounts ride the package RUN and, below, every hook
+        // RUN. The comment sits once above their first appearance; with a
+        // package step that is here.
+        if !ocp && !mount_flags.is_empty() {
+            writeln!(out, "{}", CREDENTIAL_MOUNT_COMMENT)?;
         }
+        // With no mounts this is byte-identical to what every existing
+        // manifest already generates: `RUN dnf install -y \`.
+        write_mounted_run(&mut out, &mount_flags, "dnf install -y \\")?;
         for pkg in &all_packages {
             writeln!(out, "        {} \\", pkg)?;
         }
@@ -382,24 +412,38 @@ pub fn generate_containerfile(
         if !ocp {
             writeln!(out, "# --- Hooks ---")?;
         }
+        // The credential comment normally rides the package step; with no
+        // package step, the hook RUNs are where the mounts first appear, so
+        // it sits here instead. The package-step guard above and this one are
+        // mutually exclusive, so the comment is emitted exactly once.
+        if !ocp && !mount_flags.is_empty() && all_packages.is_empty() {
+            writeln!(out, "{}", CREDENTIAL_MOUNT_COMMENT)?;
+        }
         for loaded in &hook_fragments {
-            if self_contained {
-                writeln!(
-                    out,
-                    "RUN --mount=type=bind,source=fragments/{}/hooks,target=/frag-hooks,z \\",
+            // The hooks bind mount rides the RUN line; the credential build
+            // mounts follow it, so a hook that shells out to dnf against the
+            // base repos authenticates exactly as the package step does. The
+            // mount_flags vector is reused verbatim and never routed through a
+            // named stage: a build-mount reference is always inline, and a
+            // pure-mount fragment has no stage to reference.
+            let hooks_mount = if self_contained {
+                format!(
+                    "--mount=type=bind,source=fragments/{}/hooks,target=/frag-hooks,z",
                     loaded.fragment.name
-                )?;
+                )
             } else {
                 let source = copy_from_source(loaded, use_named_stages);
-                writeln!(
-                    out,
-                    "RUN --mount=type=bind,from={},source=/fragment/hooks,target=/frag-hooks,z \\",
+                format!(
+                    "--mount=type=bind,from={},source=/fragment/hooks,target=/frag-hooks,z",
                     source
-                )?;
-            }
+                )
+            };
+            let mut hook_flags = Vec::with_capacity(1 + mount_flags.len());
+            hook_flags.push(hooks_mount);
+            hook_flags.extend(mount_flags.iter().cloned());
             // The entrypoint is the only file the tool runs; anything else
             // under hooks/ is support material it can reach at the mount path.
-            writeln!(out, "    /frag-hooks/entrypoint")?;
+            write_mounted_run(&mut out, &hook_flags, "/frag-hooks/entrypoint")?;
         }
         if !ocp {
             writeln!(out)?;
@@ -752,21 +796,27 @@ mod tests {
         (loaded, manifest_frag)
     }
 
-    /// The line following each hook mount line, verbatim: the invocation is a
-    /// fixed literal, so comparing anything less than the whole line would
-    /// let a differently indented or extended command through.
+    /// The command line of each hook RUN, verbatim: the invocation is a fixed
+    /// literal, so comparing anything less than the whole line would let a
+    /// differently indented or extended command through.
+    ///
+    /// A hook RUN's first line carries the `/frag-hooks` bind mount; credential
+    /// build mounts, when present, follow it as continuation lines before the
+    /// command. So the command is not simply the next line: it is the first
+    /// following line that is not itself a continuation (does not end in ` \`).
     fn hook_invocation_lines(output: &str) -> Vec<&str> {
         let lines: Vec<&str> = output.lines().collect();
-        lines
-            .iter()
-            .enumerate()
-            .filter(|(_, l)| l.starts_with("RUN --mount=type=bind"))
-            .map(|(idx, _)| {
-                *lines
-                    .get(idx + 1)
-                    .expect("a hook mount line is always followed by its command line")
-            })
-            .collect()
+        let mut invocations = Vec::new();
+        for (idx, line) in lines.iter().enumerate() {
+            if line.starts_with("RUN ") && line.contains("target=/frag-hooks,z") {
+                let mut i = idx;
+                while lines[i].ends_with('\\') && i + 1 < lines.len() {
+                    i += 1;
+                }
+                invocations.push(lines[i]);
+            }
+        }
+        invocations
     }
 
     /// Every path under the hook mount target the output names. The mount
@@ -2309,6 +2359,94 @@ RUN bootc container lint
         assert!(
             !output.contains("sha256:d00d"),
             "the digest pin lives in the manifest, not in this output:\n{output}"
+        );
+    }
+
+    #[test]
+    fn credential_mounts_ride_the_hook_run_with_no_package_step() {
+        // The highest-value regression: a composition with mounts and hooks
+        // but no packages emits no package RUN, so the credential mounts have
+        // only the hook RUNs to ride. Without the fix the hook RUN would carry
+        // just its own /frag-hooks mount and a hook's dnf against the base
+        // repos would fail with no entitlement present.
+        let (mount_frag, mut mf_mount) =
+            make_mount_fragment("rhel-entitlement", &["run/secrets/rhsm/rhsm.conf"]);
+        mf_mount.packages = vec![]; // the no-packages case
+        let (mut hook_frag, mf_hook) = make_hook_fragment("awscli", &["entrypoint"]);
+        hook_frag.manifest_index = 1;
+        let manifest = Manifest {
+            base: "quay.io/test/base:1".into(),
+            source_path: "test-manifest.yaml".into(),
+            fragments: vec![mf_mount, mf_hook],
+        };
+        let output =
+            generate_containerfile(&manifest, &[mount_frag, hook_frag], None, false, false)
+                .unwrap();
+
+        assert!(
+            !output.contains("dnf install"),
+            "no packages means no package step, so this is not vacuous:\n{output}"
+        );
+        let cred = "--mount=type=bind,from=quay.io/acme/rhel-entitlement@sha256:d00d,\
+             source=/fragment/mount/run/secrets/rhsm,target=/run/secrets/rhsm,ro,z";
+        assert!(
+            mount_flags(&output).iter().any(|f| f == cred),
+            "the hook RUN must carry the credential mount:\n{output}"
+        );
+        // The invocation still resolves past the new continuation line.
+        assert_eq!(
+            hook_invocation_lines(&output),
+            vec![HOOK_INVOCATION],
+            "got:\n{output}"
+        );
+    }
+
+    #[test]
+    fn a_mixed_mount_and_hook_fragment_carries_creds_on_the_hook_run() {
+        let (mut frag, mf) = make_mount_fragment("entitlement", &["etc/pki/entitlement/cert.pem"]);
+        frag.hook_paths = vec![PathBuf::from("entrypoint")];
+        let manifest = Manifest {
+            base: "quay.io/test/base:1".into(),
+            source_path: "test-manifest.yaml".into(),
+            fragments: vec![mf],
+        };
+        let output = generate_containerfile(&manifest, &[frag], None, false, false).unwrap();
+
+        // The hook RUN: its own /frag-hooks mount (a named stage, since the
+        // fragment is pinned and now carries a hook), then the credential
+        // mount inline (never a named stage), then the invocation.
+        let expected_hook_block = "\
+RUN --mount=type=bind,from=frag-entitlement,source=/fragment/hooks,target=/frag-hooks,z \\
+    --mount=type=bind,from=quay.io/acme/entitlement@sha256:d00d,source=/fragment/mount/etc/pki/entitlement,target=/etc/pki/entitlement,ro,z \\
+    /frag-hooks/entrypoint";
+        assert!(
+            output.contains(expected_hook_block),
+            "expected the exact hook RUN block with the credential mount:\n{output}"
+        );
+    }
+
+    #[test]
+    fn a_self_contained_mixed_fragment_reads_hook_creds_from_the_context() {
+        let (mut frag, mf) = make_mount_fragment("entitlement", &["etc/pki/entitlement/cert.pem"]);
+        frag.hook_paths = vec![PathBuf::from("entrypoint")];
+        let manifest = Manifest {
+            base: "quay.io/test/base:1".into(),
+            source_path: "test-manifest.yaml".into(),
+            fragments: vec![mf],
+        };
+        let output = generate_containerfile(&manifest, &[frag], None, false, true).unwrap();
+
+        let expected_hook_block = "\
+RUN --mount=type=bind,source=fragments/entitlement/hooks,target=/frag-hooks,z \\
+    --mount=type=bind,source=fragments/entitlement/mount/etc/pki/entitlement,target=/etc/pki/entitlement,ro,z \\
+    /frag-hooks/entrypoint";
+        assert!(
+            output.contains(expected_hook_block),
+            "expected the context-source hook RUN block with the credential mount:\n{output}"
+        );
+        assert!(
+            !output.contains("from="),
+            "self-contained output names no registry reference at all:\n{output}"
         );
     }
 }

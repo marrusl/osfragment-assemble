@@ -502,3 +502,48 @@ is then a durable copy of every credential ever pushed to it.
 Unpacked on the builder, that puts a regular file directly under `mount/`, which
 is a generation error, and `._<name>` siblings beside every real file. Set
 `COPYFILE_DISABLE=1` for the tar, or build the tree on the builder.
+
+## Credential mounts must ride every hook RUN, not just the package RUN
+
+Measured 2026-08-09 on a full RHEL 10 arm64 build: the entitlement fragment
+worked on the batched `dnf install` but a fragment hook that shelled out to
+`dnf install unzip` (base-OS package) failed with `could not load PEM client
+certificate from /etc/pki/entitlement-host/<serial>.pem ... No such file or
+directory`. That path is a base-shipped symlink into
+`/run/secrets/etc-pki-entitlement`; the committed `redhat.repo` names the
+`-host` path, and on an unmounted step the symlink target does not exist, so it
+dangles. Same mechanism as the rest of this file, on a different RUN.
+
+The generator cannot introspect a hook, and hooks assume the base repos are
+reachable, so the fix is to mount the credential build-mounts on **every
+dnf-capable RUN** unconditionally: the package step and every hook step. The
+correctness requirements a future edit must not regress:
+
+- **`mount_flags` is built unconditionally, outside the `if !all_packages.is_empty()`
+  block.** A composition with mount + hook fragments but zero packages emits no
+  package RUN, so the hook RUNs are the only place the creds attach. Moving
+  `mount_flags` construction inside the package block silently strips creds from
+  hooks in that case. This is the highest-value regression; it has a dedicated
+  test (`credential_mounts_ride_the_hook_run_with_no_package_step`).
+- **Reuse the `mount_flags` vector verbatim on each hook RUN; never route it
+  through `copy_from_source`.** Build-mount references are always inline
+  (`from=<pinned ref>` in registry mode, `from=`-less `context_source` in
+  self-contained mode), and a pure-mount fragment has no `frag-<name>` named
+  stage to reference. The hook's own `/frag-hooks` mount rides the `RUN` line;
+  the credential mounts follow it as continuation lines. Both sites emit through
+  the shared `write_mounted_run` helper so their continuation formatting cannot
+  drift.
+- **`unattached_mount_notice` fires only when there is no dnf-capable step at
+  all** (no packages AND no hooks). Before the fix it keyed on packages alone;
+  after it, a mount + hooks + no-packages composition does emit the mounts (on
+  hook steps), so the old "no mount is emitted" notice would be a false positive.
+- **Security posture widens by one step class:** trusted-but-arbitrary hook code
+  now reads the credential at `/run/secrets` during its RUN. Still ephemeral and
+  uncommitted by the generator, but a hook could copy the material into a layer,
+  so pair an entitlement fragment only with hook fragments you trust. `ro` also
+  blocks a hook persisting writes back through the mount.
+- **Subscribed-host guard is docs-only.** On a subscribed RHEL host the host
+  auto-injects `/run/secrets` on every step, so the fragment is redundant; omit
+  it there. No opt-out flag: the tool emits a static Containerfile and cannot
+  know the build host, so the warning is an in-file Containerfile comment (it
+  travels to the build host / CI).
