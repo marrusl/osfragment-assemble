@@ -128,12 +128,12 @@ pub fn check_repo_conflicts(fragments: &[LoadedFragment]) -> Result<()> {
 
 /// A build-mount fragment referenced without a digest is a generation error.
 ///
-/// A movable tag on an artifact that injects trust material into the package
-/// step is an invisible substitution point: whoever can move the tag can
-/// swap a CA bundle or a credential and redirect the entire package fetch.
-/// The pin is checked against the manifest's own image reference, so it
-/// survives regardless of `--pin-digests` and needs no per-fragment
-/// retention machinery.
+/// A movable tag on an artifact that injects trust material into the build
+/// is an invisible substitution point: whoever can move the tag can swap a
+/// CA bundle or a credential and redirect the whole package fetch. The pin
+/// is checked against the manifest's own image reference, so it survives
+/// regardless of `--pin-digests` and needs no per-fragment retention
+/// machinery.
 pub fn check_mount_digest_pins(manifest: &Manifest, fragments: &[LoadedFragment]) -> Result<()> {
     check_mount_digest_pins_with(manifest, fragments, crate::loader::resolve_digest)
 }
@@ -225,11 +225,11 @@ pub fn check_mount_overlaps(fragments: &[LoadedFragment]) -> Result<()> {
                 if point.shadows(written.path) {
                     bail!(
                         "fragment '{}' mounts build material at {}, which equals or contains \
-                         {}, where the generator's {} phase writes ahead of the package step. \
-                         A bind mount hides whatever its target directory already contained, \
-                         so this would hide that material during exactly the RUN that needs \
-                         it. Move the material under a path that does not contain {}, for \
-                         example mount/etc/pki/entitlement.",
+                         {}, where the generator's {} phase writes ahead of every dnf-capable \
+                         step. A bind mount hides whatever its target directory already \
+                         contained, so this would hide that material during every dnf-capable \
+                         RUN the mount rides. Move the material under a path that does not \
+                         contain {}, for example mount/etc/pki/entitlement.",
                         f.fragment.name,
                         point.target(),
                         written.path,

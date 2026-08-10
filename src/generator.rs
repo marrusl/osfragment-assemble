@@ -10,10 +10,11 @@ use crate::manifest::{FragmentSource, Manifest};
 /// in-file note is the primary channel for the subscribed-host caveat: it
 /// travels with the Containerfile to wherever the build runs.
 const CREDENTIAL_MOUNT_COMMENT: &str = "\
-# Build mounts below assume a build host with no entitlement of its own. A\n\
-# subscribed RHEL build host injects its own entitlements into every build\n\
-# step, so these mounts are redundant there; omit the entitlement fragment\n\
-# when you build on a subscribed host.";
+# Build mounts below supply credential material the build host may not\n\
+# have. A subscribed RHEL host already injects its own entitlement into\n\
+# every build step, so an entitlement fragment is redundant there and can\n\
+# be omitted. Other credential mounts, such as mirror client certs or\n\
+# proxy CA bundles, are still required regardless of host.";
 
 /// Split a container image reference into (name, optional_tag).
 ///
@@ -2448,5 +2449,96 @@ RUN --mount=type=bind,source=fragments/entitlement/hooks,target=/frag-hooks,z \\
             !output.contains("from="),
             "self-contained output names no registry reference at all:\n{output}"
         );
+    }
+
+    #[test]
+    fn both_credential_mounts_ride_every_hook_run_in_manifest_order() {
+        // Every prior credential-mount test uses a single hook, so none of
+        // them can tell "rides every hook step" from "rides the first (or
+        // only) one", nor exercise more than one credential continuation
+        // line on a hook RUN. Two hooks and two mount points close both
+        // gaps at once.
+        let (mount_frag, mut mf_mount) = make_mount_fragment(
+            "creds",
+            &["etc/pki/entitlement/cert.pem", "etc/rhsm/rhsm.conf"],
+        );
+        mf_mount.packages = vec![]; // no packages: the hooks are the only dnf-capable steps
+        let (mut awscli, mf_awscli) = make_hook_fragment("awscli", &["entrypoint"]);
+        awscli.manifest_index = 1;
+        let (mut postinstall, mf_postinstall) = make_hook_fragment("postinstall", &["entrypoint"]);
+        postinstall.manifest_index = 2;
+        let manifest = Manifest {
+            base: "quay.io/test/base:1".into(),
+            source_path: "test-manifest.yaml".into(),
+            fragments: vec![mf_mount, mf_awscli, mf_postinstall],
+        };
+        let output = generate_containerfile(
+            &manifest,
+            &[mount_frag, awscli, postinstall],
+            None,
+            false,
+            false,
+        )
+        .unwrap();
+
+        assert!(
+            !output.contains("dnf install"),
+            "no packages means no package step, so this is not vacuous:\n{output}"
+        );
+        assert_eq!(
+            hook_invocation_lines(&output),
+            vec![HOOK_INVOCATION, HOOK_INVOCATION],
+            "both hooks must run:\n{output}"
+        );
+
+        let cred_entitlement = "--mount=type=bind,from=quay.io/acme/creds@sha256:d00d,\
+             source=/fragment/mount/etc/pki/entitlement,target=/etc/pki/entitlement,ro,z";
+        let cred_rhsm = "--mount=type=bind,from=quay.io/acme/creds@sha256:d00d,\
+             source=/fragment/mount/etc/rhsm,target=/etc/rhsm,ro,z";
+
+        // Each derived mount point must appear once per hook RUN: twice
+        // total across the two hooks, not once (dropped from one hook) and
+        // not four times (duplicated onto one hook).
+        for cred in [cred_entitlement, cred_rhsm] {
+            let count = mount_flags(&output).iter().filter(|f| *f == cred).count();
+            assert_eq!(
+                count, 2,
+                "expected {cred} to ride both hook RUNs (count 2), got {count}:\n{output}"
+            );
+        }
+
+        // Flag counts alone cannot see *which* RUN a flag landed on or its
+        // position relative to the others, so also walk each hook RUN block
+        // directly: the hook's own /frag-hooks mount, then both credential
+        // continuation lines in manifest order, then the invocation.
+        let lines: Vec<&str> = output.lines().collect();
+        let hook_run_starts: Vec<usize> = lines
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| l.starts_with("RUN ") && l.contains("target=/frag-hooks,z"))
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(
+            hook_run_starts.len(),
+            2,
+            "expected two hook RUNs, got:\n{output}"
+        );
+        for start in hook_run_starts {
+            assert_eq!(
+                lines[start + 1],
+                format!("    {} \\", cred_entitlement),
+                "entitlement mount must be the first continuation line, got:\n{output}"
+            );
+            assert_eq!(
+                lines[start + 2],
+                format!("    {} \\", cred_rhsm),
+                "rhsm mount must be the second continuation line, got:\n{output}"
+            );
+            assert_eq!(
+                lines[start + 3],
+                HOOK_INVOCATION,
+                "the invocation must directly follow both continuation lines, got:\n{output}"
+            );
+        }
     }
 }
