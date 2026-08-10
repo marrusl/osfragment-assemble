@@ -12,7 +12,6 @@ osfragment-assemble reads a YAML manifest declaring a base bootc-compatible imag
 
 ### Prerequisites
 
-- Rust toolchain (1.70 or later)
 - skopeo (must be installed and authenticated to pull from registries)
 - podman
 
@@ -36,7 +35,9 @@ dnf install osfragment-assemble
 
 Available from [GitHub Releases](https://github.com/marrusl/osfragment-assemble/releases) for Linux (x86_64, arm64) and macOS (arm64).
 
-### Build
+### Build from source
+
+Requires a Rust toolchain (1.70 or later).
 
 ```bash
 cargo build --release
