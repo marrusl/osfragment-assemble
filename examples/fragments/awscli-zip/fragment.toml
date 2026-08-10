@@ -6,7 +6,7 @@ vendor = "Amazon Web Services, Inc."
 
 # No [fragment.packages] section on purpose.
 #
-# The only build dependency is `unzip`, which hooks/entrypoint installs AND
+# The only build dependency is `unzip`, which hook/entrypoint installs AND
 # removes inside a single RUN. Declaring it as packages.required would install
 # it during the earlier batched dnf step, where a later removal writes only a
 # whiteout and the bytes stay recoverable in that layer forever.

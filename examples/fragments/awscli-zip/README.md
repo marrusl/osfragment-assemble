@@ -52,7 +52,7 @@ This fragment passes two arguments instead:
 ```
 
 That is the entire substance of the fragment. Everything else in
-`hooks/entrypoint` is scaffolding around those two paths.
+`hook/entrypoint` is scaffolding around those two paths.
 
 ## Why `/usr/local` is the wrong answer here
 
@@ -118,17 +118,17 @@ is the target image's architecture. Digests for both published architectures are
 recorded in `fetch-awscli-zip.sh`; an architecture with no recorded digest is
 refused rather than installed unverified.
 
-`hooks/*.zip` is listed in the repo's `.gitignore`. Everything else in the
+`hook/*.zip` is listed in the repo's `.gitignore`. Everything else in the
 fragment is committed.
 
 ## What the entrypoint does
 
-This is the minimal form a hostile-payload fragment can have: `hooks/entrypoint`
+This is the minimal form a hostile-payload fragment can have: `hook/entrypoint`
 plus the vendor blob as hook material. There is no `tree/`, no
 `packages.required`, and no repo definition: the fragment is a script and a
 binary, and the two arguments are the whole point.
 
-`hooks/entrypoint` is the only file the tool runs. It:
+`hook/entrypoint` is the only file the tool runs. It:
 
 1. Refuses to continue if the pinned zip is not present as hook material.
 2. Installs `unzip` **only if the base does not already provide it**, and
@@ -147,7 +147,7 @@ binary, and the two arguments are the whole point.
    untouched. That last check is the assertion the fragment exists to make.
 6. Removes `unzip` if it installed it, along with the dnf caches and logs.
 
-All of that is one script on purpose. The tool bind-mounts `hooks/` for the
+All of that is one script on purpose. The tool bind-mounts `hook/` for the
 duration of a single `RUN`, and a bind mount is never committed to a layer, so
 the 70 MB zip contributes zero bytes to the finished image. `unzip` is installed
 and removed inside that same `RUN` for the same reason: had it been declared as

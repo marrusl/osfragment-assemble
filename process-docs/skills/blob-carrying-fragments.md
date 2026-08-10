@@ -1,6 +1,6 @@
 # Fragments that carry a large vendor blob
 
-Covers fragments whose `hooks/` holds a big binary payload (the NVIDIA `.run`
+Covers fragments whose `hook/` holds a big binary payload (the NVIDIA `.run`
 example is the first), and how to test one end to end locally without pushing
 anything to a public registry.
 
@@ -10,7 +10,7 @@ A ~300 MB vendor installer must not enter a public repo's git history. The
 pattern the `nvidia-driver-run` example established:
 
 - A `fetch-<something>.sh` script inside the fragment directory downloads the
-  pinned payload into `hooks/` and verifies a **recorded sha256** before the
+  pinned payload into `hook/` and verifies a **recorded sha256** before the
   blob is used. The digest is captured by downloading the file once and
   recording what came back; there is no upstream checksum file to consult for
   the NVIDIA installers.
@@ -183,9 +183,9 @@ and `aws/dist/aws` as `-rwxr-xr-x` and Python extracts both `-rw-r--r--`
 happens to need, which is worse to maintain than installing a 186 KB package
 and removing it in the same layer.
 
-## A fragment may carry `hooks/` with no `tree/`
+## A fragment may carry `hook/` with no `tree/`
 
 `awscli-zip` is the first example built that way and the loader handles it:
-`inspect` reports the fragment with only a `hooks/` listing. Omit the
+`inspect` reports the fragment with only a `hook/` listing. Omit the
 `COPY tree/` line from `Containerfile.fragment` entirely; do not ship an empty
 `tree/` to keep the layout uniform.

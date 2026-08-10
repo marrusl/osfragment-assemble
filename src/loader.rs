@@ -105,11 +105,11 @@ pub fn resolve_digest(image_ref: &str) -> Result<String> {
 const MAX_FRAGMENT_TOML_SIZE: u64 = 64 * 1024; // 64KB
 const FRAGMENT_TOML_PATH: &str = "fragment/fragment.toml";
 
-/// The single file under a fragment's `hooks/` that the tool runs.
+/// The single file under a fragment's `hook/` that the tool runs.
 pub const HOOKS_ENTRYPOINT_NAME: &str = "entrypoint";
 
 /// The same file as it appears inside a fragment layer.
-const HOOKS_ENTRYPOINT_TAR_PATH: &str = "fragment/hooks/entrypoint";
+const HOOKS_ENTRYPOINT_TAR_PATH: &str = "fragment/hook/entrypoint";
 
 /// A fragment's build-mount subtree, as it appears inside a fragment layer.
 /// Everything below it mirrors a target path, the same convention `tree/`
@@ -130,10 +130,10 @@ const OCI_WHITEOUT_PREFIX: &str = ".wh.";
 const EXECUTE_BITS: u32 = 0o111;
 
 /// Enforce the hooks entrypoint contract for a fragment that carries at least
-/// one hook file: `hooks/entrypoint` must exist as an executable regular file,
+/// one hook file: `hook/entrypoint` must exist as an executable regular file,
 /// and it is the only thing the tool runs.
 ///
-/// `entrypoint_mode` is the mode of `hooks/entrypoint` when it is a regular
+/// `entrypoint_mode` is the mode of `hook/entrypoint` when it is a regular
 /// file, and `None` when it is missing or is something else (a directory of
 /// that name is not an entrypoint). Both validation sites (the registry load,
 /// reading the mode off the tar header, and `inspect`, reading it off the
@@ -141,13 +141,13 @@ const EXECUTE_BITS: u32 = 0o111;
 pub fn validate_hooks_entrypoint(fragment_name: &str, entrypoint_mode: Option<u32>) -> Result<()> {
     match entrypoint_mode {
         None => bail!(
-            "fragment '{}': hooks/ contains files but no executable hooks/entrypoint; \
+            "fragment '{}': hook/ contains files but no executable hook/entrypoint; \
              the entrypoint is the single file osfragment-assemble runs. Rename the \
-             script to hooks/entrypoint, or add one that invokes the others.",
+             script to hook/entrypoint, or add one that invokes the others.",
             fragment_name
         ),
         Some(mode) if mode & EXECUTE_BITS == 0 => bail!(
-            "fragment '{}': hooks/entrypoint is not executable; the entrypoint is the \
+            "fragment '{}': hook/entrypoint is not executable; the entrypoint is the \
              single file osfragment-assemble runs. Set the execute bit (chmod +x) before \
              building the fragment image.",
             fragment_name
@@ -163,8 +163,8 @@ pub fn validate_hooks_entrypoint(fragment_name: &str, entrypoint_mode: Option<u3
 /// Returns the entry's path in the one canonical form every matcher in this
 /// module compares against: relative, with a leading `/` and any `.`
 /// component removed. Tar archives legitimately carry the same member as
-/// `fragment/hooks/entrypoint`, `./fragment/hooks/entrypoint`, or
-/// `/fragment/hooks/entrypoint` depending on the builder that produced the
+/// `fragment/hook/entrypoint`, `./fragment/hook/entrypoint`, or
+/// `/fragment/hook/entrypoint` depending on the builder that produced the
 /// layer, and matching the raw path saw only the first: a fragment whose
 /// hooks arrived in either other form had them silently dropped from
 /// detection, which skipped the entrypoint check while the files still
@@ -274,7 +274,7 @@ struct LayerEntries {
     /// Regular-file paths, in the canonical form `validate_tar_entry`
     /// returns.
     file_paths: Vec<PathBuf>,
-    /// Mode of `fragment/hooks/entrypoint` when this layer carries one as a
+    /// Mode of `fragment/hook/entrypoint` when this layer carries one as a
     /// regular file.
     entrypoint_mode: Option<u32>,
     /// Whether this layer carries a `fragment/mount` entry of any type. A
@@ -340,7 +340,7 @@ fn extract_repo_file_contents_from_bytes(
     Ok(contents)
 }
 
-/// Write a layer's `fragment/tree/`, `fragment/hooks/`, and, under
+/// Write a layer's `fragment/tree/`, `fragment/hook/`, and, under
 /// [`MountMaterialization::Write`], `fragment/mount/` payload to disk under
 /// `dest_dir`. Shares the same tar-entry security validation as the
 /// metadata-only extractors above.
@@ -374,8 +374,8 @@ pub(crate) fn extract_fragment_payload_to_disk(
 
         let dest = if let Ok(rel) = path.strip_prefix("fragment/tree") {
             dest_dir.join("tree").join(rel)
-        } else if let Ok(rel) = path.strip_prefix("fragment/hooks") {
-            dest_dir.join("hooks").join(rel)
+        } else if let Ok(rel) = path.strip_prefix("fragment/hook") {
+            dest_dir.join("hook").join(rel)
         } else if let Ok(rel) = path.strip_prefix(MOUNT_TAR_PREFIX) {
             // Skipped unless the caller opts in: materializing mount
             // material is a custody change, not a packaging detail, and the
@@ -399,7 +399,7 @@ pub(crate) fn extract_fragment_payload_to_disk(
     Ok(())
 }
 
-/// Pull a fragment image by reference and materialize its tree/hooks
+/// Pull a fragment image by reference and materialize its tree/hook
 /// payload to disk under `dest_dir`, and its `mount/` payload as well under
 /// [`MountMaterialization::Write`]. Reuses `pull_layer_bytes`, the same
 /// skopeo-copy-then-walk-layers path `load_registry_fragment` uses; only
@@ -686,8 +686,8 @@ fn fragment_from_layers(layer_bytes_list: &[Vec<u8>]) -> Result<LayeredMetadata>
 
         let hook_paths: Vec<PathBuf> = tree_paths
             .iter()
-            .filter(|p| p.to_string_lossy().starts_with("fragment/hooks/"))
-            .filter_map(|p| p.strip_prefix("fragment/hooks").ok())
+            .filter(|p| p.to_string_lossy().starts_with("fragment/hook/"))
+            .filter_map(|p| p.strip_prefix("fragment/hook").ok())
             .map(|p| p.to_path_buf())
             .collect();
         all_hook_paths.extend(hook_paths);
@@ -883,7 +883,7 @@ mod tests {
         assert!(!is_repo_path(Path::new(
             "tree/usr/lib/sysctl.d/99-hardening.conf"
         )));
-        assert!(!is_repo_path(Path::new("hooks/configure.sh")));
+        assert!(!is_repo_path(Path::new("hook/configure.sh")));
     }
 
     #[test]
@@ -1375,12 +1375,12 @@ required = ["derived-pkg"]
     #[test]
     fn validate_tar_entry_returns_a_canonical_relative_path() {
         let cases = [
-            ("fragment/hooks/entrypoint", "fragment/hooks/entrypoint"),
-            ("./fragment/hooks/entrypoint", "fragment/hooks/entrypoint"),
-            ("/fragment/hooks/entrypoint", "fragment/hooks/entrypoint"),
+            ("fragment/hook/entrypoint", "fragment/hook/entrypoint"),
+            ("./fragment/hook/entrypoint", "fragment/hook/entrypoint"),
+            ("/fragment/hook/entrypoint", "fragment/hook/entrypoint"),
             ("./fragment/tree/etc/app.conf", "fragment/tree/etc/app.conf"),
             ("/fragment/tree/", "fragment/tree"),
-            ("fragment/./hooks/entrypoint", "fragment/hooks/entrypoint"),
+            ("fragment/./hook/entrypoint", "fragment/hook/entrypoint"),
         ];
         for (raw, expected) in cases {
             let normalized = validate_tar_entry(Path::new(raw), tar::EntryType::Regular)
@@ -1407,11 +1407,11 @@ required = ["derived-pkg"]
     #[test]
     fn hooks_collected_regardless_of_extension() {
         let tarball = create_test_tarball(&[
-            ("fragment/hooks/01-setup.sh", b"#!/bin/bash\necho setup"),
-            ("fragment/hooks/02-config.bash", b"#!/bin/bash\necho config"),
-            ("fragment/hooks/configure", b"#!/bin/sh\necho configure"),
+            ("fragment/hook/01-setup.sh", b"#!/bin/bash\necho setup"),
+            ("fragment/hook/02-config.bash", b"#!/bin/bash\necho config"),
+            ("fragment/hook/configure", b"#!/bin/sh\necho configure"),
             (
-                "fragment/hooks/setup.py",
+                "fragment/hook/setup.py",
                 b"#!/usr/bin/env python3\nprint('ok')",
             ),
             ("fragment/tree/etc/foo.conf", b"data"),
@@ -1419,8 +1419,8 @@ required = ["derived-pkg"]
         let paths = extract_layer_entries(&tarball).unwrap().file_paths;
         let hook_paths: Vec<PathBuf> = paths
             .iter()
-            .filter(|p| p.to_string_lossy().starts_with("fragment/hooks/"))
-            .filter_map(|p| p.strip_prefix("fragment/hooks").ok())
+            .filter(|p| p.to_string_lossy().starts_with("fragment/hook/"))
+            .filter_map(|p| p.strip_prefix("fragment/hook").ok())
             .map(|p| p.to_path_buf())
             .collect();
         assert_eq!(hook_paths.len(), 4);
@@ -1437,7 +1437,7 @@ required = ["derived-pkg"]
         let hook_content = b"#!/bin/sh\necho configure\n";
         let tarball = create_test_tarball(&[
             ("fragment/tree/etc/yum.repos.d/epel.repo", tree_content),
-            ("fragment/hooks/configure.sh", hook_content),
+            ("fragment/hook/configure.sh", hook_content),
         ]);
 
         let workdir = tempfile::tempdir().unwrap();
@@ -1446,7 +1446,7 @@ required = ["derived-pkg"]
 
         let extracted_tree =
             std::fs::read(workdir.path().join("tree/etc/yum.repos.d/epel.repo")).unwrap();
-        let extracted_hook = std::fs::read(workdir.path().join("hooks/configure.sh")).unwrap();
+        let extracted_hook = std::fs::read(workdir.path().join("hook/configure.sh")).unwrap();
         assert_eq!(extracted_tree, tree_content);
         assert_eq!(extracted_hook, hook_content);
     }
@@ -1714,33 +1714,33 @@ description = "test fragment"
             validate_hooks_entrypoint("nvidia-driver", None)
                 .unwrap_err()
                 .to_string(),
-            "fragment 'nvidia-driver': hooks/ contains files but no executable hooks/entrypoint; the entrypoint is the single file osfragment-assemble runs. Rename the script to hooks/entrypoint, or add one that invokes the others."
+            "fragment 'nvidia-driver': hook/ contains files but no executable hook/entrypoint; the entrypoint is the single file osfragment-assemble runs. Rename the script to hook/entrypoint, or add one that invokes the others."
         );
         assert_eq!(
             validate_hooks_entrypoint("nvidia-driver", Some(0o644))
                 .unwrap_err()
                 .to_string(),
-            "fragment 'nvidia-driver': hooks/entrypoint is not executable; the entrypoint is the single file osfragment-assemble runs. Set the execute bit (chmod +x) before building the fragment image."
+            "fragment 'nvidia-driver': hook/entrypoint is not executable; the entrypoint is the single file osfragment-assemble runs. Set the execute bit (chmod +x) before building the fragment image."
         );
     }
 
     #[test]
     fn hooks_without_entrypoint_are_rejected() {
-        let layers = fragment_layers(vec![hook_entry("fragment/hooks/other.sh", 0o755)]);
+        let layers = fragment_layers(vec![hook_entry("fragment/hook/other.sh", 0o755)]);
         let err = fragment_from_layers(&layers).unwrap_err().to_string();
         assert!(
-            err.contains("nvidia-driver") && err.contains("no executable hooks/entrypoint"),
-            "error must name the fragment and hooks/entrypoint, got: {err}"
+            err.contains("nvidia-driver") && err.contains("no executable hook/entrypoint"),
+            "error must name the fragment and hook/entrypoint, got: {err}"
         );
     }
 
     #[test]
     fn non_executable_entrypoint_is_rejected() {
-        let layers = fragment_layers(vec![hook_entry("fragment/hooks/entrypoint", 0o644)]);
+        let layers = fragment_layers(vec![hook_entry("fragment/hook/entrypoint", 0o644)]);
         let err = fragment_from_layers(&layers).unwrap_err().to_string();
         assert!(
             err.contains("nvidia-driver")
-                && err.contains("hooks/entrypoint is not executable")
+                && err.contains("hook/entrypoint is not executable")
                 && err.contains("chmod +x"),
             "error must name the mode problem and its fix, got: {err}"
         );
@@ -1760,32 +1760,32 @@ description = "test fragment"
             ),
             (
                 "entrypoint alone",
-                vec![hook_entry("fragment/hooks/entrypoint", 0o755)],
+                vec![hook_entry("fragment/hook/entrypoint", 0o755)],
             ),
             (
                 "entrypoint alongside other files",
                 vec![
-                    hook_entry("fragment/hooks/entrypoint", 0o755),
-                    hook_entry("fragment/hooks/nvidia.run", 0o755),
-                    hook_entry("fragment/hooks/README", 0o644),
+                    hook_entry("fragment/hook/entrypoint", 0o755),
+                    hook_entry("fragment/hook/nvidia.run", 0o755),
+                    hook_entry("fragment/hook/README", 0o644),
                 ],
             ),
             (
                 "entrypoint alongside a subdirectory",
                 vec![
-                    hook_entry("fragment/hooks/entrypoint", 0o755),
+                    hook_entry("fragment/hook/entrypoint", 0o755),
                     RawEntry {
-                        path: b"fragment/hooks/lib",
+                        path: b"fragment/hook/lib",
                         data: b"",
                         mode: 0o755,
                         entry_type: tar::EntryType::Directory,
                     },
-                    hook_entry("fragment/hooks/lib/helper.sh", 0o644),
+                    hook_entry("fragment/hook/lib/helper.sh", 0o644),
                 ],
             ),
             (
                 "entrypoint executable by group only",
-                vec![hook_entry("fragment/hooks/entrypoint", 0o610)],
+                vec![hook_entry("fragment/hook/entrypoint", 0o610)],
             ),
         ];
 
@@ -1796,12 +1796,12 @@ description = "test fragment"
     }
 
     /// The hook list survives validation: `inspect` still displays every file
-    /// under `hooks/`, including the ones the tool will never invoke.
+    /// under `hook/`, including the ones the tool will never invoke.
     #[test]
     fn support_files_stay_in_the_hook_list() {
         let layers = fragment_layers(vec![
-            hook_entry("fragment/hooks/entrypoint", 0o755),
-            hook_entry("fragment/hooks/lib/helper.sh", 0o644),
+            hook_entry("fragment/hook/entrypoint", 0o755),
+            hook_entry("fragment/hook/lib/helper.sh", 0o644),
         ]);
         let metadata = fragment_from_layers(&layers).unwrap();
         let names: Vec<String> = metadata
@@ -1814,11 +1814,11 @@ description = "test fragment"
 
     #[test]
     fn nested_entrypoint_does_not_satisfy_the_rule() {
-        let layers = fragment_layers(vec![hook_entry("fragment/hooks/lib/entrypoint", 0o755)]);
+        let layers = fragment_layers(vec![hook_entry("fragment/hook/lib/entrypoint", 0o755)]);
         let err = fragment_from_layers(&layers).unwrap_err().to_string();
         assert!(
-            err.contains("no executable hooks/entrypoint"),
-            "only hooks/entrypoint counts, got: {err}"
+            err.contains("no executable hook/entrypoint"),
+            "only hook/entrypoint counts, got: {err}"
         );
     }
 
@@ -1826,16 +1826,16 @@ description = "test fragment"
     fn entrypoint_as_a_directory_is_rejected() {
         let layers = fragment_layers(vec![
             RawEntry {
-                path: b"fragment/hooks/entrypoint",
+                path: b"fragment/hook/entrypoint",
                 data: b"",
                 mode: 0o755,
                 entry_type: tar::EntryType::Directory,
             },
-            hook_entry("fragment/hooks/entrypoint/real.sh", 0o755),
+            hook_entry("fragment/hook/entrypoint/real.sh", 0o755),
         ]);
         let err = fragment_from_layers(&layers).unwrap_err().to_string();
         assert!(
-            err.contains("no executable hooks/entrypoint"),
+            err.contains("no executable hook/entrypoint"),
             "a directory named entrypoint is not an entrypoint, got: {err}"
         );
     }
@@ -1846,12 +1846,12 @@ description = "test fragment"
     #[test]
     fn old_style_chained_hooks_are_rejected() {
         let layers = fragment_layers(vec![
-            hook_entry("fragment/hooks/01-setup.sh", 0o755),
-            hook_entry("fragment/hooks/02-config.sh", 0o755),
+            hook_entry("fragment/hook/01-setup.sh", 0o755),
+            hook_entry("fragment/hook/02-config.sh", 0o755),
         ]);
         let err = fragment_from_layers(&layers).unwrap_err().to_string();
         assert!(
-            err.contains("no executable hooks/entrypoint"),
+            err.contains("no executable hook/entrypoint"),
             "old-layout fragments must be rejected, not chained, got: {err}"
         );
     }
@@ -1869,8 +1869,8 @@ description = "test fragment"
     #[test]
     fn hook_detection_is_prefix_independent() {
         for prefix in LAYER_PATH_PREFIXES {
-            let entrypoint = format!("{prefix}fragment/hooks/entrypoint");
-            let helper = format!("{prefix}fragment/hooks/lib/helper.sh");
+            let entrypoint = format!("{prefix}fragment/hook/entrypoint");
+            let helper = format!("{prefix}fragment/hook/lib/helper.sh");
 
             // A non-executable entrypoint must be rejected in every form.
             let layers = fragment_layers(vec![hook_entry(&entrypoint, 0o644)]);
@@ -1878,7 +1878,7 @@ description = "test fragment"
                 .expect_err(&format!("prefix {prefix:?}: must be rejected"))
                 .to_string();
             assert!(
-                err.contains("hooks/entrypoint is not executable"),
+                err.contains("hook/entrypoint is not executable"),
                 "prefix {prefix:?}: wrong error: {err}"
             );
 
@@ -1888,7 +1888,7 @@ description = "test fragment"
                 .expect_err(&format!("prefix {prefix:?}: must be rejected"))
                 .to_string();
             assert!(
-                err.contains("no executable hooks/entrypoint"),
+                err.contains("no executable hook/entrypoint"),
                 "prefix {prefix:?}: wrong error: {err}"
             );
 
@@ -1980,7 +1980,7 @@ description = "test fragment"
     fn payload_extraction_is_prefix_independent() {
         for prefix in LAYER_PATH_PREFIXES {
             let conf_path = format!("{prefix}fragment/tree/etc/app.conf");
-            let hook_path = format!("{prefix}fragment/hooks/entrypoint");
+            let hook_path = format!("{prefix}fragment/hook/entrypoint");
             let tarball = create_test_tarball_with_modes(&[
                 RawEntry {
                     path: conf_path.as_bytes(),
@@ -2005,7 +2005,7 @@ description = "test fragment"
                 "prefix {prefix:?}: tree file must be materialized"
             );
             assert!(
-                workdir.path().join("hooks/entrypoint").exists(),
+                workdir.path().join("hook/entrypoint").exists(),
                 "prefix {prefix:?}: hook must be materialized"
             );
         }

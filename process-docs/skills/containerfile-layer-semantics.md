@@ -6,8 +6,8 @@ instructions from the generator.
 ## `COPY` then `RUN rm -rf` does not remove anything
 
 ```dockerfile
-COPY --from=<ref> /fragment/hooks/ /tmp/frag-hooks/
-RUN /tmp/frag-hooks/configure.sh && rm -rf /tmp/frag-hooks
+COPY --from=<ref> /fragment/hook/ /tmp/frag-hook/
+RUN /tmp/frag-hook/configure.sh && rm -rf /tmp/frag-hook
 ```
 
 This is **filesystem-correct but not layer-correct**. The `rm -rf` writes a whiteout
@@ -46,12 +46,12 @@ sat wrong in both the README and `docs/fragment-format.md` for a long time:
 
 ```dockerfile
 # Wrong: produces /fragment/configure.sh and /fragment/etc/...
-COPY fragment.toml tree/ hooks/ /fragment/
+COPY fragment.toml tree/ hook/ /fragment/
 ```
 
 With a directory destination, `COPY` copies the *contents* of each source
-directory, so `tree/` and `hooks/` are flattened into `/fragment/` and neither
-`/fragment/tree/` nor `/fragment/hooks/` exists. The loader keys on exactly
+directory, so `tree/` and `hook/` are flattened into `/fragment/` and neither
+`/fragment/tree/` nor `/fragment/hook/` exists. The loader keys on exactly
 those two prefixes, so a fragment built this way reports no tree and no hooks
 while building and pushing without error. Each directory needs its own `COPY`
 with an explicit destination:
@@ -59,7 +59,7 @@ with an explicit destination:
 ```dockerfile
 COPY fragment.toml /fragment/
 COPY tree/ /fragment/tree/
-COPY hooks/ /fragment/hooks/
+COPY hook/ /fragment/hook/
 ```
 
 Verified 2026-07-31 by building both forms and listing the layer contents.
@@ -73,7 +73,7 @@ Both documents now show the correct form.
 
 Omitting `from=` is a fourth case: the mount `source=` resolves against the
 build context, the same place a bare `COPY <src>` reads from. Self-contained
-mode emits this form (`source=fragments/<name>/hooks`) because it materializes
+mode emits this form (`source=fragments/<name>/hook`) because it materializes
 the fragments into the build context itself, so there is no image or stage left
 to name. Default and OCP modes emit the second and third. When reasoning about
 whether a bind

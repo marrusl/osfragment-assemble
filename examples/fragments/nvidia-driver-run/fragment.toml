@@ -11,7 +11,7 @@ fragments = ["nvidia-driver-repo"]
 #
 # The build toolchain (gcc, make, binutils, elfutils-libelf-devel, and
 # kernel-devel matching the image's kernel) is installed AND removed inside
-# hooks/entrypoint, which is a single RUN. Declaring it as packages.required
+# hook/entrypoint, which is a single RUN. Declaring it as packages.required
 # would install it during the earlier batched dnf step, where a later removal
 # writes only a whiteout and the bytes stay recoverable in that layer forever.
 # See process-docs/skills/containerfile-layer-semantics.md.

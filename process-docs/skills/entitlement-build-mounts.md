@@ -529,7 +529,7 @@ correctness requirements a future edit must not regress:
   through `copy_from_source`.** Build-mount references are always inline
   (`from=<pinned ref>` in registry mode, `from=`-less `context_source` in
   self-contained mode), and a pure-mount fragment has no `frag-<name>` named
-  stage to reference. The hook's own `/frag-hooks` mount rides the `RUN` line;
+  stage to reference. The hook's own `/frag-hook` mount rides the `RUN` line;
   the credential mounts follow it as continuation lines. Both sites emit through
   the shared `write_mounted_run` helper so their continuation formatting cannot
   drift.

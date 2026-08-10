@@ -118,13 +118,13 @@ build_annotations() {
     fi
 }
 
-# Remove a fragment's per-arch payload from hooks/ so the next per-arch build
+# Remove a fragment's per-arch payload from hook/ so the next per-arch build
 # context carries only the arch about to be fetched. blob_glob is a glob pattern
 # and must stay unquoted to expand.
 purge_blob() {
     local dir="$1" blob_glob="$2"
     # shellcheck disable=SC2086  # blob_glob is a glob; unquoted expansion is intended
-    rm -f "${dir}/hooks/"${blob_glob}
+    rm -f "${dir}/hook/"${blob_glob}
 }
 
 # Set the fragment metadata annotations on the image index itself. `list` reads
@@ -163,7 +163,7 @@ build_arch_neutral() {
 
 # One build context carries one arch's binary, so these cannot use the
 # single-invocation form. Fetch each arch's blob in turn, build per arch, then
-# assemble the list. blob_glob names the per-arch payload under hooks/; it is
+# assemble the list. blob_glob names the per-arch payload under hook/; it is
 # purged before each fetch so a build context never carries the other arch's
 # binary (which would otherwise double the published image size).
 build_arch_specific() {

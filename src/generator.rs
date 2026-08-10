@@ -73,7 +73,7 @@ fn copy_from_source(loaded: &LoadedFragment, use_named_stages: bool) -> String {
 /// `command` is written verbatim as the last line: pass a trailing `\` when
 /// more lines follow it (the package step's `dnf install -y \`, continued by
 /// the package list) and none when it is the whole command (a hook's
-/// `/frag-hooks/entrypoint`). With no flags the result is `RUN <command>`,
+/// `/frag-hook/entrypoint`). With no flags the result is `RUN <command>`,
 /// byte-identical to what an unmounted step emits.
 fn write_mounted_run(out: &mut String, flags: &[String], command: &str) -> std::fmt::Result {
     match flags.split_first() {
@@ -429,13 +429,13 @@ pub fn generate_containerfile(
             // pure-mount fragment has no stage to reference.
             let hooks_mount = if self_contained {
                 format!(
-                    "--mount=type=bind,source=fragments/{}/hooks,target=/frag-hooks,z",
+                    "--mount=type=bind,source=fragments/{}/hook,target=/frag-hook,z",
                     loaded.fragment.name
                 )
             } else {
                 let source = copy_from_source(loaded, use_named_stages);
                 format!(
-                    "--mount=type=bind,from={},source=/fragment/hooks,target=/frag-hooks,z",
+                    "--mount=type=bind,from={},source=/fragment/hook,target=/frag-hook,z",
                     source
                 )
             };
@@ -443,8 +443,8 @@ pub fn generate_containerfile(
             hook_flags.push(hooks_mount);
             hook_flags.extend(mount_flags.iter().cloned());
             // The entrypoint is the only file the tool runs; anything else
-            // under hooks/ is support material it can reach at the mount path.
-            write_mounted_run(&mut out, &hook_flags, "/frag-hooks/entrypoint")?;
+            // under hook/ is support material it can reach at the mount path.
+            write_mounted_run(&mut out, &hook_flags, "/frag-hook/entrypoint")?;
         }
         if !ocp {
             writeln!(out)?;
@@ -761,7 +761,7 @@ mod tests {
 
     /// The one invocation line every hook-carrying fragment gets, in every
     /// mode, indentation included.
-    const HOOK_INVOCATION: &str = "    /frag-hooks/entrypoint";
+    const HOOK_INVOCATION: &str = "    /frag-hook/entrypoint";
 
     /// A fragment carrying only hooks, whose `hook_paths` list is whatever the
     /// caller names: the loader guarantees `entrypoint` is among them, and
@@ -801,7 +801,7 @@ mod tests {
     /// literal, so comparing anything less than the whole line would let a
     /// differently indented or extended command through.
     ///
-    /// A hook RUN's first line carries the `/frag-hooks` bind mount; credential
+    /// A hook RUN's first line carries the `/frag-hook` bind mount; credential
     /// build mounts, when present, follow it as continuation lines before the
     /// command. So the command is not simply the next line: it is the first
     /// following line that is not itself a continuation (does not end in ` \`).
@@ -809,7 +809,7 @@ mod tests {
         let lines: Vec<&str> = output.lines().collect();
         let mut invocations = Vec::new();
         for (idx, line) in lines.iter().enumerate() {
-            if line.starts_with("RUN ") && line.contains("target=/frag-hooks,z") {
+            if line.starts_with("RUN ") && line.contains("target=/frag-hook,z") {
                 let mut i = idx;
                 while lines[i].ends_with('\\') && i + 1 < lines.len() {
                     i += 1;
@@ -821,11 +821,11 @@ mod tests {
     }
 
     /// Every path under the hook mount target the output names. The mount
-    /// lines' own `target=/frag-hooks` option is not one of these.
+    /// lines' own `target=/frag-hook` option is not one of these.
     fn frag_hook_tokens(output: &str) -> Vec<&str> {
         output
             .split_whitespace()
-            .filter(|t| t.starts_with("/frag-hooks/"))
+            .filter(|t| t.starts_with("/frag-hook/"))
             .collect()
     }
 
@@ -1235,18 +1235,18 @@ mod tests {
         };
         let output = generate_containerfile(&manifest, &[cis], None, false, false).unwrap();
         assert!(
-            output.contains("RUN --mount=type=bind,from=quay.io/test/cis:2.1,source=/fragment/hooks,target=/frag-hooks,z"),
+            output.contains("RUN --mount=type=bind,from=quay.io/test/cis:2.1,source=/fragment/hook,target=/frag-hook,z"),
             "expected bind mount with inline image ref:\n{}",
             output
         );
         assert!(
-            output.contains("/frag-hooks/entrypoint"),
+            output.contains("/frag-hook/entrypoint"),
             "expected hook execution via mount target:\n{}",
             output
         );
         // No COPY of hooks, no rm -rf cleanup
         assert!(
-            !output.contains("COPY --from=quay.io/test/cis:2.1 /fragment/hooks/"),
+            !output.contains("COPY --from=quay.io/test/cis:2.1 /fragment/hook/"),
             "COPY of hooks must not appear:\n{}",
             output
         );
@@ -1544,7 +1544,7 @@ mod tests {
         let output = generate_containerfile(&manifest, &[cis], None, true, false).unwrap();
         // Hooks should use bind mount in OCP output, in the registry form
         assert!(
-            output.contains("RUN --mount=type=bind,from=quay.io/test/cis:2.1,source=/fragment/hooks,target=/frag-hooks,z"),
+            output.contains("RUN --mount=type=bind,from=quay.io/test/cis:2.1,source=/fragment/hook,target=/frag-hook,z"),
             "expected the registry mount form in OCP output:\n{}",
             output
         );
@@ -1577,8 +1577,8 @@ mod tests {
         for line in standalone.lines() {
             if line.starts_with("COPY") {
                 assert!(
-                    !line.contains("hooks"),
-                    "hooks/ must not appear in COPY instruction (standalone):\n{}",
+                    !line.contains("hook"),
+                    "hook/ must not appear in COPY instruction (standalone):\n{}",
                     line
                 );
             }
@@ -1589,8 +1589,8 @@ mod tests {
         for line in ocp_output.lines() {
             if line.starts_with("COPY") {
                 assert!(
-                    !line.contains("hooks"),
-                    "hooks/ must not appear in COPY instruction (OCP):\n{}",
+                    !line.contains("hook"),
+                    "hook/ must not appear in COPY instruction (OCP):\n{}",
                     line
                 );
             }
@@ -1615,8 +1615,8 @@ mod tests {
         for line in pinned_output.lines() {
             if line.starts_with("COPY") {
                 assert!(
-                    !line.contains("hooks"),
-                    "hooks/ must not appear in COPY instruction (pinned):\n{}",
+                    !line.contains("hook"),
+                    "hook/ must not appear in COPY instruction (pinned):\n{}",
                     line
                 );
             }
@@ -1689,7 +1689,7 @@ mod tests {
             generate_containerfile(&manifest, &[cis.clone()], None, false, false).unwrap();
         assert!(
             standalone.contains(
-                "RUN --mount=type=bind,from=quay.io/test/cis:2.1,source=/fragment/hooks,target=/frag-hooks,z \\"
+                "RUN --mount=type=bind,from=quay.io/test/cis:2.1,source=/fragment/hook,target=/frag-hook,z \\"
             ),
             "standalone output must emit the unified flagless mount form:\n{}",
             standalone
@@ -1704,7 +1704,7 @@ mod tests {
         let ocp = generate_containerfile(&manifest, &[cis], None, true, false).unwrap();
         assert!(
             ocp.contains(
-                "RUN --mount=type=bind,from=quay.io/test/cis:2.1,source=/fragment/hooks,target=/frag-hooks,z \\"
+                "RUN --mount=type=bind,from=quay.io/test/cis:2.1,source=/fragment/hook,target=/frag-hook,z \\"
             ),
             "OCP output must emit the same flagless mount form as standalone:\n{}",
             ocp
@@ -1735,13 +1735,13 @@ mod tests {
         let standalone_mount: Vec<&str> = standalone
             .lines()
             .filter(|l| {
-                l.contains("--mount=type=bind") || l.trim_start().starts_with("/frag-hooks/")
+                l.contains("--mount=type=bind") || l.trim_start().starts_with("/frag-hook/")
             })
             .collect();
         let ocp_mount: Vec<&str> = ocp
             .lines()
             .filter(|l| {
-                l.contains("--mount=type=bind") || l.trim_start().starts_with("/frag-hooks/")
+                l.contains("--mount=type=bind") || l.trim_start().starts_with("/frag-hook/")
             })
             .collect();
 
@@ -1837,7 +1837,7 @@ mod tests {
         for name in ["multi-file", "single-file"] {
             assert!(
                 output.contains(&format!(
-                    "RUN --mount=type=bind,source=fragments/{}/hooks,target=/frag-hooks,z \\",
+                    "RUN --mount=type=bind,source=fragments/{}/hook,target=/frag-hook,z \\",
                     name
                 )),
                 "expected the context-relative mount form for {}:\n{}",
@@ -2076,8 +2076,8 @@ mod tests {
         assert!(output.contains("COPY fragments/epel/tree/etc/pki/rpm-gpg/ /etc/pki/rpm-gpg/"));
         assert!(output.contains("COPY fragments/cis/tree/ /"));
         assert!(output
-            .contains("RUN --mount=type=bind,source=fragments/cis/hooks,target=/frag-hooks,z \\"));
-        assert!(output.contains("/frag-hooks/entrypoint"));
+            .contains("RUN --mount=type=bind,source=fragments/cis/hook,target=/frag-hook,z \\"));
+        assert!(output.contains("/frag-hook/entrypoint"));
 
         // The mode's defining invariant: no fragment registry reference
         // anywhere, including comments, and no leftover default-mode forms.
@@ -2176,9 +2176,9 @@ mod tests {
 
         assert!(!output.contains("COPY fragments/hooks-only/tree"));
         assert!(output.contains(
-            "RUN --mount=type=bind,source=fragments/hooks-only/hooks,target=/frag-hooks,z \\"
+            "RUN --mount=type=bind,source=fragments/hooks-only/hook,target=/frag-hook,z \\"
         ));
-        assert!(output.contains("/frag-hooks/entrypoint"));
+        assert!(output.contains("/frag-hook/entrypoint"));
     }
 
     #[test]
@@ -2206,8 +2206,8 @@ RUN dnf install -y \
 COPY fragments/cis/tree/ /
 
 # --- Hooks ---
-RUN --mount=type=bind,source=fragments/cis/hooks,target=/frag-hooks,z \
-    /frag-hooks/entrypoint
+RUN --mount=type=bind,source=fragments/cis/hook,target=/frag-hook,z \
+    /frag-hook/entrypoint
 
 # Apply systemd presets from fragments
 RUN systemctl preset-all --preset-mode=enable-only 2>/dev/null || true
@@ -2368,7 +2368,7 @@ RUN bootc container lint
         // The highest-value regression: a composition with mounts and hooks
         // but no packages emits no package RUN, so the credential mounts have
         // only the hook RUNs to ride. Without the fix the hook RUN would carry
-        // just its own /frag-hooks mount and a hook's dnf against the base
+        // just its own /frag-hook mount and a hook's dnf against the base
         // repos would fail with no entitlement present.
         let (mount_frag, mut mf_mount) =
             make_mount_fragment("rhel-entitlement", &["run/secrets/rhsm/rhsm.conf"]);
@@ -2413,13 +2413,13 @@ RUN bootc container lint
         };
         let output = generate_containerfile(&manifest, &[frag], None, false, false).unwrap();
 
-        // The hook RUN: its own /frag-hooks mount (a named stage, since the
+        // The hook RUN: its own /frag-hook mount (a named stage, since the
         // fragment is pinned and now carries a hook), then the credential
         // mount inline (never a named stage), then the invocation.
         let expected_hook_block = "\
-RUN --mount=type=bind,from=frag-entitlement,source=/fragment/hooks,target=/frag-hooks,z \\
+RUN --mount=type=bind,from=frag-entitlement,source=/fragment/hook,target=/frag-hook,z \\
     --mount=type=bind,from=quay.io/acme/entitlement@sha256:d00d,source=/fragment/mount/etc/pki/entitlement,target=/etc/pki/entitlement,ro,z \\
-    /frag-hooks/entrypoint";
+    /frag-hook/entrypoint";
         assert!(
             output.contains(expected_hook_block),
             "expected the exact hook RUN block with the credential mount:\n{output}"
@@ -2438,9 +2438,9 @@ RUN --mount=type=bind,from=frag-entitlement,source=/fragment/hooks,target=/frag-
         let output = generate_containerfile(&manifest, &[frag], None, false, true).unwrap();
 
         let expected_hook_block = "\
-RUN --mount=type=bind,source=fragments/entitlement/hooks,target=/frag-hooks,z \\
+RUN --mount=type=bind,source=fragments/entitlement/hook,target=/frag-hook,z \\
     --mount=type=bind,source=fragments/entitlement/mount/etc/pki/entitlement,target=/etc/pki/entitlement,ro,z \\
-    /frag-hooks/entrypoint";
+    /frag-hook/entrypoint";
         assert!(
             output.contains(expected_hook_block),
             "expected the context-source hook RUN block with the credential mount:\n{output}"
@@ -2509,13 +2509,13 @@ RUN --mount=type=bind,source=fragments/entitlement/hooks,target=/frag-hooks,z \\
 
         // Flag counts alone cannot see *which* RUN a flag landed on or its
         // position relative to the others, so also walk each hook RUN block
-        // directly: the hook's own /frag-hooks mount, then both credential
+        // directly: the hook's own /frag-hook mount, then both credential
         // continuation lines in manifest order, then the invocation.
         let lines: Vec<&str> = output.lines().collect();
         let hook_run_starts: Vec<usize> = lines
             .iter()
             .enumerate()
-            .filter(|(_, l)| l.starts_with("RUN ") && l.contains("target=/frag-hooks,z"))
+            .filter(|(_, l)| l.starts_with("RUN ") && l.contains("target=/frag-hook,z"))
             .map(|(i, _)| i)
             .collect();
         assert_eq!(

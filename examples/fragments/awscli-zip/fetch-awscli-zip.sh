@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Fetch the pinned AWS CLI v2 installer zip into hooks/ and verify it against a
+# Fetch the pinned AWS CLI v2 installer zip into hook/ and verify it against a
 # recorded sha256.
 #
 # The zip is ~70 MB and is never committed: it is listed in the repo's
@@ -48,7 +48,7 @@ if ! EXPECTED_SHA256="$(sha256_for_arch "$ARCH")"; then
 fi
 
 ZIP_NAME="awscli-exe-linux-${ARCH}-${AWSCLI_VERSION}.zip"
-ZIP_PATH="${FRAGMENT_DIR}/hooks/${ZIP_NAME}"
+ZIP_PATH="${FRAGMENT_DIR}/hook/${ZIP_NAME}"
 ZIP_URL="${BASE_URL}/${ZIP_NAME}"
 
 # macOS ships `shasum`, Linux ships `sha256sum`.
@@ -79,4 +79,4 @@ fi
 mv "${ZIP_PATH}.tmp" "$ZIP_PATH"
 
 echo "==> verified sha256 ${ACTUAL_SHA256}"
-echo "==> ready: hooks/${ZIP_NAME} ($(du -h "$ZIP_PATH" | cut -f1))"
+echo "==> ready: hook/${ZIP_NAME} ($(du -h "$ZIP_PATH" | cut -f1))"

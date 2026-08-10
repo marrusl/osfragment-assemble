@@ -40,7 +40,7 @@ The format resolves no dependencies, enforces no version constraints, and runs n
 
 The vocabulary also has a narrow audience. A composer assembling an image never opens `fragment.toml`; their entire surface is the manifest, a few lines naming a base image, the fragments to compose, and, per fragment, optionally packages to select. The unit metadata is read and written by fragment authors, who are packaging engineers publishing a unit for others to consume, and for whom name, version, provides, and conflicts are the working vocabulary of their trade.
 
-Actual system configuration lives in the payload, in formats that already exist. `tree/` carries config files verbatim. `hooks/` runs real binaries with their own CLIs and config files. A fragment is free to carry a kickstart file, a blueprint, or a cloud-init config and invoke the appropriate interpreter from a hook; the assembly tool never parses those files and holds no opinion about them. Whichever declarative format a shop has standardized on keeps working; a fragment is how it gets packaged, versioned, and distributed.
+Actual system configuration lives in the payload, in formats that already exist. `tree/` carries config files verbatim. `hook/` runs real binaries with their own CLIs and config files. A fragment is free to carry a kickstart file, a blueprint, or a cloud-init config and invoke the appropriate interpreter from a hook; the assembly tool never parses those files and holds no opinion about them. Whichever declarative format a shop has standardized on keeps working; a fragment is how it gets packaged, versioned, and distributed.
 
 ### And no simpler: below this floor, the concept fails
 
@@ -81,7 +81,7 @@ Keeping the list flat is what keeps `fragment.toml` readable at a glance, diffab
 
 Two questions settle whether something belongs in `fragment.toml`:
 
-1. **Does it describe the fragment, or the system the fragment configures?** The first belongs in `fragment.toml`. The second belongs in `tree/` or `hooks/`.
+1. **Does it describe the fragment, or the system the fragment configures?** The first belongs in `fragment.toml`. The second belongs in `tree/` or `hook/`.
 2. **If it describes the fragment, is it a flat statement of fact, or does it need to be evaluated?** Facts belong in `fragment.toml`. Anything requiring conditions, precedence, or context belongs in a hook.
 
 ## What a fragment is for depends on who is writing it
@@ -112,7 +112,7 @@ Repo definitions are the deliberate exception, and they fail the build instead. 
 
 ## Why no fragment type taxonomy
 
-All fragments follow the same format (`fragment.toml`, `tree/`, `hooks/`). There is no type system distinguishing "repo fragments" from "config fragments" from "service fragments", and no field declaring which a unit is. A fragment that installs a repo is structurally identical to one that drops a config file; what separates them is the paths they carry, which the generator reads directly.
+All fragments follow the same format (`fragment.toml`, `tree/`, `hook/`). There is no type system distinguishing "repo fragments" from "config fragments" from "service fragments", and no field declaring which a unit is. A fragment that installs a repo is structurally identical to one that drops a config file; what separates them is the paths they carry, which the generator reads directly.
 
 This keeps the format simple and avoids artificial constraints: a fragment can deliver repo definitions, config files, and hooks in a single unit when that's the right packaging boundary. Hooks are not limited to configuration, either; a fragment can ship a hook that validates the result of its own composition.
 
@@ -168,11 +168,11 @@ Between fragments the rule is different and deliberately simple: fragments apply
 Hooks are build inputs, not delivered payload. The tool emits `RUN --mount=type=bind` to execute hooks without copying their bytes into the image:
 
 ```dockerfile
-RUN --mount=type=bind,from=<fragment>,source=/fragment/hooks,target=/frag-hooks,z \
-    /frag-hooks/entrypoint
+RUN --mount=type=bind,from=<fragment>,source=/fragment/hook,target=/frag-hook,z \
+    /frag-hook/entrypoint
 ```
 
-The bind mount exists only during the `RUN` instruction. Hook scripts execute, produce their effects (install packages, write config files, enable services), and disappear. Nothing from `/fragment/hooks` persists in the final image layers.
+The bind mount exists only during the `RUN` instruction. Hook scripts execute, produce their effects (install packages, write config files, enable services), and disappear. Nothing from `/fragment/hook` persists in the final image layers.
 
 `tree/` content is the opposite case: it is delivered payload and is `COPY`'d into the image, where it correctly persists in the layer history.
 

@@ -13,10 +13,10 @@
 # Build-time fragment material fetched by a fragment's own fetch script, never
 # committed: the NVIDIA installer is ~300 MB, and the LICENSE copies are
 # extracted from it so they always match the blob that ships alongside them.
-/examples/fragments/nvidia-driver-run/hooks/*.run
-/examples/fragments/nvidia-driver-run/hooks/LICENSE
+/examples/fragments/nvidia-driver-run/hook/*.run
+/examples/fragments/nvidia-driver-run/hook/LICENSE
 /examples/fragments/nvidia-driver-run/tree/usr/share/licenses/nvidia-driver-run/LICENSE
-/examples/fragments/awscli-zip/hooks/*.zip
+/examples/fragments/awscli-zip/hook/*.zip
 
 # Local RHEL entitlement testing scratch (private subscription material).
 /rhel-testing/

@@ -98,7 +98,7 @@ fails, revert. Commit the test only after it has been seen to discriminate.
 registry access, so its `Manifest:` provenance line has no test; the
 parse-site test in `manifest.rs` (`parsed_manifest_records_its_source_path`)
 and the generator header test are the coverage for that contract. Hook
-script *behavior* in `examples/fragments/*/hooks/` (what an entrypoint does
+script *behavior* in `examples/fragments/*/hook/` (what an entrypoint does
 to an image) has no offline execution pattern; only its structure is
 testable, via `inspect`.
 

@@ -3,8 +3,8 @@
 # Install AWS CLI v2 from the vendor's self-contained zip, into /usr instead of
 # the /usr/local the installer would pick on its own.
 #
-# This entire script runs inside ONE RUN instruction, with the fragment's hooks/
-# directory bind-mounted at /frag-hooks. A bind mount is never committed to a
+# This entire script runs inside ONE RUN instruction, with the fragment's hook/
+# directory bind-mounted at /frag-hook. A bind mount is never committed to a
 # layer, so the ~70 MB zip contributes zero bytes to the built image and there is
 # nothing to clean up afterwards.
 #
@@ -33,7 +33,7 @@ LICENSE_DIR="/usr/share/licenses/awscli-zip"
 # AWS names its zips with the same architecture strings `uname -m` reports, so
 # one entrypoint serves every architecture the CLI is published for. `uname -m`
 # is safe here because the build container's architecture is the target image's.
-ZIP_FILE="/frag-hooks/awscli-exe-linux-$(uname -m)-${AWSCLI_VERSION}.zip"
+ZIP_FILE="/frag-hook/awscli-exe-linux-$(uname -m)-${AWSCLI_VERSION}.zip"
 if [[ ! -f "$ZIP_FILE" ]]; then
     echo "awscli-zip: installer zip not found at ${ZIP_FILE}" >&2
     echo "awscli-zip: run fetch-awscli-zip.sh before building the fragment image" >&2

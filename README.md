@@ -93,8 +93,8 @@ RUN dnf install -y \
 COPY --from=quay.io/marrusl2/fragments/cis-hardening:2.1 /fragment/tree/ /
 
 # --- Hooks ---
-RUN --mount=type=bind,from=quay.io/marrusl2/fragments/cis-hardening:2.1,source=/fragment/hooks,target=/frag-hooks,z \
-    /frag-hooks/entrypoint
+RUN --mount=type=bind,from=quay.io/marrusl2/fragments/cis-hardening:2.1,source=/fragment/hook,target=/frag-hook,z \
+    /frag-hook/entrypoint
 
 # Apply systemd presets from fragments
 RUN systemctl preset-all --preset-mode=enable-only 2>/dev/null || true
@@ -116,7 +116,7 @@ my-fragment/
 ├── tree/                     # Files to copy into the base image
 │   ├── etc/yum.repos.d/my.repo
 │   └── etc/pki/rpm-gpg/RPM-GPG-KEY-my
-└── hooks/                    # Optional: build-time setup
+└── hook/                     # Optional: build-time setup
     └── entrypoint            # The one file the tool runs
 ```
 
@@ -124,7 +124,7 @@ The `tree/` directory mirrors the target filesystem layout. Files are copied ver
 
 `name` in `fragment.toml` must be lowercase letters, digits, `.`, `-`, or `_` (1 to 64 characters, starting and ending with a letter or digit), because it becomes both a directory name and a Containerfile stage name. Names that don't match are rejected rather than rewritten. See [Fragment Format](docs/fragment-format.md#fragmenttoml-schema) for the full grammar.
 
-If `hooks/` contains any file, it must contain an executable file named `entrypoint`, and that is the only file osfragment-assemble runs, after package installation, with no arguments. Anything else under `hooks/` is support material the entrypoint can reach at `/frag-hooks/`, at any depth, and the tool never invokes it. A fragment with hooks and no executable `hooks/entrypoint` fails to load. Fragment authors are responsible for setting the execute bit and for any required interpreters being available in the image at build time.
+If `hook/` contains any file, it must contain an executable file named `entrypoint`, and that is the only file osfragment-assemble runs, after package installation, with no arguments. Anything else under `hook/` is support material the entrypoint can reach at `/frag-hook/`, at any depth, and the tool never invokes it. A fragment with hooks and no executable `hook/entrypoint` fails to load. Fragment authors are responsible for setting the execute bit and for any required interpreters being available in the image at build time.
 
 ## Building your own fragments
 
@@ -134,13 +134,13 @@ Fragment images are standard OCI images. Each fragment directory contains a `Con
 FROM scratch
 COPY fragment.toml /fragment/
 COPY tree/ /fragment/tree/
-COPY hooks/ /fragment/hooks/
+COPY hook/ /fragment/hook/
 ```
 
 Each directory needs its own `COPY` with an explicit destination. A single
-`COPY fragment.toml tree/ hooks/ /fragment/` copies the *contents* of `tree/`
-and `hooks/` into `/fragment/`, leaving no `/fragment/tree/` or
-`/fragment/hooks/` for the tool to read.
+`COPY fragment.toml tree/ hook/ /fragment/` copies the *contents* of `tree/`
+and `hook/` into `/fragment/`, leaving no `/fragment/tree/` or
+`/fragment/hook/` for the tool to read.
 
 Build and push to a registry:
 
@@ -171,7 +171,7 @@ osfragment-assemble [OPTIONS]
 - `--manifest <path>`: Path to manifest file (default: `osfragment-assemble.yaml`)
 - `--output <path>`: Output Containerfile path (default: `Containerfile`)
 - `--pin-digests`: Resolve and pin all image refs to sha256 digests
-- `--self-contained <dir>`: Materialize fragment tree/hooks payload into `<dir>`, alongside the generated `<dir>/Containerfile`, and package `<dir>` as a sibling `<dir>.tar.gz`. `<dir>` carries a `.osfragment-assemble` sentinel marking it safe to regenerate. The emitted Containerfile references no registry image except the base. Mutually exclusive with `--ocp` and `--output`. Fragment images are always pulled by digest internally in this mode regardless of `--pin-digests`, but that digest never appears in the output; `--pin-digests` still only controls whether the base image's `FROM` line is pinned.
+- `--self-contained <dir>`: Materialize fragment tree/hook payload into `<dir>`, alongside the generated `<dir>/Containerfile`, and package `<dir>` as a sibling `<dir>.tar.gz`. `<dir>` carries a `.osfragment-assemble` sentinel marking it safe to regenerate. The emitted Containerfile references no registry image except the base. Mutually exclusive with `--ocp` and `--output`. Fragment images are always pulled by digest internally in this mode regardless of `--pin-digests`, but that digest never appears in the output; `--pin-digests` still only controls whether the base image's `FROM` line is pinned.
 - `--materialize-mounts`: With `--self-contained`, write fragment `mount/` material into the build context. Requires `--self-contained`. Without it, a composition whose fragments derive mount points refuses to generate self-contained output, because the material would land durably on disk in the context and its tarball; an empty `mount/` derives nothing and does not trigger the refusal. With it, the mount subtrees are written owner-only (directories at 0700), the tarball preserves those modes, and a `.gitignore` covering `fragments/*/mount/` is written into the context: git does not record file modes, so a committed context would publish the material world-readable.
 - `--ocp [<path>]`: Generate a MachineOSConfig YAML for OpenShift (default: `machineosbuild.yaml`)
 - `--pool <name>`: MachineConfigPool name for `--ocp` output (default: `worker`)

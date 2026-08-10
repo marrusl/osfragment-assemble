@@ -8,7 +8,7 @@ Read `process-docs/skills/index.md` first for skills files covering non-obvious 
 
 Key modules:
 - `src/manifest.rs`: YAML manifest parsing and data structures
-- `src/loader.rs`: pulls fragment images, extracts metadata and tree/hooks content
+- `src/loader.rs`: pulls fragment images, extracts metadata and tree/hook content
 - `src/generator.rs`: emits Containerfile from loaded fragments
 - `src/ocp.rs`: MachineOSConfig YAML generation for OpenShift on-cluster layering
 - `src/inspect.rs`, `src/list.rs`, `src/validate.rs`: CLI subcommands

@@ -116,7 +116,7 @@ cannot exercise, and for what is known to be unpinnable.
 `cis-hardening`, `epel`, `grafana`, `hashicorp`, `nginx`, `node-exporter`,
 `nvidia-driver-run`, `postgresql`, `tailscale`. Each has a `fragment.toml` and
 a `Containerfile.fragment`; the ones that need them also carry `tree/` and
-`hooks/`. `examples/manifests/` holds 6 composition manifests, of which
+`hook/`. `examples/manifests/` holds 6 composition manifests, of which
 `demo.yaml` composes one fragment of each supported kind.
 
 Two of these fragments carry a large vendor blob fetched by their own script
@@ -172,5 +172,5 @@ whether the document is finished.
   whole suite is offline, and a test that needed a registry would fail there.
 - **`tmp/` is gitignored.** So is `/target`, a `/Containerfile` generated at
   the repo root, `/demo-context/` and its tarball, and the vendor blobs under
-  `examples/fragments/nvidia-driver-run/hooks/` and
-  `examples/fragments/awscli-zip/hooks/`.
+  `examples/fragments/nvidia-driver-run/hook/` and
+  `examples/fragments/awscli-zip/hook/`.

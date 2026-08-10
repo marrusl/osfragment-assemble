@@ -17,10 +17,10 @@ pub fn run_inspect(target: &str) -> Result<()> {
         collect_display_paths(path, "tree", &mut paths)?;
 
         // Hook files count at any depth, so this scan is recursive: a
-        // fragment whose hooks/ holds only lib/helper.sh still needs an
+        // fragment whose hook/ holds only lib/helper.sh still needs an
         // entrypoint, and a shallow scan would pass it.
         let mut hook_list = Vec::new();
-        collect_display_paths(path, "hooks", &mut hook_list)?;
+        collect_display_paths(path, "hook", &mut hook_list)?;
         if !hook_list.is_empty() {
             validate_hooks_entrypoint(frag.name.as_str(), local_entrypoint_mode(path))?;
         }
@@ -76,18 +76,18 @@ pub fn run_inspect(target: &str) -> Result<()> {
 
     println!();
     if !hook_paths.is_empty() {
-        println!("hooks/");
+        println!("hook/");
         for hook in &hook_paths {
             println!("  {}", hook);
         }
     } else {
-        println!("hooks/ (none)");
+        println!("hook/ (none)");
     }
 
     Ok(())
 }
 
-/// Mode of `hooks/entrypoint` under `dir`, when it is a regular file.
+/// Mode of `hook/entrypoint` under `dir`, when it is a regular file.
 ///
 /// `std::fs::metadata` follows symlinks, so a symlinked entrypoint resolving
 /// to an executable regular file is accepted here. The registry path never
@@ -95,7 +95,7 @@ pub fn run_inspect(target: &str) -> Result<()> {
 /// reasons, before this rule is evaluated.
 fn local_entrypoint_mode(dir: &Path) -> Option<u32> {
     use std::os::unix::fs::PermissionsExt;
-    let metadata = std::fs::metadata(dir.join("hooks").join(HOOKS_ENTRYPOINT_NAME)).ok()?;
+    let metadata = std::fs::metadata(dir.join("hook").join(HOOKS_ENTRYPOINT_NAME)).ok()?;
     metadata.is_file().then(|| metadata.permissions().mode())
 }
 
@@ -219,7 +219,7 @@ mod tests {
         )
         .unwrap();
         for (rel, mode) in hooks {
-            let hook_path = dir.path().join("hooks").join(rel);
+            let hook_path = dir.path().join("hook").join(rel);
             std::fs::create_dir_all(hook_path.parent().unwrap()).unwrap();
             std::fs::write(&hook_path, "#!/bin/sh\necho hook\n").unwrap();
             std::fs::set_permissions(&hook_path, std::fs::Permissions::from_mode(*mode)).unwrap();
@@ -234,13 +234,13 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(
-            err.contains("nvidia-driver") && err.contains("no executable hooks/entrypoint"),
+            err.contains("nvidia-driver") && err.contains("no executable hook/entrypoint"),
             "local inspect must raise the same error as the registry path, got: {err}"
         );
     }
 
     /// Pins the recursive scan: hook files count at any depth, so a fragment
-    /// whose hooks/ holds only a nested helper still needs an entrypoint. A
+    /// whose hook/ holds only a nested helper still needs an entrypoint. A
     /// shallow scan would see zero hook files and pass it, diverging from the
     /// registry path with a green suite.
     #[test]
@@ -250,7 +250,7 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(
-            err.contains("no executable hooks/entrypoint"),
+            err.contains("no executable hook/entrypoint"),
             "a nested hook file must still require an entrypoint, got: {err}"
         );
     }
@@ -262,7 +262,7 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(
-            err.contains("hooks/entrypoint is not executable") && err.contains("chmod +x"),
+            err.contains("hook/entrypoint is not executable") && err.contains("chmod +x"),
             "local inspect must raise the mode message, got: {err}"
         );
     }

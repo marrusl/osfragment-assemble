@@ -1,4 +1,4 @@
-//! Self-contained output mode: materializes fragment tree/hooks payload
+//! Self-contained output mode: materializes fragment tree/hook payload
 //! into a local build context next to the generated Containerfile, then
 //! packages the result as a sibling tarball. The emitted Containerfile
 //! references no registry image except the base.
@@ -197,7 +197,7 @@ fn restrict_mount_tree(_fragment_dir: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Materialize the self-contained output: fragment tree/hooks payload,
+/// Materialize the self-contained output: fragment tree/hook payload,
 /// the generated Containerfile, and a copy of the input manifest.
 ///
 /// Builds into a staging directory next to `dir` first and swaps it into
@@ -664,7 +664,7 @@ mod tests {
     /// Builds a minimal fragment layer tarball for tests that need to
     /// exercise the real `extract_fragment_payload_to_disk` extractor
     /// without a registry. Mirrors the real layer layout
-    /// (`fragment/tree/...`, `fragment/hooks/...`). Takes an explicit mode
+    /// (`fragment/tree/...`, `fragment/hook/...`). Takes an explicit mode
     /// per entry (following the `RawEntry`/`create_test_tarball_with_modes`
     /// precedent in `src/loader.rs`) so tests can assert modes survive in
     /// both directions rather than everything landing at one fixed mode.
@@ -955,11 +955,7 @@ mod tests {
                 b"kernel.randomize_va_space=2\n",
                 0o755,
             ),
-            (
-                "fragment/hooks/configure.sh",
-                b"#!/bin/sh\necho hi\n",
-                0o755,
-            ),
+            ("fragment/hook/configure.sh", b"#!/bin/sh\necho hi\n", 0o755),
         ]);
 
         let workdir = tempfile::tempdir().unwrap();
@@ -1005,7 +1001,7 @@ mod tests {
             SENTINEL_FILENAME,
             "fragments/epel/tree/etc/yum.repos.d/epel.repo",
             "fragments/cis/tree/usr/lib/sysctl.d/99-hardening.conf",
-            "fragments/cis/hooks/configure.sh",
+            "fragments/cis/hook/configure.sh",
         ] {
             let original = fs::read(dir.join(rel)).unwrap();
             let extracted = fs::read(extracted_root.join(rel)).unwrap();
@@ -1020,10 +1016,10 @@ mod tests {
     #[test]
     fn hooks_only_fragment_materializes_hooks_without_tree_dir() {
         // A fragment with hooks but no tree/ content must produce
-        // fragments/<name>/hooks/ and no fragments/<name>/tree/ at all,
+        // fragments/<name>/hook/ and no fragments/<name>/tree/ at all,
         // not an empty tree/ directory.
         let hooks_only_layer =
-            build_fixture_layer(&[("fragment/hooks/setup.sh", b"#!/bin/sh\necho setup\n", 0o755)]);
+            build_fixture_layer(&[("fragment/hook/setup.sh", b"#!/bin/sh\necho setup\n", 0o755)]);
 
         let workdir = tempfile::tempdir().unwrap();
         let dir = workdir.path().join("ctx");
@@ -1047,7 +1043,7 @@ mod tests {
         )
         .unwrap();
 
-        assert!(dir.join("fragments/hooks-only/hooks/setup.sh").exists());
+        assert!(dir.join("fragments/hooks-only/hook/setup.sh").exists());
         assert!(
             !dir.join("fragments/hooks-only/tree").exists(),
             "a hooks-only fragment must not produce a tree/ directory"
@@ -1057,7 +1053,7 @@ mod tests {
     /// Builds a `LoadedFragment` whose metadata paths are derived from its
     /// fixture layer entries the same way `load_registry_fragment` derives
     /// them from a real layer: `tree_paths` relative to `fragment/`,
-    /// `hook_paths` relative to `fragment/hooks/`. The fixture's tar entries
+    /// `hook_paths` relative to `fragment/hook/`. The fixture's tar entries
     /// stay the single source of truth for both the metadata the generator
     /// emits from and the bytes `extract_fragment_payload_to_disk` writes,
     /// which is what keeps the seam test below from confirming itself.
@@ -1075,7 +1071,7 @@ mod tests {
             .collect();
         let mut hook_paths: Vec<PathBuf> = entries
             .iter()
-            .filter_map(|(p, _, _)| Path::new(p).strip_prefix("fragment/hooks").ok())
+            .filter_map(|(p, _, _)| Path::new(p).strip_prefix("fragment/hook").ok())
             .map(Path::to_path_buf)
             .collect();
         hook_paths.sort();
@@ -1102,7 +1098,7 @@ mod tests {
     #[test]
     fn emitted_containerfile_paths_resolve_in_the_materialized_tree() {
         // The seam that was previously verified only by inspection: the
-        // generator emits `fragments/<name>/tree|hooks/...` paths from a
+        // generator emits `fragments/<name>/tree|hook/...` paths from a
         // fragment's metadata, while write_output and
         // extract_fragment_payload_to_disk independently decide where those
         // files actually land. Nothing composed the two. This test generates
@@ -1131,13 +1127,13 @@ mod tests {
                 0o644,
             ),
             (
-                "fragment/hooks/entrypoint",
+                "fragment/hook/entrypoint",
                 b"#!/bin/sh\necho configure\n",
                 0o755,
             ),
         ];
         let hooks_only_entries: [(&str, &[u8], u32); 1] = [(
-            "fragment/hooks/entrypoint",
+            "fragment/hook/entrypoint",
             b"#!/bin/sh\necho setup\n",
             0o755,
         )];
@@ -1228,13 +1224,13 @@ mod tests {
             "a hooks-only fragment must not get a COPY of a tree/ that does not exist"
         );
         assert!(
-            refs.contains(&"fragments/hooks-only/hooks".to_string()),
+            refs.contains(&"fragments/hooks-only/hook".to_string()),
             "a hooks-only fragment must still get its hook mount, got {refs:?}"
         );
 
-        // The hook mount's target is /frag-hooks, so each fragment's
+        // The hook mount's target is /frag-hook, so each fragment's
         // invocation must resolve to a real file under that fragment's
-        // materialized hooks/ directory.
+        // materialized hook/ directory.
         let lines: Vec<&str> = containerfile.lines().collect();
         let mut checked_hooks = 0;
         for (idx, line) in lines.iter().enumerate() {
@@ -1249,15 +1245,15 @@ mod tests {
                 .get(idx + 1)
                 .expect("a hook mount line is always followed by its command line");
             for token in command_line.split_whitespace() {
-                if let Some(hook) = token.strip_prefix("/frag-hooks/") {
+                if let Some(hook) = token.strip_prefix("/frag-hook/") {
                     let on_disk = dir
                         .join("fragments")
                         .join(frag_name)
-                        .join("hooks")
+                        .join("hook")
                         .join(hook);
                     assert!(
                         on_disk.exists(),
-                        "hook command /frag-hooks/{hook} resolves to {}, which does not exist",
+                        "hook command /frag-hook/{hook} resolves to {}, which does not exist",
                         on_disk.display()
                     );
                     checked_hooks += 1;
@@ -1312,7 +1308,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
 
         let layer = build_fixture_layer(&[
-            ("fragment/hooks/setup.sh", b"#!/bin/sh\necho setup\n", 0o755),
+            ("fragment/hook/setup.sh", b"#!/bin/sh\necho setup\n", 0o755),
             ("fragment/tree/etc/app.conf", b"key=value\n", 0o644),
         ]);
 
@@ -1321,7 +1317,7 @@ mod tests {
         crate::loader::extract_fragment_payload_to_disk(&layer, &dest, MountMaterialization::Skip)
             .unwrap();
 
-        let hook_path = dest.join("hooks/setup.sh");
+        let hook_path = dest.join("hook/setup.sh");
         let hook_mode = fs::metadata(&hook_path).unwrap().permissions().mode() & 0o777;
         assert_eq!(
             hook_mode, 0o755,
@@ -1343,7 +1339,7 @@ mod tests {
         let mut archive = tar::Archive::new(decoder);
         archive.unpack(&extract_dir).unwrap();
 
-        let extracted_hook = extract_dir.join("frag/hooks/setup.sh");
+        let extracted_hook = extract_dir.join("frag/hook/setup.sh");
         let hook_mode_in_archive =
             fs::metadata(&extracted_hook).unwrap().permissions().mode() & 0o777;
         assert_eq!(
@@ -1394,7 +1390,7 @@ mod tests {
         let workdir = tempfile::tempdir().unwrap();
         let dir = workdir.path().join("myctx");
         fs::create_dir_all(dir.join("fragments/epel/tree/etc/yum.repos.d")).unwrap();
-        fs::create_dir_all(dir.join("fragments/cis/hooks")).unwrap();
+        fs::create_dir_all(dir.join("fragments/cis/hook")).unwrap();
         fs::write(dir.join("Containerfile"), "FROM registry.example/base:1\n").unwrap();
         fs::write(
             dir.join("manifest.yaml"),
@@ -1408,7 +1404,7 @@ mod tests {
         )
         .unwrap();
         fs::write(
-            dir.join("fragments/cis/hooks/configure.sh"),
+            dir.join("fragments/cis/hook/configure.sh"),
             "#!/bin/sh\necho hi\n",
         )
         .unwrap();
@@ -1432,7 +1428,7 @@ mod tests {
             "manifest.yaml",
             SENTINEL_FILENAME,
             "fragments/epel/tree/etc/yum.repos.d/epel.repo",
-            "fragments/cis/hooks/configure.sh",
+            "fragments/cis/hook/configure.sh",
         ] {
             let original = fs::read(dir.join(rel)).unwrap();
             let extracted = fs::read(extracted_root.join(rel)).unwrap();

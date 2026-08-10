@@ -5,7 +5,7 @@
 # host's.
 #
 # This entire script runs inside ONE RUN instruction, with the fragment's
-# hooks/ directory bind-mounted at /frag-hooks. A bind mount is never committed
+# hook/ directory bind-mounted at /frag-hook. A bind mount is never committed
 # to a layer, so the ~300 MB installer contributes zero bytes to the built
 # image and there is nothing to clean up afterwards.
 #
@@ -30,7 +30,7 @@ BUILD_DEPS=(gcc make binutils elfutils-libelf-devel)
 # for. `uname -m` is safe here because the build container's architecture is
 # the target image's architecture -- unlike `uname -r`, which reports the build
 # HOST's kernel and is never correct for this.
-RUN_FILE="/frag-hooks/NVIDIA-Linux-$(uname -m)-${DRIVER_VERSION}.run"
+RUN_FILE="/frag-hook/NVIDIA-Linux-$(uname -m)-${DRIVER_VERSION}.run"
 if [[ ! -f "$RUN_FILE" ]]; then
     echo "nvidia-driver-run: installer not found at ${RUN_FILE}" >&2
     echo "nvidia-driver-run: run fetch-run-installer.sh before building the fragment image" >&2
@@ -102,7 +102,7 @@ fi
 #     the installer propagates --kernel-name to its internal depmod is unverified.
 # --accept-license is intentionally absent: it is obsolete and ignored by current
 #     nvidia-installer. Use of the driver implies acceptance of the LICENSE this
-#     fragment ships in hooks/ and in tree/usr/share/licenses/.
+#     fragment ships in hook/ and in tree/usr/share/licenses/.
 # IGNORE_CC_MISMATCH: the live mechanism for a compiler mismatch between the
 #     image's gcc and the one the kernel was built with (--no-cc-version-check
 #     is deprecated and no longer does anything).

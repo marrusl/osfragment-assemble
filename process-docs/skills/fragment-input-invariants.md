@@ -59,9 +59,9 @@ Containerfile stage name is case-insensitive to the builder while the
 **The rule:** a tar archive can carry the same member as any of
 
 ```text
-fragment/hooks/entrypoint
-./fragment/hooks/entrypoint
-/fragment/hooks/entrypoint
+fragment/hook/entrypoint
+./fragment/hook/entrypoint
+/fragment/hook/entrypoint
 ```
 
 depending on which builder produced the layer. `validate_tar_entry` in
@@ -91,7 +91,7 @@ takes.
 literal `fragment/` prefix, so only the unprefixed form matched, even though
 `validate_tar_entry` had always explicitly permitted `/fragment/...`. A
 fragment whose hooks arrived `./`- or `/`-prefixed had them silently dropped
-from `hook_paths`, which meant the `hooks/entrypoint` contract was never
+from `hook_paths`, which meant the `hook/entrypoint` contract was never
 evaluated for it, while the hook files still landed in the built image via the
 generator's bind mount. The same blind spot made a `/`-prefixed layer report
 `fragment.toml` as missing, and made `extract_fragment_payload_to_disk` write
@@ -101,8 +101,8 @@ nothing at all for `--self-contained`.
 
 `tar::Header::set_path` **normalizes a leading `./` away** and rejects both
 `..` components and absolute paths. A fixture built through it cannot express
-any of the three forms above, so a test that names `./fragment/hooks/entrypoint`
-silently asserts about `fragment/hooks/entrypoint` instead and passes for the
+any of the three forms above, so a test that names `./fragment/hook/entrypoint`
+silently asserts about `fragment/hook/entrypoint` instead and passes for the
 wrong reason. This cost a full debugging cycle: the first reproduction attempt
 "passed", proving nothing.
 

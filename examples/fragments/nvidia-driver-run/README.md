@@ -31,7 +31,7 @@ more interesting claim than being able to carry a good one.
 
 - [`fetch-run-installer.sh`](./fetch-run-installer.sh): Downloads the pinned NVIDIA `.run` installer, verifies its sha256, and extracts the LICENSE files
 - [`fragment.toml`](./fragment.toml): Fragment metadata; deliberately omits `packages.required` so the toolchain installs and removes in the same layer
-- [`hooks/entrypoint`](./hooks/entrypoint): Installs the driver, compiling kernel modules for the image's kernel; runs as a single `RUN` so the installer and toolchain leave no bytes behind
+- [`hook/entrypoint`](./hook/entrypoint): Installs the driver, compiling kernel modules for the image's kernel; runs as a single `RUN` so the installer and toolchain leave no bytes behind
 - [`tree/usr/lib/bootc/kargs.d/50-nvidia.toml`](./tree/usr/lib/bootc/kargs.d/50-nvidia.toml): Kernel arguments that blacklist nouveau and enable nvidia-drm modesetting
 - [`tree/usr/lib/modprobe.d/nvidia-blacklist-nouveau.conf`](./tree/usr/lib/modprobe.d/nvidia-blacklist-nouveau.conf): Modprobe configuration that blacklists nouveau
 
@@ -56,12 +56,12 @@ The fragment image is architecture-specific, because the installer is. The
 entrypoint is not: it derives the installer filename from `uname -m`, which in a
 build container is the target image's architecture.
 
-`hooks/*.run` and the two extracted `LICENSE` copies are listed in the repo's
+`hook/*.run` and the two extracted `LICENSE` copies are listed in the repo's
 `.gitignore`. Everything else in the fragment is committed.
 
 ## What the entrypoint does, and why it is one script
 
-`hooks/entrypoint` is the only file the tool runs. It:
+`hook/entrypoint` is the only file the tool runs. It:
 
 1. Derives `$KVER` from the image's own `kernel-core` package, and refuses to
    continue if the image somehow carries more than one kernel. `uname -r` would
@@ -79,7 +79,7 @@ build container is the target image's architecture.
    deliberately ships, gcc and make included, and that damage would land on
    every consumer of that base, not just this fragment's build.
 
-Steps 3 through 5 are all one script on purpose. The tool bind-mounts `hooks/` for the
+Steps 3 through 5 are all one script on purpose. The tool bind-mounts `hook/` for the
 duration of a single `RUN`, and a bind mount is never committed to a layer, so
 the 350 MB installer contributes zero bytes to the finished image. The toolchain
 is installed and removed inside that same `RUN` for the same reason: had it been
@@ -150,7 +150,7 @@ The NVIDIA Driver License Agreement (v. February 25, 2025) permits distribution
 of the software for use with OSI-licensed operating system kernels at section
 1.1(d), provided the binaries are unmodified and the agreement reaches each
 recipient. This fragment therefore ships the installer byte-for-byte as
-downloaded, and ships NVIDIA's `LICENSE` at both hops: `hooks/LICENSE` travels
+downloaded, and ships NVIDIA's `LICENSE` at both hops: `hook/LICENSE` travels
 with the blob for recipients of the fragment, and
 `tree/usr/share/licenses/nvidia-driver-run/LICENSE` lands in the built image for
 recipients of the OS image. Both are extracted from the verified archive itself,

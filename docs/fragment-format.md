@@ -15,14 +15,14 @@ A fragment is an OCI image with this directory structure under `/fragment/`:
 │   └── ...            # Arbitrary filesystem paths
 ├── mount/             # Optional: material bind-mounted during package and hook steps
 │   └── etc/pki/entitlement/*.pem
-└── hooks/             # Optional: build-time setup (any language)
-    ├── entrypoint     # Required when hooks/ has content; the only file run
+└── hook/              # Optional: build-time setup (any language)
+    ├── entrypoint     # Required when hook/ has content; the only file run
     └── lib/helper.sh  # Support material, never invoked by the tool
 ```
 
 ## `fragment.toml` Schema
 
-`fragment.toml` is unit metadata. Its fields describe the fragment: identity, version, publisher, ordering, and how it combines with other fragments. System configuration lives in `tree/` (files, verbatim) and `hooks/` (executables, any language), in whatever formats already exist; the tool never parses that content. See [Design Rationales](rationales.md#why-the-fragment-format-is-as-light-as-possible-and-no-simpler).
+`fragment.toml` is unit metadata. Its fields describe the fragment: identity, version, publisher, ordering, and how it combines with other fragments. System configuration lives in `tree/` (files, verbatim) and `hook/` (executables, any language), in whatever formats already exist; the tool never parses that content. See [Design Rationales](rationales.md#why-the-fragment-format-is-as-light-as-possible-and-no-simpler).
 
 ```toml
 [fragment]
@@ -71,7 +71,7 @@ The generated Containerfile applies fragments in this order:
 1. Repo files (yum.repos.d, rpm-gpg) from all fragments
 2. Packages (single batched `dnf install` with all requested packages)
 3. Config files (the rest of each fragment's `tree/` content)
-4. Hooks (each hook-carrying fragment's `hooks/entrypoint`)
+4. Hooks (each hook-carrying fragment's `hook/entrypoint`)
 5. Preset application and validation
 
 Config files land after package installation to ensure fragment-supplied configurations are never overwritten by RPM defaults.
@@ -88,12 +88,12 @@ RUN --mount=type=bind,from=<fragment>@sha256:...,source=/fragment/mount/etc/pki/
         some-package \
     && dnf clean all
 
-RUN --mount=type=bind,from=<fragment>@sha256:...,source=/fragment/hooks,target=/frag-hooks,z \
+RUN --mount=type=bind,from=<fragment>@sha256:...,source=/fragment/hook,target=/frag-hook,z \
     --mount=type=bind,from=<fragment>@sha256:...,source=/fragment/mount/etc/pki/entitlement,target=/etc/pki/entitlement,ro,z \
-    /frag-hooks/entrypoint
+    /frag-hook/entrypoint
 ```
 
-with the self-contained variant reading `source=fragments/<name>/mount/<path>` and no `from=`. The hook step's own `/frag-hooks` mount rides the `RUN` line and the credential mounts follow it.
+with the self-contained variant reading `source=fragments/<name>/mount/<path>` and no `from=`. The hook step's own `/frag-hook` mount rides the `RUN` line and the credential mounts follow it.
 
 A fragment whose `mount/` derives mount points must have its manifest entry pinned by digest; an empty `mount/` derives nothing and is not subject to pinning. Two fragments mounting colliding targets is an error, as is a target that equals or contains `/etc/yum.repos.d` or `/etc/pki/rpm-gpg`. Symlinks and hardlinks are rejected in fragment layers, `mount/` included.
 
@@ -105,21 +105,21 @@ In self-contained mode the credential mount reads from a stable context path rat
 
 ## Hooks Contract
 
-If `/fragment/hooks/` contains any file, it must contain an executable regular file named `entrypoint`. That file is the only thing osfragment-assemble runs: once, as root, after packages are installed, with no arguments and no environment beyond what the build already provides. Fragment authors are responsible for setting the execute bit and for any required interpreters being available in the image at build time. The generated Containerfile bind-mounts the fragment's `hooks/` directory for the duration of a single `RUN` and invokes the entrypoint through it:
+If `/fragment/hook/` contains any file, it must contain an executable regular file named `entrypoint`. That file is the only thing osfragment-assemble runs: once, as root, after packages are installed, with no arguments and no environment beyond what the build already provides. Fragment authors are responsible for setting the execute bit and for any required interpreters being available in the image at build time. The generated Containerfile bind-mounts the fragment's `hook/` directory for the duration of a single `RUN` and invokes the entrypoint through it:
 
 ```dockerfile
-RUN --mount=type=bind,from=<fragment>,source=/fragment/hooks,target=/frag-hooks,z \
-    /frag-hooks/entrypoint
+RUN --mount=type=bind,from=<fragment>,source=/fragment/hook,target=/frag-hook,z \
+    /frag-hook/entrypoint
 ```
 
 The hooks are never copied into the image. A bind mount is not committed to a layer, so no hook bytes remain in the built image and there is nothing to clean up afterwards. Copying the directory and deleting it in a later `RUN` would not achieve this: the delete only writes a whiteout, and the bytes stay recoverable in the `COPY` layer.
 
-Under `--self-contained` the hooks are mounted from the build context instead of the fragment image, as `source=fragments/<name>/hooks`, with no `from=`. The mount is otherwise identical to the form above.
+Under `--self-contained` the hooks are mounted from the build context instead of the fragment image, as `source=fragments/<name>/hook`, with no `from=`. The mount is otherwise identical to the form above.
 
 ### Rules
 
-1. `hooks/entrypoint` is the only file executed. Everything else under `hooks/`, at any depth, is support material available to it at `/frag-hooks/`: helper scripts, vendor installers, payload binaries. Sequencing, arguments, and conditionals belong inside the entrypoint, which is a real program and has control flow.
-2. A fragment whose `hooks/` holds files but no executable `hooks/entrypoint` fails to load, with an error naming the fragment. There is no fallback to running whatever looks runnable. A nested `hooks/lib/entrypoint` does not satisfy the rule; only `hooks/entrypoint` counts.
+1. `hook/entrypoint` is the only file executed. Everything else under `hook/`, at any depth, is support material available to it at `/frag-hook/`: helper scripts, vendor installers, payload binaries. Sequencing, arguments, and conditionals belong inside the entrypoint, which is a real program and has control flow.
+2. A fragment whose `hook/` holds files but no executable `hook/entrypoint` fails to load, with an error naming the fragment. There is no fallback to running whatever looks runnable. A nested `hook/lib/entrypoint` does not satisfy the rule; only `hook/entrypoint` counts.
 3. Hooks run as root in the target image's filesystem.
 4. Packages declared in the manifest are preferred; the tool can deduplicate and batch them. Hooks are not prevented from installing packages, but hook-installed packages bypass deduplication and won't appear in the manifest's package list.
 5. Hooks should be idempotent where possible (though they only run once during build).
@@ -140,12 +140,12 @@ FROM scratch
 COPY fragment.toml /fragment/
 COPY tree/ /fragment/tree/
 COPY mount/ /fragment/mount/
-COPY hooks/ /fragment/hooks/
+COPY hook/ /fragment/hook/
 ```
 
-No `RUN` commands, no base image. The fragment carries only the files needed for assembly. Omit the `tree/`, `mount/`, or `hooks/` line if the fragment has no such directory.
+No `RUN` commands, no base image. The fragment carries only the files needed for assembly. Omit the `tree/`, `mount/`, or `hook/` line if the fragment has no such directory.
 
-Each directory needs its own `COPY` with an explicit destination. A single `COPY fragment.toml tree/ hooks/ /fragment/` copies the *contents* of `tree/` and `hooks/` into `/fragment/`, so neither `/fragment/tree/` nor `/fragment/hooks/` exists and the fragment reads as empty. That form builds and pushes without error, so the mistake surfaces only when the tool loads the fragment.
+Each directory needs its own `COPY` with an explicit destination. A single `COPY fragment.toml tree/ hook/ /fragment/` copies the *contents* of `tree/` and `hook/` into `/fragment/`, so neither `/fragment/tree/` nor `/fragment/hook/` exists and the fragment reads as empty. That form builds and pushes without error, so the mistake surfaces only when the tool loads the fragment.
 
 Build and push:
 ```bash

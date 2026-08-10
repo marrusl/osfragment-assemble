@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Fetch the pinned NVIDIA .run installer into hooks/, verify it against a
+# Fetch the pinned NVIDIA .run installer into hook/, verify it against a
 # recorded sha256, and extract the LICENSE that has to travel with it.
 #
 # The installer is ~300 MB and is never committed: it is listed in the repo's
@@ -19,7 +19,7 @@ BASE_URL="https://download.nvidia.com/XFree86"
 
 FRAGMENT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LICENSE_IN_IMAGE="${FRAGMENT_DIR}/tree/usr/share/licenses/nvidia-driver-run/LICENSE"
-LICENSE_WITH_BLOB="${FRAGMENT_DIR}/hooks/LICENSE"
+LICENSE_WITH_BLOB="${FRAGMENT_DIR}/hook/LICENSE"
 
 # sha256 of each published installer, captured by downloading each from NVIDIA's
 # official location (aarch64 on 2026-08-04, x86_64 on 2026-08-09). Re-capture on
@@ -47,7 +47,7 @@ if ! EXPECTED_SHA256="$(sha256_for_arch "$ARCH")"; then
 fi
 
 RUN_NAME="NVIDIA-Linux-${ARCH}-${DRIVER_VERSION}.run"
-RUN_PATH="${FRAGMENT_DIR}/hooks/${RUN_NAME}"
+RUN_PATH="${FRAGMENT_DIR}/hook/${RUN_NAME}"
 RUN_URL="${BASE_URL}/Linux-${ARCH}/${DRIVER_VERSION}/${RUN_NAME}"
 
 # macOS ships `shasum`, Linux ships `sha256sum`.
@@ -79,7 +79,7 @@ fi
 
 # NVIDIA's distribution grant is conditional on the agreement reaching each
 # recipient, so the LICENSE is taken from the verified archive itself rather
-# than committed separately, and shipped at both hops: hooks/LICENSE travels
+# than committed separately, and shipped at both hops: hook/LICENSE travels
 # with the blob for recipients of the FRAGMENT, and the tree/ copy lands in
 # /usr/share/licenses for recipients of the built OS IMAGE.
 echo "==> extracting LICENSE from ${RUN_NAME}"
@@ -98,5 +98,5 @@ mkdir -p "$(dirname "$LICENSE_IN_IMAGE")"
 cp "$EXTRACTED_LICENSE" "$LICENSE_IN_IMAGE"
 cp "$EXTRACTED_LICENSE" "$LICENSE_WITH_BLOB"
 
-echo "==> ready: hooks/${RUN_NAME} ($(du -h "$RUN_PATH" | cut -f1))"
-echo "==> ready: hooks/LICENSE and tree/usr/share/licenses/nvidia-driver-run/LICENSE"
+echo "==> ready: hook/${RUN_NAME} ($(du -h "$RUN_PATH" | cut -f1))"
+echo "==> ready: hook/LICENSE and tree/usr/share/licenses/nvidia-driver-run/LICENSE"
