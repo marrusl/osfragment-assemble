@@ -132,21 +132,38 @@ This is the inverse of the mirror trick above: mirroring makes a local image
 stand in for a published one deliberately, and this is the same substitution
 happening by accident.
 
-## The published fragment set is mixed-architecture
+## The published fragment set is multi-arch
 
-Measured 2026-08-04: `epel:10`, `awscli-zip:2.36.16`, and
-`nvidia-driver-run:610.57.04` are `arm64`, while `grafana:11.0` and
-`cis-hardening:2.1` are `amd64`: the originals were pushed from a different
-machine than the later ones. Nothing breaks, because fragment payload is
-architecture-independent files, but every build on an arm64 host prints
+Verified 2026-08-10: every published example fragment
+(`quay.io/marrusl2/fragments/...`) is a multi-arch OCI image index carrying
+`linux/amd64` and `linux/arm64` manifests, with the
+`com.github.marrusl.osfragment.*` annotations set on the index itself, not on
+either per-arch manifest. This replaces an earlier mixed set where some
+fragments were single-arch `arm64` and others single-arch `amd64`; all ten
+have since been republished as uniform manifest lists, so the
+`WARNING: image platform (...) does not match the expected platform (...)`
+noise from that era should no longer appear.
 
+Verify with `skopeo inspect --raw`, not plain `skopeo inspect`. Plain
+`inspect` resolves to a single platform's image config and reports its
+Labels; `--raw` returns the index itself, and the index is what carries the
+`com.github.marrusl.osfragment.*` annotations that `list` reads. A
+conforming index has:
+
+- top-level `"mediaType": "application/vnd.oci.image.index.v1+json"`
+- a `.manifests[]` array whose entries carry `.platform.architecture` of
+  `amd64` and `arm64`
+- top-level `.annotations` including `com.github.marrusl.osfragment.name`,
+  `.version`, `.description`, `.provides.repos`, `.packages.required`,
+  `.mounts`
+
+Confirm both arches plus the name/version annotation in one line:
+
+```bash
+skopeo inspect --raw docker://quay.io/marrusl2/fragments/epel:10 \
+  | jq -c '{mediaType, arches: [.manifests[].platform.architecture], name: .annotations["com.github.marrusl.osfragment.name"]}'
+# {"mediaType":"application/vnd.oci.image.index.v1+json","arches":["amd64","arm64"],"name":"epel"}
 ```
-WARNING: image platform (linux/amd64) does not match the expected platform (linux/arm64)
-```
-
-once per amd64 fragment, including during `COPY --from=`. Check with
-`skopeo inspect --format '{{.Architecture}}'` before assuming a fragment set is
-uniform, and expect the warning rather than treating it as a new fault.
 
 ## Never write non-trivial inline `python3 -c` in this pipeline
 
