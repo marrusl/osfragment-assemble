@@ -146,9 +146,9 @@ RUN --mount=type=bind,from=quay.io/your-username/rhel-entitlement@sha256:<digest
 COPY --from=quay.io/marrusl2/fragments/cis-hardening:2.1 /fragment/tree/ /
 
 # --- Hooks ---
-RUN --mount=type=bind,from=quay.io/marrusl2/fragments/cis-hardening:2.1,source=/fragment/hook,target=/frag-hook,z \
-    --mount=type=bind,from=quay.io/your-username/rhel-entitlement@sha256:<digest>,source=/fragment/mount/run/secrets/etc-pki-entitlement,target=/run/secrets/etc-pki-entitlement,ro,z \
+RUN --mount=type=bind,from=quay.io/your-username/rhel-entitlement@sha256:<digest>,source=/fragment/mount/run/secrets/etc-pki-entitlement,target=/run/secrets/etc-pki-entitlement,ro,z \
     --mount=type=bind,from=quay.io/your-username/rhel-entitlement@sha256:<digest>,source=/fragment/mount/run/secrets/rhsm,target=/run/secrets/rhsm,ro,z \
+    --mount=type=bind,from=quay.io/marrusl2/fragments/cis-hardening:2.1,source=/fragment/hook,target=/frag-hook,z \
     /frag-hook/entrypoint
 
 # Apply systemd presets from fragments

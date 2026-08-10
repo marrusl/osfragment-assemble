@@ -529,10 +529,11 @@ correctness requirements a future edit must not regress:
   through `copy_from_source`.** Build-mount references are always inline
   (`from=<pinned ref>` in registry mode, `from=`-less `context_source` in
   self-contained mode), and a pure-mount fragment has no `frag-<name>` named
-  stage to reference. The hook's own `/frag-hook` mount rides the `RUN` line;
-  the credential mounts follow it as continuation lines. Both sites emit through
-  the shared `write_mounted_run` helper so their continuation formatting cannot
-  drift.
+  stage to reference. The credential mounts lead the `RUN` line, matching the
+  package step; the hook's own `/frag-hook` mount is the final flag,
+  immediately above the `/frag-hook/entrypoint` invocation that uses it. Both
+  sites emit through the shared `write_mounted_run` helper so their
+  continuation formatting cannot drift.
 - **`unattached_mount_notice` fires only when there is no dnf-capable step at
   all** (no packages AND no hooks). Before the fix it keyed on packages alone;
   after it, a mount + hooks + no-packages composition does emit the mounts (on

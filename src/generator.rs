@@ -421,11 +421,13 @@ pub fn generate_containerfile(
             writeln!(out, "{}", CREDENTIAL_MOUNT_COMMENT)?;
         }
         for loaded in &hook_fragments {
-            // The hooks bind mount rides the RUN line; the credential build
-            // mounts follow it, so a hook that shells out to dnf against the
-            // base repos authenticates exactly as the package step does. The
-            // mount_flags vector is reused verbatim and never routed through a
-            // named stage: a build-mount reference is always inline, and a
+            // The credential build mounts lead the RUN line, matching the
+            // package step, so a hook that shells out to dnf against the base
+            // repos authenticates exactly as the package step does. The
+            // hook's own bind mount is the final flag, immediately above the
+            // `/frag-hook/entrypoint` invocation that uses it. The
+            // mount_flags vector is reused verbatim and never routed through
+            // a named stage: a build-mount reference is always inline, and a
             // pure-mount fragment has no stage to reference.
             let hooks_mount = if self_contained {
                 format!(
@@ -439,9 +441,8 @@ pub fn generate_containerfile(
                     source
                 )
             };
-            let mut hook_flags = Vec::with_capacity(1 + mount_flags.len());
+            let mut hook_flags = mount_flags.clone();
             hook_flags.push(hooks_mount);
-            hook_flags.extend(mount_flags.iter().cloned());
             // The entrypoint is the only file the tool runs; anything else
             // under hook/ is support material it can reach at the mount path.
             write_mounted_run(&mut out, &hook_flags, "/frag-hook/entrypoint")?;
@@ -801,20 +802,33 @@ mod tests {
     /// literal, so comparing anything less than the whole line would let a
     /// differently indented or extended command through.
     ///
-    /// A hook RUN's first line carries the `/frag-hook` bind mount; credential
-    /// build mounts, when present, follow it as continuation lines before the
-    /// command. So the command is not simply the next line: it is the first
-    /// following line that is not itself a continuation (does not end in ` \`).
+    /// A hook RUN's flags lead with credential build mounts, when present,
+    /// and end with its own `/frag-hook` bind mount immediately above the
+    /// command, so `target=/frag-hook,z` can land on the `RUN ` line itself
+    /// or on a later continuation line depending on whether credential mounts
+    /// are present. This scans the whole RUN block (the `RUN ` line through
+    /// its `\`-continued lines) for `target=/frag-hook,z` to identify a hook
+    /// RUN, then returns its final, non-continuation line.
     fn hook_invocation_lines(output: &str) -> Vec<&str> {
         let lines: Vec<&str> = output.lines().collect();
         let mut invocations = Vec::new();
-        for (idx, line) in lines.iter().enumerate() {
-            if line.starts_with("RUN ") && line.contains("target=/frag-hook,z") {
-                let mut i = idx;
-                while lines[i].ends_with('\\') && i + 1 < lines.len() {
-                    i += 1;
+        let mut idx = 0;
+        while idx < lines.len() {
+            if lines[idx].starts_with("RUN ") {
+                let start = idx;
+                let mut end = idx;
+                while lines[end].ends_with('\\') && end + 1 < lines.len() {
+                    end += 1;
                 }
-                invocations.push(lines[i]);
+                if lines[start..=end]
+                    .iter()
+                    .any(|l| l.contains("target=/frag-hook,z"))
+                {
+                    invocations.push(lines[end]);
+                }
+                idx = end + 1;
+            } else {
+                idx += 1;
             }
         }
         invocations
@@ -2413,12 +2427,12 @@ RUN bootc container lint
         };
         let output = generate_containerfile(&manifest, &[frag], None, false, false).unwrap();
 
-        // The hook RUN: its own /frag-hook mount (a named stage, since the
-        // fragment is pinned and now carries a hook), then the credential
-        // mount inline (never a named stage), then the invocation.
+        // The hook RUN: the credential mount inline (never a named stage)
+        // first, then its own /frag-hook mount (a named stage, since the
+        // fragment is pinned and now carries a hook), then the invocation.
         let expected_hook_block = "\
-RUN --mount=type=bind,from=frag-entitlement,source=/fragment/hook,target=/frag-hook,z \\
-    --mount=type=bind,from=quay.io/acme/entitlement@sha256:d00d,source=/fragment/mount/etc/pki/entitlement,target=/etc/pki/entitlement,ro,z \\
+RUN --mount=type=bind,from=quay.io/acme/entitlement@sha256:d00d,source=/fragment/mount/etc/pki/entitlement,target=/etc/pki/entitlement,ro,z \\
+    --mount=type=bind,from=frag-entitlement,source=/fragment/hook,target=/frag-hook,z \\
     /frag-hook/entrypoint";
         assert!(
             output.contains(expected_hook_block),
@@ -2438,8 +2452,8 @@ RUN --mount=type=bind,from=frag-entitlement,source=/fragment/hook,target=/frag-h
         let output = generate_containerfile(&manifest, &[frag], None, false, true).unwrap();
 
         let expected_hook_block = "\
-RUN --mount=type=bind,source=fragments/entitlement/hook,target=/frag-hook,z \\
-    --mount=type=bind,source=fragments/entitlement/mount/etc/pki/entitlement,target=/etc/pki/entitlement,ro,z \\
+RUN --mount=type=bind,source=fragments/entitlement/mount/etc/pki/entitlement,target=/etc/pki/entitlement,ro,z \\
+    --mount=type=bind,source=fragments/entitlement/hook,target=/frag-hook,z \\
     /frag-hook/entrypoint";
         assert!(
             output.contains(expected_hook_block),
@@ -2509,14 +2523,29 @@ RUN --mount=type=bind,source=fragments/entitlement/hook,target=/frag-hook,z \\
 
         // Flag counts alone cannot see *which* RUN a flag landed on or its
         // position relative to the others, so also walk each hook RUN block
-        // directly: the hook's own /frag-hook mount, then both credential
-        // continuation lines in manifest order, then the invocation.
+        // directly: both credential continuation lines in manifest order,
+        // then the hook's own /frag-hook mount, then the invocation. The
+        // credential mounts now lead, so the RUN line itself no longer
+        // carries `target=/frag-hook,z`; a hook RUN is identified by
+        // scanning its whole block (RUN line through `\`-continued lines)
+        // for that marker, same as `hook_invocation_lines` does.
         let lines: Vec<&str> = output.lines().collect();
         let hook_run_starts: Vec<usize> = lines
             .iter()
             .enumerate()
-            .filter(|(_, l)| l.starts_with("RUN ") && l.contains("target=/frag-hook,z"))
-            .map(|(i, _)| i)
+            .filter_map(|(idx, line)| {
+                if !line.starts_with("RUN ") {
+                    return None;
+                }
+                let mut end = idx;
+                while lines[end].ends_with('\\') && end + 1 < lines.len() {
+                    end += 1;
+                }
+                lines[idx..=end]
+                    .iter()
+                    .any(|l| l.contains("target=/frag-hook,z"))
+                    .then_some(idx)
+            })
             .collect();
         assert_eq!(
             hook_run_starts.len(),
@@ -2525,19 +2554,23 @@ RUN --mount=type=bind,source=fragments/entitlement/hook,target=/frag-hook,z \\
         );
         for start in hook_run_starts {
             assert_eq!(
-                lines[start + 1],
-                format!("    {} \\", cred_entitlement),
-                "entitlement mount must be the first continuation line, got:\n{output}"
+                lines[start],
+                format!("RUN {} \\", cred_entitlement),
+                "entitlement mount must lead the RUN line, got:\n{output}"
             );
             assert_eq!(
-                lines[start + 2],
+                lines[start + 1],
                 format!("    {} \\", cred_rhsm),
-                "rhsm mount must be the second continuation line, got:\n{output}"
+                "rhsm mount must be the second flag, got:\n{output}"
+            );
+            assert!(
+                lines[start + 2].ends_with("target=/frag-hook,z \\"),
+                "the hook's own mount must be the third flag, directly above the invocation, got:\n{output}"
             );
             assert_eq!(
                 lines[start + 3],
                 HOOK_INVOCATION,
-                "the invocation must directly follow both continuation lines, got:\n{output}"
+                "the invocation must directly follow the hook's own mount, got:\n{output}"
             );
         }
     }

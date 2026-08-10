@@ -88,12 +88,12 @@ RUN --mount=type=bind,from=<fragment>@sha256:...,source=/fragment/mount/etc/pki/
         some-package \
     && dnf clean all
 
-RUN --mount=type=bind,from=<fragment>@sha256:...,source=/fragment/hook,target=/frag-hook,z \
-    --mount=type=bind,from=<fragment>@sha256:...,source=/fragment/mount/etc/pki/entitlement,target=/etc/pki/entitlement,ro,z \
+RUN --mount=type=bind,from=<fragment>@sha256:...,source=/fragment/mount/etc/pki/entitlement,target=/etc/pki/entitlement,ro,z \
+    --mount=type=bind,from=<fragment>@sha256:...,source=/fragment/hook,target=/frag-hook,z \
     /frag-hook/entrypoint
 ```
 
-with the self-contained variant reading `source=fragments/<name>/mount/<path>` and no `from=`. The hook step's own `/frag-hook` mount rides the `RUN` line and the credential mounts follow it.
+with the self-contained variant reading `source=fragments/<name>/mount/<path>` and no `from=`. The credential mounts lead the `RUN` line and the hook step's own `/frag-hook` mount is the final flag, immediately above the entrypoint invocation.
 
 A fragment whose `mount/` derives mount points must have its manifest entry pinned by digest; an empty `mount/` derives nothing and is not subject to pinning. Two fragments mounting colliding targets is an error, as is a target that equals or contains `/etc/yum.repos.d` or `/etc/pki/rpm-gpg`. Symlinks and hardlinks are rejected in fragment layers, `mount/` included.
 
