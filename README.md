@@ -16,6 +16,26 @@ osfragment-assemble reads a YAML manifest declaring a base bootc-compatible imag
 - skopeo (must be installed and authenticated to pull from registries)
 - podman
 
+### Install
+
+**Homebrew (macOS, Apple Silicon):**
+
+```bash
+brew tap marrusl/osfragment-assemble
+brew install osfragment-assemble
+```
+
+**Fedora / CentOS Stream / RHEL (via COPR):**
+
+```bash
+dnf copr enable mrussell/osfragment-assemble
+dnf install osfragment-assemble
+```
+
+**Pre-built binaries:**
+
+Available from [GitHub Releases](https://github.com/marrusl/osfragment-assemble/releases) for Linux (x86_64, arm64) and macOS (arm64).
+
 ### Build
 
 ```bash
