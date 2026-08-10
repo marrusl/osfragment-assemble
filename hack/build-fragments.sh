@@ -148,6 +148,8 @@ build_arch_neutral() {
     echo "==> ${name}: building ${PLATFORMS} manifest ${ref}"
     # Drop any stale local list so a re-run does not accumulate duplicate entries.
     podman manifest rm "${ref}" 2>/dev/null || true
+    # A stale plain-image tag at the same name defeats --manifest, so clear it too.
+    podman rmi -f "${ref}" 2>/dev/null || true
     podman build --platform "${PLATFORMS}" \
         --manifest "${ref}" \
         -f "${dir}/Containerfile.fragment" \
@@ -173,6 +175,9 @@ build_arch_specific() {
     tag="$(fragment_tag "${dir}/fragment.toml")"
     ref="${REGISTRY}/${name}:${tag}"
 
+    # Drop any stale per-arch tags so a re-run does not reuse stale per-arch images.
+    podman rmi -f "localhost/${name}-amd64" "localhost/${name}-arm64" 2>/dev/null || true
+
     echo "==> ${name}: building amd64"
     purge_blob "$dir" "$blob_glob"
     "${dir}/${fetch}" x86_64
@@ -192,6 +197,8 @@ build_arch_specific() {
     echo "==> ${name}: assembling manifest ${ref}"
     # Drop any stale local list so a re-run starts from a clean manifest.
     podman manifest rm "${ref}" 2>/dev/null || true
+    # A stale plain-image tag at the same name defeats --manifest, so clear it too.
+    podman rmi -f "${ref}" 2>/dev/null || true
     podman manifest create "${ref}"
     # podman stores `-t <name>-<arch>` as localhost/<name>-<arch>:latest; the
     # containers-storage transport needs that full name, not the short tag.
