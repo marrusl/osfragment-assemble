@@ -124,7 +124,7 @@ This is the same deference the format section applies to configuration languages
 
 The generated Containerfile is a build artifact operators can read, edit, and version. If osfragment-assemble stops meeting their needs, they take the Containerfile and maintain it manually. The tool's job is codegen, not gatekeeping.
 
-The composition problem could also be solved with a build DSL, a custom BuildKit frontend, or a builder daemon. Each of those is more capable than codegen, and each is a new component a build pipeline would have to adopt, trust, and debug. Generating a plain Containerfile means the fragment format is the only new thing here; everything downstream of it runs on build tooling users already have. Most of the emitted syntax is base Dockerfile; hook execution uses `RUN --mount`, a BuildKit/Buildah extension that podman, buildah, and current Docker all support (see "Why build inputs stay out of the image" below).
+The composition problem could also be solved with a build DSL, a custom BuildKit frontend, or a builder daemon. Each of those is more capable than codegen, and each is a new component a build pipeline would have to adopt, trust, and debug. Generating a plain Containerfile means the fragment format is the only new thing here; everything downstream of it runs on build tooling users already have. Most of the emitted syntax is base Containerfile; hook execution uses `RUN --mount`, a BuildKit/Buildah extension that podman, buildah, and current Docker all support (see "Why build inputs stay out of the image" below).
 
 ## Why manifest-declared packages are preferred over hook-installed packages
 
