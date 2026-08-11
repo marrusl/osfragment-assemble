@@ -12,7 +12,7 @@ osfragment-assemble reads a YAML manifest declaring a base bootc-compatible imag
 
 ### Prerequisites
 
-- skopeo (must be installed and authenticated to pull from registries)
+- skopeo (authenticated to any private registries your fragments use)
 
 ### Install
 
