@@ -13,7 +13,6 @@ osfragment-assemble reads a YAML manifest declaring a base bootc-compatible imag
 ### Prerequisites
 
 - skopeo (must be installed and authenticated to pull from registries)
-- podman
 
 ### Install
 
@@ -64,6 +63,8 @@ Pre-built fragment images are available at `quay.io/marrusl2/fragments/`. Genera
 The manifest at `examples/manifests/full.yaml` already points to these public images, so no editing is needed.
 
 ### Build the final image
+
+Requires podman (or another OCI builder).
 
 ```bash
 podman build -f Containerfile -t my-bootc-image:latest .
