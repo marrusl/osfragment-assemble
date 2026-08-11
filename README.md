@@ -60,7 +60,7 @@ Pre-built fragment images are available at `quay.io/marrusl2/fragments/`. Genera
 osfragment-assemble --manifest examples/manifests/full.yaml --output Containerfile
 ```
 
-The manifest at `examples/manifests/full.yaml` already points to these public images, so no editing is needed.
+The manifest at `examples/manifests/full.yaml` already points to these public images, so no editing is needed. Review the generated Containerfile and make any changes you need before building.
 
 ### Build the final image
 
@@ -69,8 +69,6 @@ Requires podman (or another OCI builder).
 ```bash
 podman build -f Containerfile -t my-bootc-image:latest .
 ```
-
-The generated Containerfile is a draft. Review and edit it before building for production use.
 
 ## Example
 
