@@ -49,7 +49,7 @@ The binary will be at `target/release/osfragment-assemble`.
 Examine a published fragment's metadata and contents:
 
 ```bash
-./target/release/osfragment-assemble inspect quay.io/marrusl2/fragments/tailscale:1.82.0
+osfragment-assemble inspect quay.io/marrusl2/fragments/tailscale:1.82.0
 ```
 
 ### Generate a Containerfile
@@ -57,7 +57,7 @@ Examine a published fragment's metadata and contents:
 Pre-built fragment images are available at `quay.io/marrusl2/fragments/`. Generate a Containerfile using them:
 
 ```bash
-./target/release/osfragment-assemble --manifest examples/manifests/full.yaml --output Containerfile
+osfragment-assemble --manifest examples/manifests/full.yaml --output Containerfile
 ```
 
 The manifest at `examples/manifests/full.yaml` already points to these public images, so no editing is needed.
