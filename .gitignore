@@ -20,3 +20,9 @@
 
 # Local RHEL entitlement testing scratch (private subscription material).
 /rhel-testing/
+
+# AI coding assistant directories
+.claude/
+.cursor/
+.continue/
+.aider*
