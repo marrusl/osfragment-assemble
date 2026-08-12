@@ -281,16 +281,16 @@ osfragment-assemble composes build inputs for bootc image builds. Every generate
 
 The `examples/fragments/` directory contains 10 ready-to-use fragments:
 
-- **epel** - EPEL repository configuration
-- **tailscale** - Tailscale VPN with systemd preset
-- **grafana** - Grafana repository and GPG key
-- **postgresql** - PostgreSQL 17 repository
-- **hashicorp** - HashiCorp repository (Vault, Terraform, etc.)
-- **cis-hardening** - CIS security hardening configurations
-- **node-exporter** - Prometheus Node Exporter
-- **nginx** - nginx web server
-- **awscli-zip** - AWS CLI v2 from the vendor's zip, installed into `/usr` rather than `/usr/local`
-- **nvidia-driver-run** - NVIDIA driver from the vendor's `.run` installer, compiled for the image's kernel
+- **[epel](https://quay.io/repository/marrusl2/fragments/epel)** (`quay.io/marrusl2/fragments/epel:10`) - EPEL repository configuration
+- **[tailscale](https://quay.io/repository/marrusl2/fragments/tailscale)** (`quay.io/marrusl2/fragments/tailscale:1.82.0`) - Tailscale VPN with systemd preset
+- **[grafana](https://quay.io/repository/marrusl2/fragments/grafana)** (`quay.io/marrusl2/fragments/grafana:11.0`) - Grafana repository and GPG key
+- **[postgresql](https://quay.io/repository/marrusl2/fragments/postgresql)** (`quay.io/marrusl2/fragments/postgresql:17`) - PostgreSQL 17 repository
+- **[hashicorp](https://quay.io/repository/marrusl2/fragments/hashicorp)** (`quay.io/marrusl2/fragments/hashicorp:1.0`) - HashiCorp repository (Vault, Terraform, etc.)
+- **[cis-hardening](https://quay.io/repository/marrusl2/fragments/cis-hardening)** (`quay.io/marrusl2/fragments/cis-hardening:2.1`) - CIS security hardening configurations
+- **[node-exporter](https://quay.io/repository/marrusl2/fragments/node-exporter)** (`quay.io/marrusl2/fragments/node-exporter:1.8.0`) - Prometheus Node Exporter
+- **[nginx](https://quay.io/repository/marrusl2/fragments/nginx)** (`quay.io/marrusl2/fragments/nginx:1.26`) - nginx web server
+- **[awscli-zip](https://quay.io/repository/marrusl2/fragments/awscli-zip)** (`quay.io/marrusl2/fragments/awscli-zip:2.36.16`) - AWS CLI v2 from the vendor's zip, installed into `/usr` rather than `/usr/local`
+- **[nvidia-driver-run](https://quay.io/repository/marrusl2/fragments/nvidia-driver-run)** (`quay.io/marrusl2/fragments/nvidia-driver-run:610.57.04`) - NVIDIA driver from the vendor's `.run` installer, compiled for the image's kernel
 
 `nvidia-driver-run` is the demanding one: a vendor installer that wants a TTY,
 a compiler that must not survive into the finished image, and a kernel module
